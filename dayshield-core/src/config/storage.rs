@@ -25,7 +25,7 @@ use tracing::{debug, info, warn};
 
 use super::models::{
     DhcpConfig, DnsConfig, DnsDomainOverride, DnsHostOverride, FirewallAlias, FirewallRule,
-    Interface, SuricataConfig, SystemConfig,
+    Interface, SuricataConfig, SystemConfig, WireGuardInterface,
 };
 
 /// Default path to the configuration directory.
@@ -304,7 +304,104 @@ impl ConfigStore {
             }
         }
 
+        // WireGuard interface validation.
+        {
+            use crate::config::models::{
+                validate_cidr, validate_endpoint, validate_wg_interface_name, validate_wg_key,
+            };
+            let mut seen_names = std::collections::HashSet::new();
+            for wg in &config.wireguard_interfaces {
+                if !validate_wg_interface_name(&wg.name) {
+                    anyhow::bail!(
+                        "WireGuard interface has invalid name {:?} \
+                         (must be 1–15 alphanumeric/[-_.] chars)",
+                        wg.name
+                    );
+                }
+                if !seen_names.insert(wg.name.clone()) {
+                    anyhow::bail!("Duplicate WireGuard interface name {:?}", wg.name);
+                }
+                if !validate_wg_key(&wg.private_key) {
+                    anyhow::bail!(
+                        "WireGuard interface {:?} has an invalid private_key \
+                         (must be a 44-char base64 string)",
+                        wg.name
+                    );
+                }
+                if !validate_wg_key(&wg.public_key) {
+                    anyhow::bail!(
+                        "WireGuard interface {:?} has an invalid public_key \
+                         (must be a 44-char base64 string)",
+                        wg.name
+                    );
+                }
+                for addr in &wg.addresses {
+                    if !validate_cidr(addr) {
+                        anyhow::bail!(
+                            "WireGuard interface {:?} has invalid address CIDR {:?}",
+                            wg.name,
+                            addr
+                        );
+                    }
+                }
+                for peer in &wg.peers {
+                    if !validate_wg_key(&peer.public_key) {
+                        anyhow::bail!(
+                            "WireGuard interface {:?} peer {:?} has an invalid public_key",
+                            wg.name,
+                            peer.name
+                        );
+                    }
+                    if let Some(psk) = &peer.preshared_key {
+                        if !validate_wg_key(psk) {
+                            anyhow::bail!(
+                                "WireGuard interface {:?} peer {:?} has an invalid preshared_key",
+                                wg.name,
+                                peer.name
+                            );
+                        }
+                    }
+                    for cidr in &peer.allowed_ips {
+                        if !validate_cidr(cidr) {
+                            anyhow::bail!(
+                                "WireGuard interface {:?} peer {:?} has invalid allowed_ip CIDR {:?}",
+                                wg.name,
+                                peer.name,
+                                cidr
+                            );
+                        }
+                    }
+                    if let Some(ep) = &peer.endpoint {
+                        if !validate_endpoint(ep) {
+                            anyhow::bail!(
+                                "WireGuard interface {:?} peer {:?} has invalid endpoint {:?}",
+                                wg.name,
+                                peer.name,
+                                ep
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
+    }
+
+    /// Return the WireGuard interface list from the persisted config.
+    pub fn load_wireguard_interfaces(&self) -> Result<Vec<WireGuardInterface>> {
+        Ok(self.load()?.wireguard_interfaces)
+    }
+
+    /// Atomically replace the WireGuard interface list in the persisted config.
+    ///
+    /// Loads the current config, replaces `wireguard_interfaces`, validates,
+    /// then calls [`Self::save_with_rollback`] to write atomically with rollback
+    /// on post-write validation failure.
+    pub fn save_wireguard_interfaces(&self, interfaces: Vec<WireGuardInterface>) -> Result<()> {
+        let mut config = self.load()?;
+        config.wireguard_interfaces = interfaces;
+        self.save_with_rollback(&config)
     }
 
     /// Return only the interface slice from the persisted config.

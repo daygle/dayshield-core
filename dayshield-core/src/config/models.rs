@@ -661,6 +661,123 @@ pub fn validate_dns_domain(domain: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// WireGuard VPN
+// ---------------------------------------------------------------------------
+
+/// A WireGuard VPN interface (server-side).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WireGuardInterface {
+    /// OS-level interface name, e.g. `wg0`.
+    pub name: String,
+    /// Interface private key (base64-encoded).
+    pub private_key: String,
+    /// Interface public key (base64-encoded, derived from private key).
+    pub public_key: String,
+    /// UDP port the interface listens on.
+    pub listen_port: u16,
+    /// Tunnel address(es) in CIDR notation, e.g. `["10.0.0.1/24"]`.
+    pub addresses: Vec<String>,
+    /// Configured peers for this interface.
+    pub peers: Vec<WireGuardPeer>,
+    /// Whether this interface should be active.
+    pub enabled: bool,
+}
+
+/// A WireGuard peer connected to a [`WireGuardInterface`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WireGuardPeer {
+    /// Human-readable name for this peer.
+    pub name: String,
+    /// Peer public key (base64-encoded).
+    pub public_key: String,
+    /// Optional pre-shared key for additional symmetric encryption.
+    pub preshared_key: Option<String>,
+    /// IP ranges that will be routed through this peer tunnel.
+    pub allowed_ips: Vec<String>,
+    /// Optional remote endpoint in `host:port` format.
+    pub endpoint: Option<String>,
+    /// Keep-alive interval in seconds; `None` disables persistent keep-alive.
+    pub persistent_keepalive: Option<u16>,
+}
+
+// ---------------------------------------------------------------------------
+// Validation helpers — WireGuard
+// ---------------------------------------------------------------------------
+
+/// Return `true` if `name` is a valid WireGuard interface name.
+///
+/// WireGuard interface names follow the same rules as Linux interface names
+/// (see [`is_valid_interface_name`]) and conventionally start with `wg`.
+pub fn validate_wg_interface_name(name: &str) -> bool {
+    is_valid_interface_name(name)
+}
+
+/// Return `true` if `key` is a syntactically valid WireGuard base64 key.
+///
+/// A WireGuard key is a 32-byte value encoded as base64, producing exactly
+/// 44 characters (including the trailing `=` padding).
+pub fn validate_wg_key(key: &str) -> bool {
+    if key.len() != 44 {
+        return false;
+    }
+    // Standard base64 alphabet plus '=' padding only at the end.
+    let body = &key[..43];
+    let last = &key[43..44];
+    body.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/')
+        && last == "="
+}
+
+/// Return `true` if `port` is a valid non-zero port number (1–65535).
+pub fn validate_port(port: u16) -> bool {
+    port > 0
+}
+
+/// Return `true` if `cidr` is a valid IPv4 or IPv6 CIDR string.
+///
+/// Delegates to [`is_valid_cidr`].
+pub fn validate_cidr(cidr: &str) -> bool {
+    is_valid_cidr(cidr)
+}
+
+/// Return `true` if `endpoint` is a syntactically valid `host:port` pair.
+///
+/// Accepts:
+/// - IPv4 address with port: `"1.2.3.4:51820"`
+/// - Hostname with port: `"vpn.example.com:51820"`
+/// - IPv6 address with port (bracketed): `"[::1]:51820"`
+pub fn validate_endpoint(endpoint: &str) -> bool {
+    // IPv6 bracketed form: "[addr]:port"
+    if endpoint.starts_with('[') {
+        if let Some(bracket_end) = endpoint.find(']') {
+            let addr = &endpoint[1..bracket_end];
+            let rest = &endpoint[bracket_end + 1..];
+            if let Some(port_str) = rest.strip_prefix(':') {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    return port > 0 && addr.parse::<std::net::Ipv6Addr>().is_ok();
+                }
+            }
+        }
+        return false;
+    }
+
+    // host:port — split on the LAST colon to allow IPv4 addresses.
+    if let Some(colon) = endpoint.rfind(':') {
+        let host = &endpoint[..colon];
+        let port_str = &endpoint[colon + 1..];
+        if let Ok(port) = port_str.parse::<u16>() {
+            if port == 0 || host.is_empty() {
+                return false;
+            }
+            // Accept bare IP addresses or valid hostnames.
+            return host.parse::<std::net::IpAddr>().is_ok() || is_valid_domain(host);
+        }
+    }
+
+    false
+}
+
+// ---------------------------------------------------------------------------
 // Top-level system config
 // ---------------------------------------------------------------------------
 
@@ -675,6 +792,9 @@ pub struct SystemConfig {
     pub dns: Option<DnsConfig>,
     pub dhcp: Option<DhcpConfig>,
     pub vpn_tunnels: Vec<VpnTunnel>,
+    /// WireGuard VPN interfaces managed by DayShield.
+    #[serde(default)]
+    pub wireguard_interfaces: Vec<WireGuardInterface>,
     pub acme: Option<AcmeConfig>,
     pub crowdsec_policies: Vec<CrowdsecPolicy>,
     pub suricata: Option<SuricataConfig>,

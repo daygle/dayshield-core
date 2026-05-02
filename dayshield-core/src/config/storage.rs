@@ -123,7 +123,7 @@ impl ConfigStore {
 
         let json = serde_json::to_string_pretty(config).context("Failed to serialise config")?;
 
-        let tmp_path = self.config_path.with_extension(TMP_SUFFIX);
+        let tmp_path = PathBuf::from(format!("{}{}", self.config_path.display(), TMP_SUFFIX));
         std::fs::write(&tmp_path, &json)
             .with_context(|| format!("Failed to write temp file {}", tmp_path.display()))?;
 
@@ -147,7 +147,7 @@ impl ConfigStore {
     /// 3. Re-load and re-validate the written file.
     /// 4. If step 3 fails, restore the backup and return the error.
     pub fn save_with_rollback(&self, config: &SystemConfig) -> Result<()> {
-        let bak_path = self.config_path.with_extension(BAK_SUFFIX);
+        let bak_path = PathBuf::from(format!("{}{}", self.config_path.display(), BAK_SUFFIX));
 
         // Step 1 — backup.
         if self.config_path.exists() {

@@ -1,5 +1,4 @@
 //! DayShield Core — backend orchestrator entry point.
-//!
 // Suppress dead-code warnings for the many placeholder engine functions and
 // config types that are defined here as stubs and will be wired up in future
 // work.  This is intentional for an initial scaffold.

@@ -88,9 +88,7 @@ pub async fn create_interface(
 
     if let Some(mtu) = iface.mtu {
         if !is_valid_mtu(mtu) {
-            return Err(InterfaceError::ApplyFailed(format!(
-                "invalid MTU {mtu}: must be ≥ 68"
-            )));
+            return Err(InterfaceError::InvalidMtu(mtu));
         }
     }
 

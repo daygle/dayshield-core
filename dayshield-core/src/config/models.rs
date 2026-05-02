@@ -90,10 +90,10 @@ pub fn is_valid_cidr(cidr: &str) -> bool {
         Err(_) => return false,
     };
 
-    if let Ok(_) = addr_str.parse::<std::net::Ipv4Addr>() {
+    if addr_str.parse::<std::net::Ipv4Addr>().is_ok() {
         return prefix_len <= 32;
     }
-    if let Ok(_) = addr_str.parse::<std::net::Ipv6Addr>() {
+    if addr_str.parse::<std::net::Ipv6Addr>().is_ok() {
         return prefix_len <= 128;
     }
     false

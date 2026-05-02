@@ -34,6 +34,10 @@ pub enum InterfaceError {
     #[error("invalid interface name: {0:?}")]
     InvalidName(String),
 
+    /// The MTU value is outside the acceptable range.
+    #[error("invalid MTU value: {0}")]
+    InvalidMtu(u16),
+
     /// A CIDR address string is malformed.
     #[error("invalid CIDR address: {0:?}")]
     InvalidCIDR(String),
@@ -57,9 +61,9 @@ impl axum::response::IntoResponse for InterfaceError {
         use axum::Json;
 
         let status = match &self {
-            InterfaceError::InvalidName(_) | InterfaceError::InvalidCIDR(_) => {
-                StatusCode::UNPROCESSABLE_ENTITY
-            }
+            InterfaceError::InvalidName(_)
+            | InterfaceError::InvalidMtu(_)
+            | InterfaceError::InvalidCIDR(_) => StatusCode::UNPROCESSABLE_ENTITY,
             InterfaceError::ApplyFailed(_)
             | InterfaceError::KernelQueryFailed(_)
             | InterfaceError::StorageError(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -243,8 +247,9 @@ pub async fn apply_interface(config: &Interface) -> Result<(), InterfaceError> {
         }
 
         if config.dhcp4 {
+            // TODO(#TBD): spawn / signal dhclient for the interface once
+            // dhclient integration is implemented in the DHCP engine module.
             info!(name = %name, "interfaces: DHCP4 requested (dhclient integration pending)");
-            // TODO: spawn / signal dhclient for the interface.
         } else {
             for cidr in &config.addresses {
                 if !is_valid_cidr(cidr) {

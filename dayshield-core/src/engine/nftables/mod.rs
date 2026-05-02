@@ -285,6 +285,17 @@ pub async fn flush_rules() -> Result<(), NftError> {
 /// Cache directory for URL-table alias contents.
 const ALIAS_CACHE_DIR: &str = "/var/lib/dayshield/aliases";
 
+/// Parse a URL-table response body or cached file into a list of IP/CIDR entries.
+///
+/// Lines starting with `#` (after stripping inline comments) are ignored, as
+/// are blank lines.
+fn parse_url_table_entries(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|l| l.split('#').next().unwrap_or("").trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
 /// Fetch and cache all URL-table aliases, returning a map of alias name →
 /// resolved IP/CIDR list.
 ///
@@ -317,14 +328,11 @@ async fn resolve_url_tables(aliases: &[FirewallAlias]) -> HashMap<String, Vec<St
                 Ok(resp) if resp.status().is_success() => {
                     match resp.text().await {
                         Ok(body) => {
-                            let fetched: Vec<String> = body
-                                .lines()
-                                .map(|l| l.split('#').next().unwrap_or("").trim().to_string())
-                                .filter(|l| !l.is_empty())
-                                .collect();
-                            // Write cache file.
+                            let fetched = parse_url_table_entries(&body);
+                            // Write cleaned entries to the cache file.
                             let cache_path = cache_dir.join(format!("{}.cache", alias.name));
-                            if let Err(e) = std::fs::write(&cache_path, body.as_bytes()) {
+                            let cache_content = fetched.join("\n");
+                            if let Err(e) = std::fs::write(&cache_path, cache_content.as_bytes()) {
                                 warn!(
                                     alias = %alias.name,
                                     path = %cache_path.display(),
@@ -350,11 +358,7 @@ async fn resolve_url_tables(aliases: &[FirewallAlias]) -> HashMap<String, Vec<St
                     // Try to use cached data as fallback.
                     let cache_path = cache_dir.join(format!("{}.cache", alias.name));
                     if let Ok(cached) = std::fs::read_to_string(&cache_path) {
-                        let fallback: Vec<String> = cached
-                            .lines()
-                            .map(|l| l.split('#').next().unwrap_or("").trim().to_string())
-                            .filter(|l| !l.is_empty())
-                            .collect();
+                        let fallback = parse_url_table_entries(&cached);
                         warn!(alias = %alias.name, count = fallback.len(),
                               "nftables: using cached URL-table data as fallback");
                         entries.extend(fallback);
@@ -397,11 +401,19 @@ fn alias_set_body(
     match alias.alias_type {
         AliasType::Host => {
             // Determine address family from the first entry.
-            let af = if values[0].contains(':') { "ipv6_addr" } else { "ipv4_addr" };
+            let af = if values.first().map_or(false, |v| v.contains(':')) {
+                "ipv6_addr"
+            } else {
+                "ipv4_addr"
+            };
             body.push_str(&format!("        type {af}\n"));
         }
         AliasType::Network | AliasType::UrlTable => {
-            let af = if values[0].contains(':') { "ipv6_addr" } else { "ipv4_addr" };
+            let af = if values.first().map_or(false, |v| v.contains(':')) {
+                "ipv6_addr"
+            } else {
+                "ipv4_addr"
+            };
             body.push_str(&format!("        type {af}\n"));
             body.push_str("        flags interval\n");
         }

@@ -34,3 +34,11 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # HTTP client (used for URL-table alias fetching)
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+
+# ACME / TLS certificate automation
+instant-acme = { version = "0.7", default-features = false, features = ["hyper-rustls", "ring"] }
+rcgen = { version = "0.13", features = ["pem"] }
+rustls-pki-types = "1"
+base64 = "0.22"
+sha2 = "0.10"
+x509-parser = "0.16"

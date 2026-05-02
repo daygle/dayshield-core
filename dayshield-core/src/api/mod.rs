@@ -1,5 +1,6 @@
 //! API module — assembles the Axum router and registers all route handlers.
 
+mod acme;
 mod aliases;
 mod dhcp;
 mod dns;
@@ -43,6 +44,11 @@ use crate::state::AppState;
 /// - `POST /wireguard/interfaces`                          — create / update a WireGuard interface
 /// - `DELETE /wireguard/interfaces/{name}`                 — remove a WireGuard interface
 /// - `POST /wireguard/interfaces/{name}/generate-keys`     — generate a WireGuard keypair
+/// - `GET  /acme/config`                                   — get ACME / TLS configuration
+/// - `POST /acme/config`                                   — update ACME / TLS configuration
+/// - `POST /acme/issue`                                    — trigger immediate certificate issuance
+/// - `GET  /acme/status`                                   — certificate status and expiry info
+/// - `GET  /.well-known/acme-challenge/{token}`            — serve HTTP-01 challenge token
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         // System
@@ -89,6 +95,16 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/wireguard/interfaces/{name}/generate-keys",
             post(wireguard::generate_keys),
+        )
+        // ACME / TLS
+        .route("/acme/config", get(acme::get_config))
+        .route("/acme/config", post(acme::update_config))
+        .route("/acme/issue", post(acme::issue))
+        .route("/acme/status", get(acme::get_status))
+        // HTTP-01 challenge endpoint (served by the same process)
+        .route(
+            "/.well-known/acme-challenge/{token}",
+            get(acme::serve_http01_challenge),
         )
         .with_state(state)
 }

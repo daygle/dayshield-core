@@ -396,6 +396,16 @@ pub enum AcmeProvider {
     Custom,
 }
 
+/// Which ACME challenge type to use for domain ownership proof.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AcmeChallengeType {
+    /// HTTP-01: serve a token at `http://<domain>/.well-known/acme-challenge/<token>`.
+    Http01,
+    /// DNS-01: create a `_acme-challenge.<domain>` TXT record.
+    Dns01,
+}
+
 /// Configuration for automatic TLS certificate management via ACME.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcmeConfig {
@@ -403,12 +413,74 @@ pub struct AcmeConfig {
     pub provider: AcmeProvider,
     /// ACME account e-mail address.
     pub email: String,
-    /// Directory URL override (used when provider is `Custom`).
+    /// ACME directory URL.  When `None`, the default Let's Encrypt production
+    /// directory (`https://acme-v02.api.letsencrypt.org/directory`) is used.
     pub directory_url: Option<String>,
     /// Domains for which certificates should be issued.
     pub domains: Vec<String>,
     /// Path where issued certificates will be stored.
     pub cert_storage_path: String,
+    /// Which ACME challenge type to use.  Defaults to [`AcmeChallengeType::Http01`].
+    #[serde(default = "default_challenge_type")]
+    pub challenge_type: AcmeChallengeType,
+    /// How often (in hours) the renewal scheduler checks for expiring certs.
+    /// Defaults to 12.
+    #[serde(default = "default_renew_interval_hours")]
+    pub renew_interval_hours: u64,
+}
+
+fn default_challenge_type() -> AcmeChallengeType {
+    AcmeChallengeType::Http01
+}
+
+fn default_renew_interval_hours() -> u64 {
+    12
+}
+
+// ---------------------------------------------------------------------------
+// Validation helpers — ACME
+// ---------------------------------------------------------------------------
+
+/// Return `true` if `email` is a syntactically valid e-mail address.
+///
+/// Checks for the presence of exactly one `@` separating a non-empty local
+/// part and a non-empty domain part that contains at least one `.`.
+pub fn validate_email(email: &str) -> bool {
+    let mut parts = email.splitn(2, '@');
+    let local = match parts.next() {
+        Some(l) if !l.is_empty() => l,
+        _ => return false,
+    };
+    let domain = match parts.next() {
+        Some(d) if !d.is_empty() => d,
+        _ => return false,
+    };
+    // Local part: printable ASCII, no control chars, no `@`
+    if !local.chars().all(|c| c.is_ascii_graphic() && c != '@') {
+        return false;
+    }
+    // Domain part: must look like a valid domain with at least one `.`
+    domain.contains('.') && is_valid_domain(domain)
+}
+
+/// Return `true` if `url` is a valid HTTPS directory URL.
+///
+/// Accepts any string that starts with `https://` and has a non-empty host.
+pub fn validate_directory_url(url: &str) -> bool {
+    let rest = match url.strip_prefix("https://") {
+        Some(r) => r,
+        None => return false,
+    };
+    let host = rest.split(&['/', '?']).next().unwrap_or("");
+    !host.is_empty()
+}
+
+/// Return `true` for any [`AcmeChallengeType`] value.
+///
+/// All variants of the typed enum are valid; this helper exists so callers
+/// have a uniform `validate_*` surface.
+pub fn validate_challenge_type(_challenge: &AcmeChallengeType) -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -795,6 +867,8 @@ pub struct SystemConfig {
     /// WireGuard VPN interfaces managed by DayShield.
     #[serde(default)]
     pub wireguard_interfaces: Vec<WireGuardInterface>,
+    /// ACME / TLS certificate configuration.
+    #[serde(default)]
     pub acme: Option<AcmeConfig>,
     pub crowdsec_policies: Vec<CrowdsecPolicy>,
     pub suricata: Option<SuricataConfig>,
@@ -807,4 +881,104 @@ pub struct SystemConfig {
     /// Per-domain DNS forwarding overrides.
     #[serde(default)]
     pub dns_domain_overrides: Vec<DnsDomainOverride>,
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // validate_email
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_email_valid_cases() {
+        assert!(validate_email("admin@example.com"));
+        assert!(validate_email("user+tag@sub.domain.org"));
+        assert!(validate_email("a@b.c"));
+    }
+
+    #[test]
+    fn validate_email_invalid_cases() {
+        assert!(!validate_email(""));
+        assert!(!validate_email("notanemail"));
+        assert!(!validate_email("@example.com"));
+        assert!(!validate_email("user@"));
+        assert!(!validate_email("user@nodot"));
+        assert!(!validate_email("user@.com"));
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_directory_url
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_directory_url_valid_cases() {
+        assert!(validate_directory_url(
+            "https://acme-v02.api.letsencrypt.org/directory"
+        ));
+        assert!(validate_directory_url("https://acme.example.com/"));
+        assert!(validate_directory_url("https://host.example.com"));
+    }
+
+    #[test]
+    fn validate_directory_url_invalid_cases() {
+        assert!(!validate_directory_url("http://insecure.example.com/dir"));
+        assert!(!validate_directory_url("ftp://example.com"));
+        assert!(!validate_directory_url("not-a-url"));
+        assert!(!validate_directory_url(""));
+        assert!(!validate_directory_url("https://"));
+    }
+
+    // -----------------------------------------------------------------------
+    // AcmeChallengeType serde
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn challenge_type_serde_roundtrip() {
+        let json_http = serde_json::to_string(&AcmeChallengeType::Http01).unwrap();
+        assert_eq!(json_http, "\"http01\"");
+        let rt: AcmeChallengeType = serde_json::from_str(&json_http).unwrap();
+        assert_eq!(rt, AcmeChallengeType::Http01);
+
+        let json_dns = serde_json::to_string(&AcmeChallengeType::Dns01).unwrap();
+        assert_eq!(json_dns, "\"dns01\"");
+        let rt2: AcmeChallengeType = serde_json::from_str(&json_dns).unwrap();
+        assert_eq!(rt2, AcmeChallengeType::Dns01);
+    }
+
+    // -----------------------------------------------------------------------
+    // AcmeConfig defaults
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn acme_config_default_challenge_type_is_http01() {
+        // Deserialise a config that omits challenge_type — the default should apply.
+        let json = r#"{
+            "enabled": true,
+            "provider": "letsencrypt",
+            "email": "user@example.com",
+            "domains": ["example.com"],
+            "cert_storage_path": "/tmp/certs"
+        }"#;
+        let cfg: AcmeConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.challenge_type, AcmeChallengeType::Http01);
+    }
+
+    #[test]
+    fn acme_config_default_renew_interval_is_12() {
+        let json = r#"{
+            "enabled": false,
+            "provider": "letsencrypt",
+            "email": "user@example.com",
+            "domains": [],
+            "cert_storage_path": "/tmp/certs"
+        }"#;
+        let cfg: AcmeConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.renew_interval_hours, 12);
+    }
 }

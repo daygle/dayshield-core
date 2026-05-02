@@ -12,6 +12,7 @@ use crate::config::{
     models::{FirewallRule, Interface},
     ConfigStore,
 };
+use crate::engine::acme::ChallengeStore;
 
 /// Known DayShield service names used as health-map keys.
 pub const SVC_NFTABLES: &str = "nftables";
@@ -20,6 +21,7 @@ pub const SVC_DNS: &str = "dns";
 pub const SVC_DHCP: &str = "dhcp";
 pub const SVC_VPN: &str = "vpn";
 pub const SVC_CROWDSEC: &str = "crowdsec";
+pub const SVC_ACME: &str = "acme";
 
 /// Shared application state.
 ///
@@ -34,6 +36,8 @@ pub struct AppState {
     pub firewall_rules: RwLock<Vec<FirewallRule>>,
     /// Persistent configuration store.
     pub config_store: ConfigStore,
+    /// In-process store for pending HTTP-01 ACME challenge tokens.
+    pub acme_challenge_store: ChallengeStore,
 }
 
 impl AppState {
@@ -50,6 +54,7 @@ impl AppState {
             SVC_DHCP,
             SVC_VPN,
             SVC_CROWDSEC,
+            SVC_ACME,
         ] {
             services.insert(name.to_string(), false);
         }
@@ -59,6 +64,7 @@ impl AppState {
             interfaces: RwLock::new(vec![]),
             firewall_rules: RwLock::new(vec![]),
             config_store: ConfigStore::new(),
+            acme_challenge_store: ChallengeStore::default(),
         }
     }
 

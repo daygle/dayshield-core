@@ -24,8 +24,8 @@ use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
 use super::models::{
-    DhcpConfig, DnsConfig, DnsDomainOverride, DnsHostOverride, FirewallAlias, FirewallRule,
-    Interface, SuricataConfig, SystemConfig, WireGuardInterface,
+    AcmeConfig, DhcpConfig, DnsConfig, DnsDomainOverride, DnsHostOverride, FirewallAlias,
+    FirewallRule, Interface, SuricataConfig, SystemConfig, WireGuardInterface,
 };
 
 /// Default path to the configuration directory.
@@ -385,6 +385,42 @@ impl ConfigStore {
             }
         }
 
+        // ACME config validation.
+        if let Some(acme) = &config.acme {
+            use crate::config::models::{validate_directory_url, validate_email, is_valid_domain};
+            if acme.enabled {
+                if !validate_email(&acme.email) {
+                    anyhow::bail!(
+                        "ACME config has an invalid email address {:?}",
+                        acme.email
+                    );
+                }
+                if acme.domains.is_empty() {
+                    anyhow::bail!("ACME config must specify at least one domain");
+                }
+                for domain in &acme.domains {
+                    if !is_valid_domain(domain) {
+                        anyhow::bail!("ACME config has an invalid domain {:?}", domain);
+                    }
+                }
+                if acme.cert_storage_path.is_empty() {
+                    anyhow::bail!("ACME config cert_storage_path must not be empty");
+                }
+                if acme.renew_interval_hours == 0 {
+                    anyhow::bail!("ACME config renew_interval_hours must be > 0");
+                }
+                if let Some(url) = &acme.directory_url {
+                    if !validate_directory_url(url) {
+                        anyhow::bail!(
+                            "ACME config has an invalid directory_url {:?} \
+                             (must start with https://)",
+                            url
+                        );
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -401,6 +437,24 @@ impl ConfigStore {
     pub fn save_wireguard_interfaces(&self, interfaces: Vec<WireGuardInterface>) -> Result<()> {
         let mut config = self.load()?;
         config.wireguard_interfaces = interfaces;
+        self.save_with_rollback(&config)
+    }
+
+    /// Return the ACME configuration from the persisted config.
+    ///
+    /// Returns `None` if no ACME configuration has been saved yet.
+    pub fn load_acme_config(&self) -> Result<Option<AcmeConfig>> {
+        Ok(self.load()?.acme)
+    }
+
+    /// Atomically replace the ACME configuration in the persisted config.
+    ///
+    /// Loads the current config, replaces `acme`, validates, then calls
+    /// [`Self::save_with_rollback`] to write atomically with rollback on
+    /// post-write validation failure.
+    pub fn save_acme_config(&self, acme: AcmeConfig) -> Result<()> {
+        let mut config = self.load()?;
+        config.acme = Some(acme);
         self.save_with_rollback(&config)
     }
 
@@ -1201,6 +1255,181 @@ mod tests {
             }],
         });
         assert!(store.validate(&cfg).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // ACME config storage round-trips
+    // -----------------------------------------------------------------------
+
+    fn make_acme_config() -> crate::config::models::AcmeConfig {
+        use crate::config::models::{AcmeChallengeType, AcmeConfig, AcmeProvider};
+        AcmeConfig {
+            enabled: true,
+            provider: AcmeProvider::LetsEncrypt,
+            email: "admin@example.com".into(),
+            directory_url: None,
+            domains: vec!["example.com".into(), "www.example.com".into()],
+            cert_storage_path: "/tmp/test-certs".into(),
+            challenge_type: AcmeChallengeType::Http01,
+            renew_interval_hours: 12,
+        }
+    }
+
+    #[test]
+    fn load_acme_config_returns_none_when_missing() {
+        let dir = std::env::temp_dir().join(format!("ds-acme-missing-{}", uuid::Uuid::new_v4()));
+        let store = ConfigStore::with_dir(&dir);
+        let result = store.load_acme_config().unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn save_and_load_acme_config_roundtrip() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        store.save_acme_config(make_acme_config()).unwrap();
+
+        let loaded = store.load_acme_config().unwrap().expect("should have config");
+        assert!(loaded.enabled);
+        assert_eq!(loaded.email, "admin@example.com");
+        assert_eq!(loaded.domains.len(), 2);
+        assert_eq!(loaded.renew_interval_hours, 12);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_invalid_acme_email() {
+        use crate::config::models::{AcmeChallengeType, AcmeConfig, AcmeProvider};
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        cfg.acme = Some(AcmeConfig {
+            enabled: true,
+            provider: AcmeProvider::LetsEncrypt,
+            email: "not-an-email".into(),
+            directory_url: None,
+            domains: vec!["example.com".into()],
+            cert_storage_path: "/tmp/certs".into(),
+            challenge_type: AcmeChallengeType::Http01,
+            renew_interval_hours: 12,
+        });
+        assert!(store.validate(&cfg).is_err(), "invalid email must be rejected");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_empty_acme_domains() {
+        use crate::config::models::{AcmeChallengeType, AcmeConfig, AcmeProvider};
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        cfg.acme = Some(AcmeConfig {
+            enabled: true,
+            provider: AcmeProvider::LetsEncrypt,
+            email: "admin@example.com".into(),
+            directory_url: None,
+            domains: vec![],
+            cert_storage_path: "/tmp/certs".into(),
+            challenge_type: AcmeChallengeType::Http01,
+            renew_interval_hours: 12,
+        });
+        assert!(store.validate(&cfg).is_err(), "empty domains must be rejected");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_invalid_acme_domain() {
+        use crate::config::models::{AcmeChallengeType, AcmeConfig, AcmeProvider};
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        cfg.acme = Some(AcmeConfig {
+            enabled: true,
+            provider: AcmeProvider::LetsEncrypt,
+            email: "admin@example.com".into(),
+            directory_url: None,
+            domains: vec!["-invalid.domain".into()],
+            cert_storage_path: "/tmp/certs".into(),
+            challenge_type: AcmeChallengeType::Http01,
+            renew_interval_hours: 12,
+        });
+        assert!(store.validate(&cfg).is_err(), "invalid domain must be rejected");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_invalid_acme_directory_url() {
+        use crate::config::models::{AcmeChallengeType, AcmeConfig, AcmeProvider};
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        cfg.acme = Some(AcmeConfig {
+            enabled: true,
+            provider: AcmeProvider::Custom,
+            email: "admin@example.com".into(),
+            directory_url: Some("http://insecure.example.com/dir".into()),
+            domains: vec!["example.com".into()],
+            cert_storage_path: "/tmp/certs".into(),
+            challenge_type: AcmeChallengeType::Http01,
+            renew_interval_hours: 12,
+        });
+        assert!(store.validate(&cfg).is_err(), "http:// directory_url must be rejected");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_accepts_valid_acme_config_with_dns01() {
+        use crate::config::models::{AcmeChallengeType, AcmeConfig, AcmeProvider};
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        cfg.acme = Some(AcmeConfig {
+            enabled: true,
+            provider: AcmeProvider::LetsEncrypt,
+            email: "user@example.org".into(),
+            directory_url: Some("https://acme-staging-v02.api.letsencrypt.org/directory".into()),
+            domains: vec!["example.org".into()],
+            cert_storage_path: "/var/lib/dayshield/certs".into(),
+            challenge_type: AcmeChallengeType::Dns01,
+            renew_interval_hours: 24,
+        });
+        assert!(store.validate(&cfg).is_ok(), "valid ACME config should pass validation");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_disabled_acme_skips_field_checks() {
+        use crate::config::models::{AcmeChallengeType, AcmeConfig, AcmeProvider};
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        // Deliberately invalid fields but enabled=false — validation must pass.
+        let mut cfg = SystemConfig::default();
+        cfg.acme = Some(AcmeConfig {
+            enabled: false,
+            provider: AcmeProvider::LetsEncrypt,
+            email: "not-an-email".into(),
+            directory_url: None,
+            domains: vec![],
+            cert_storage_path: "".into(),
+            challenge_type: AcmeChallengeType::Http01,
+            renew_interval_hours: 0,
+        });
+        assert!(store.validate(&cfg).is_ok(), "disabled ACME must not be validated");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

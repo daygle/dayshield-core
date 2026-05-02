@@ -13,7 +13,7 @@ use tracing::{debug, info, warn};
 
 use super::model::NotifyEvent;
 use super::rate_limit::RateLimiter;
-use super::smtp::{send_email, NotifyError};
+use super::smtp::send_email;
 use crate::config::models::NotifyConfig;
 use crate::state::AppState;
 
@@ -134,9 +134,6 @@ pub async fn start_notify_worker(state: Arc<AppState>, mut rx: mpsc::Receiver<No
                     let (subject, body) = compose_digest(&events);
                     match send_email(&cfg, &subject, &body).await {
                         Ok(()) => info!(count = events.len(), "Digest notification sent"),
-                        Err(NotifyError::SmtpError(ref e)) => {
-                            warn!(error = %e, "Failed to send digest email");
-                        }
                         Err(e) => warn!(error = %e, "Failed to send digest email"),
                     }
                 }

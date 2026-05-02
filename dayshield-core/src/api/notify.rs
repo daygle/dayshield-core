@@ -172,12 +172,26 @@ pub async fn send_test(
 // ---------------------------------------------------------------------------
 
 /// Return the list of available notification categories.
+///
+/// Category names match the `NotifyCategory` serialization (snake_case).
 pub async fn get_categories() -> impl IntoResponse {
     let categories = vec![
-        serde_json::json!({ "name": "suricata",  "description": "Suricata IDS/IPS alerts" }),
-        serde_json::json!({ "name": "crowd_sec", "description": "CrowdSec remediation decisions" }),
-        serde_json::json!({ "name": "acme",      "description": "ACME certificate events" }),
-        serde_json::json!({ "name": "system",    "description": "System-level alerts" }),
+        serde_json::json!({
+            "name": serde_json::to_value(NotifyCategory::Suricata).unwrap_or_default(),
+            "description": "Suricata IDS/IPS alerts"
+        }),
+        serde_json::json!({
+            "name": serde_json::to_value(NotifyCategory::CrowdSec).unwrap_or_default(),
+            "description": "CrowdSec remediation decisions"
+        }),
+        serde_json::json!({
+            "name": serde_json::to_value(NotifyCategory::Acme).unwrap_or_default(),
+            "description": "ACME certificate events"
+        }),
+        serde_json::json!({
+            "name": serde_json::to_value(NotifyCategory::System).unwrap_or_default(),
+            "description": "System-level alerts"
+        }),
     ];
     Json(categories)
 }

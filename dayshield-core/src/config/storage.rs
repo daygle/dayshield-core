@@ -644,6 +644,23 @@ impl ConfigStore {
         self.save_with_rollback(&config)
     }
 
+    /// Return the system settings from the persisted config.
+    ///
+    /// Returns defaults when no settings have been saved yet.
+    pub fn load_system_settings(&self) -> Result<super::models::SystemSettings> {
+        Ok(self.load()?.system_settings.unwrap_or_default())
+    }
+
+    /// Atomically replace the system settings in the persisted config.
+    ///
+    /// Loads the current config, replaces `system_settings`, validates, then
+    /// calls [`Self::save_with_rollback`] to write atomically.
+    pub fn save_system_settings(&self, settings: super::models::SystemSettings) -> Result<()> {
+        let mut config = self.load()?;
+        config.system_settings = Some(settings);
+        self.save_with_rollback(&config)
+    }
+
     /// Validate and atomically write config to disk.
     ///
     /// The write is performed by:

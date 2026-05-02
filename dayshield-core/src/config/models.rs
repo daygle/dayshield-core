@@ -1044,6 +1044,60 @@ pub fn validate_notify_config(cfg: &NotifyConfig) -> Result<(), String> {
 // Top-level system config
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// System settings
+// ---------------------------------------------------------------------------
+
+/// Host-level system settings (hostname, timezone, NTP, SSH, web UI port).
+///
+/// Stored as a separate `system_settings` key inside the root JSON file so
+/// they can be read/written independently without touching the rest of the
+/// config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemSettings {
+    /// Machine hostname (e.g. `"dayshield-fw"`).
+    pub hostname: String,
+    /// IANA timezone identifier (e.g. `"Europe/London"`).
+    pub timezone: String,
+    /// NTP server addresses.
+    #[serde(default = "default_ntp_servers")]
+    pub ntp_servers: Vec<String>,
+    /// Additional DNS resolver addresses for the host itself (not for client devices).
+    #[serde(default)]
+    pub dns_servers: Vec<String>,
+    /// Whether the SSH daemon is enabled.
+    #[serde(default = "default_ssh_enabled")]
+    pub ssh_enabled: bool,
+    /// TCP port for the SSH daemon.
+    #[serde(default = "default_ssh_port")]
+    pub ssh_port: u16,
+    /// TCP port for the DayShield web UI / REST API.
+    #[serde(default = "default_web_port")]
+    pub web_port: u16,
+}
+
+fn default_ntp_servers() -> Vec<String> {
+    vec!["0.pool.ntp.org".into(), "1.pool.ntp.org".into()]
+}
+fn default_ssh_enabled() -> bool { true }
+fn default_ssh_port()    -> u16  { 22 }
+fn default_web_port()    -> u16  { 443 }
+
+impl Default for SystemSettings {
+    fn default() -> Self {
+        Self {
+            hostname:    "dayshield".into(),
+            timezone:    "UTC".into(),
+            ntp_servers: default_ntp_servers(),
+            dns_servers: vec![],
+            ssh_enabled: default_ssh_enabled(),
+            ssh_port:    default_ssh_port(),
+            web_port:    default_web_port(),
+        }
+    }
+}
+
 /// Root configuration object that is persisted to disk and loaded on startup.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SystemConfig {
@@ -1076,4 +1130,7 @@ pub struct SystemConfig {
     /// Email notification configuration.
     #[serde(default)]
     pub notify: Option<NotifyConfig>,
+    /// Host-level system settings (hostname, timezone, NTP, SSH).
+    #[serde(default)]
+    pub system_settings: Option<SystemSettings>,
 }

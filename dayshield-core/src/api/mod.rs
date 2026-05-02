@@ -4,6 +4,7 @@ mod acme;
 mod aliases;
 mod backup;
 mod crowdsec;
+mod dashboard;
 mod dhcp;
 mod dns;
 mod dns_overrides;
@@ -19,7 +20,7 @@ mod wireguard;
 use std::sync::Arc;
 
 use axum::{
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Router,
 };
 
@@ -29,6 +30,10 @@ use crate::state::AppState;
 ///
 /// Route overview:
 /// - `GET  /system/status`                                 — overall system health and version information
+/// - `GET  /system/config`                                 — host-level settings (hostname, timezone, NTP…)
+/// - `PUT  /system/config`                                 — update host-level settings
+/// - `POST /system/reboot`                                 — trigger immediate system reboot
+/// - `POST /system/shutdown`                               — trigger immediate system shutdown
 /// - `GET  /interfaces`                                    — list all network interfaces
 /// - `POST /interfaces`                                    — create / update a network interface
 /// - `GET  /firewall/rules`                                — list firewall rules
@@ -71,10 +76,23 @@ use crate::state::AppState;
 /// - `POST /notify/config`                                 — update notification configuration
 /// - `POST /notify/test`                                   — send a test notification email
 /// - `GET  /notify/categories`                             — list available notification categories
+/// - `GET  /dashboard/system`                              — host resource usage summary
+/// - `GET  /dashboard/network`                             — WAN/LAN network overview
+/// - `GET  /dashboard/security`                            — firewall, Suricata, CrowdSec summary
+/// - `GET  /dashboard/acme`                                — ACME certificate expiry summary
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         // System
         .route("/system/status", get(system::get_status))
+        .route("/system/config", get(system::get_config))
+        .route("/system/config", put(system::update_config))
+        .route("/system/reboot", post(system::reboot))
+        .route("/system/shutdown", post(system::shutdown))
+        // Dashboard
+        .route("/dashboard/system", get(dashboard::get_system_status))
+        .route("/dashboard/network", get(dashboard::get_network_status))
+        .route("/dashboard/security", get(dashboard::get_security_status))
+        .route("/dashboard/acme", get(dashboard::get_acme_status))
         // Interfaces
         .route("/interfaces", get(interfaces::list_interfaces))
         .route("/interfaces", post(interfaces::create_interface))

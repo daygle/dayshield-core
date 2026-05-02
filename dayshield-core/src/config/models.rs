@@ -104,6 +104,29 @@ pub fn is_valid_mtu(mtu: u16) -> bool {
     mtu >= 68
 }
 
+/// Return `true` for any [`Action`] value.
+///
+/// All variants of the typed enum are valid; this helper exists so callers
+/// have a uniform `is_valid_*` surface alongside the other validators.
+pub fn is_valid_action(_action: &Action) -> bool {
+    true
+}
+
+/// Return `true` for any [`Protocol`] value.
+///
+/// All variants of the typed enum are valid; this helper exists so callers
+/// have a uniform `is_valid_*` surface alongside the other validators.
+pub fn is_valid_protocol(_protocol: &Protocol) -> bool {
+    true
+}
+
+/// Return `true` if `port` is a non-zero port number (1–65 535).
+///
+/// Port 0 is reserved and not meaningful as an explicit filter criterion.
+pub fn is_valid_port(port: u16) -> bool {
+    port > 0
+}
+
 // ---------------------------------------------------------------------------
 // Firewall
 // ---------------------------------------------------------------------------

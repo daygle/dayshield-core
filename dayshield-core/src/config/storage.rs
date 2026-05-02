@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
-use super::models::{Interface, SystemConfig};
+use super::models::{FirewallRule, Interface, SystemConfig};
 
 /// Default path to the configuration directory.
 const DEFAULT_CONFIG_DIR: &str = "/etc/dayshield/config";
@@ -137,6 +137,24 @@ impl ConfigStore {
     pub fn save_interfaces(&self, interfaces: Vec<Interface>) -> Result<()> {
         let mut config = self.load()?;
         config.interfaces = interfaces;
+        self.save_with_rollback(&config)
+    }
+
+    /// Return only the firewall-rule slice from the persisted config.
+    ///
+    /// Equivalent to `load()?.firewall_rules` but makes intent explicit.
+    pub fn load_firewall_rules(&self) -> Result<Vec<FirewallRule>> {
+        Ok(self.load()?.firewall_rules)
+    }
+
+    /// Atomically replace the firewall-rule list in the persisted config.
+    ///
+    /// Loads the current config, replaces `firewall_rules`, validates, then
+    /// calls [`Self::save_with_rollback`] to write the updated config
+    /// atomically with rollback on post-write validation failure.
+    pub fn save_firewall_rules(&self, rules: Vec<FirewallRule>) -> Result<()> {
+        let mut config = self.load()?;
+        config.firewall_rules = rules;
         self.save_with_rollback(&config)
     }
 
@@ -443,6 +461,100 @@ mod tests {
         store.save_with_rollback(&cfg).unwrap();
         let loaded = store.load().unwrap();
         assert_eq!(loaded.hostname, "rollback-test");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Firewall rule storage
+    // -----------------------------------------------------------------------
+
+    fn make_rule(description: &str) -> crate::config::models::FirewallRule {
+        use crate::config::models::{Action, FirewallRule};
+        FirewallRule {
+            id: uuid::Uuid::new_v4(),
+            description: Some(description.into()),
+            priority: 0,
+            source: None,
+            destination: None,
+            protocol: None,
+            source_port: None,
+            destination_port: None,
+            action: Action::Accept,
+            interface: None,
+            log: false,
+        }
+    }
+
+    #[test]
+    fn load_firewall_rules_returns_empty_on_missing_file() {
+        let dir = std::env::temp_dir().join(format!("ds-fw-missing-{}", uuid::Uuid::new_v4()));
+        let store = ConfigStore::with_dir(&dir);
+        let rules = store.load_firewall_rules().unwrap();
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn save_and_load_firewall_rules_roundtrip() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let rules = vec![make_rule("allow-ssh"), make_rule("block-telnet")];
+        store.save_firewall_rules(rules.clone()).unwrap();
+
+        let loaded = store.load_firewall_rules().unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].description.as_deref(), Some("allow-ssh"));
+        assert_eq!(loaded[1].description.as_deref(), Some("block-telnet"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_firewall_rules_preserves_other_config_fields() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        // Save an interface first.
+        store
+            .save_interfaces(vec![make_interface("eth0")])
+            .unwrap();
+
+        // Now save firewall rules — interfaces must still be present.
+        store
+            .save_firewall_rules(vec![make_rule("rule-a")])
+            .unwrap();
+
+        let cfg = store.load().unwrap();
+        assert_eq!(cfg.interfaces.len(), 1, "interfaces must survive firewall save");
+        assert_eq!(cfg.firewall_rules.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_firewall_rules_rejects_negative_priority() {
+        use crate::config::models::{Action, FirewallRule};
+
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let bad_rule = FirewallRule {
+            id: uuid::Uuid::new_v4(),
+            description: None,
+            priority: -1,
+            source: None,
+            destination: None,
+            protocol: None,
+            source_port: None,
+            destination_port: None,
+            action: Action::Drop,
+            interface: None,
+            log: false,
+        };
+
+        let result = store.save_firewall_rules(vec![bad_rule]);
+        assert!(result.is_err(), "negative priority must be rejected");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

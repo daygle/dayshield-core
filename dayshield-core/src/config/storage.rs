@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
-use super::models::{DhcpConfig, DnsConfig, FirewallRule, Interface, SystemConfig};
+use super::models::{DhcpConfig, DnsConfig, FirewallRule, Interface, SuricataConfig, SystemConfig};
 
 /// Default path to the configuration directory.
 const DEFAULT_CONFIG_DIR: &str = "/etc/dayshield/config";
@@ -234,6 +234,14 @@ impl ConfigStore {
             }
         }
 
+        // Suricata config validation.
+        if let Some(suricata) = &config.suricata {
+            use crate::config::models::validate_suricata_config;
+            if let Err(msg) = validate_suricata_config(suricata) {
+                anyhow::bail!("Suricata config is invalid: {msg}");
+            }
+        }
+
         Ok(())
     }
 
@@ -305,6 +313,24 @@ impl ConfigStore {
     pub fn save_dhcp_config(&self, dhcp: DhcpConfig) -> Result<()> {
         let mut config = self.load()?;
         config.dhcp = Some(dhcp);
+        self.save_with_rollback(&config)
+    }
+
+    /// Return the Suricata configuration from the persisted config.
+    ///
+    /// Returns `None` if no Suricata configuration has been saved yet.
+    pub fn load_suricata_config(&self) -> Result<Option<SuricataConfig>> {
+        Ok(self.load()?.suricata)
+    }
+
+    /// Atomically replace the Suricata configuration in the persisted config.
+    ///
+    /// Loads the current config, replaces `suricata`, validates, then calls
+    /// [`Self::save_with_rollback`] to write atomically with rollback on
+    /// post-write validation failure.
+    pub fn save_suricata_config(&self, suricata: SuricataConfig) -> Result<()> {
+        let mut config = self.load()?;
+        config.suricata = Some(suricata);
         self.save_with_rollback(&config)
     }
 

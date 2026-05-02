@@ -25,6 +25,10 @@ use super::model::BackupScheduleConfig;
 /// the main `config.json`).
 const SCHEDULE_FILE: &str = "backup_schedule.json";
 
+/// Fallback config directory used when the path cannot be derived from the
+/// store.  Matches the `DEFAULT_CONFIG_DIR` constant in `config/storage.rs`.
+const CONFIG_DIR_FALLBACK: &str = "/etc/dayshield/config";
+
 /// Load the [`BackupScheduleConfig`] from the config directory derived from
 /// `state`.  Returns `BackupScheduleConfig::default()` if the file does not
 /// exist.
@@ -185,7 +189,7 @@ fn schedule_path(state: &AppState) -> PathBuf {
     let config_path = state.config_store.config_path();
     config_path
         .parent()
-        .unwrap_or(Path::new("/etc/dayshield/config"))
+        .unwrap_or(Path::new(CONFIG_DIR_FALLBACK))
         .join(SCHEDULE_FILE)
 }
 

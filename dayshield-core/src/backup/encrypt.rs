@@ -84,14 +84,13 @@ pub fn decrypt(blob: &[u8], passphrase: &str) -> anyhow::Result<Vec<u8>> {
 /// Derive a 32-byte AES key from `passphrase` and `salt` using two rounds of
 /// SHA-256: `key = SHA256(SHA256(passphrase) ‖ salt)`.
 fn derive_key(passphrase: &str, salt: &[u8]) -> [u8; 32] {
-    let mut h1 = Sha256::digest(passphrase.as_bytes());
+    let h1 = Sha256::digest(passphrase.as_bytes());
     let mut combined = Vec::with_capacity(32 + salt.len());
     combined.extend_from_slice(&h1);
     combined.extend_from_slice(salt);
     let h2 = Sha256::digest(&combined);
-    h1.copy_from_slice(&h2);
     let mut out = [0u8; 32];
-    out.copy_from_slice(&h1);
+    out.copy_from_slice(&h2);
     out
 }
 

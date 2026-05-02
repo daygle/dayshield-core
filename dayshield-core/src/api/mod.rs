@@ -1,5 +1,6 @@
 //! API module — assembles the Axum router and registers all route handlers.
 
+mod acme;
 mod aliases;
 mod crowdsec;
 mod dhcp;
@@ -44,9 +45,13 @@ use crate::state::AppState;
 /// - `POST /wireguard/interfaces`                          — create / update a WireGuard interface
 /// - `DELETE /wireguard/interfaces/{name}`                 — remove a WireGuard interface
 /// - `POST /wireguard/interfaces/{name}/generate-keys`     — generate a WireGuard keypair
-/// - `GET  /crowdsec/config`                                  — get CrowdSec bouncer configuration
-/// - `POST /crowdsec/config`                                  — update CrowdSec bouncer configuration
-/// - `GET  /crowdsec/decisions`                               — list cached CrowdSec decisions
+/// - `GET  /crowdsec/config`                               — get CrowdSec bouncer configuration
+/// - `POST /crowdsec/config`                               — update CrowdSec bouncer configuration
+/// - `GET  /crowdsec/decisions`                            — list cached CrowdSec decisions
+/// - `GET  /acme/config`                                   — get ACME certificate configuration
+/// - `POST /acme/config`                                   — update ACME certificate configuration
+/// - `POST /acme/issue`                                    — trigger certificate issuance / renewal
+/// - `GET  /acme/status`                                   — get certificate status for primary domain
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         // System
@@ -98,5 +103,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/wireguard/interfaces/{name}/generate-keys",
             post(wireguard::generate_keys),
         )
+        // ACME / TLS certificates
+        .route("/acme/config", get(acme::get_config))
+        .route("/acme/config", post(acme::update_config))
+        .route("/acme/issue", post(acme::issue_certificates))
+        .route("/acme/status", get(acme::get_certificate_status))
         .with_state(state)
 }

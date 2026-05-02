@@ -34,3 +34,5 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # HTTP client (used for URL-table alias fetching)
 reqwest = { version = "0.12", features = ["rustls-tls", "json"], default-features = false }
+instant-acme = "0.7"
+rcgen = "0.13"

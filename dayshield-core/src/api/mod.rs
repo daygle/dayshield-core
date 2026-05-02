@@ -2,6 +2,7 @@
 
 mod acme;
 mod aliases;
+mod auth;
 mod backup;
 mod crowdsec;
 mod dashboard;
@@ -21,15 +22,21 @@ mod wireguard;
 use std::sync::Arc;
 
 use axum::{
+    middleware,
     routing::{delete, get, post, put},
     Router,
 };
 
+use crate::auth::middleware::auth_middleware;
 use crate::state::AppState;
 
 /// Build and return the top-level Axum [`Router`] with all registered routes.
 ///
 /// Route overview:
+/// - `POST /auth/login`                                    — authenticate and receive a JWT
+/// - `POST /auth/logout`                                   — log out (client-side token drop)
+/// - `POST /auth/change-password`                          — change the admin password
+/// - `GET  /auth/status`                                   — authentication status
 /// - `GET  /system/status`                                 — overall system health and version information
 /// - `GET  /system/config`                                 — host-level settings (hostname, timezone, NTP…)
 /// - `PUT  /system/config`                                 — update host-level settings
@@ -86,6 +93,11 @@ use crate::state::AppState;
 /// - `GET  /dashboard/acme`                                — ACME certificate expiry summary
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
+        // Auth
+        .route("/auth/login", post(auth::login))
+        .route("/auth/logout", post(auth::logout))
+        .route("/auth/change-password", post(auth::change_password))
+        .route("/auth/status", get(auth::status))
         // System
         .route("/system/status", get(system::get_status))
         .route("/system/config", get(system::get_config))
@@ -173,5 +185,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/ntp/config", get(ntp::get_config))
         .route("/ntp/config", post(ntp::update_config))
         .route("/ntp/status", get(ntp::get_status))
+        // Apply authentication middleware to all routes.
+        .layer(middleware::from_fn(auth_middleware))
         .with_state(state)
 }

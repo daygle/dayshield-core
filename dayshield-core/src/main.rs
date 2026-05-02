@@ -16,6 +16,7 @@ use tokio::net::TcpListener;
 use tracing::info;
 
 mod api;
+mod auth;
 mod backup;
 mod config;
 mod engine;

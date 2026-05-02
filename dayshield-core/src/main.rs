@@ -18,6 +18,7 @@ use tracing::info;
 mod api;
 mod config;
 mod engine;
+mod logs;
 mod logging;
 mod metrics;
 mod state;

@@ -8,6 +8,7 @@ mod dns;
 mod dns_overrides;
 mod firewall;
 mod interfaces;
+mod logs;
 mod suricata;
 mod system;
 mod wireguard;
@@ -52,6 +53,7 @@ use crate::state::AppState;
 /// - `POST /acme/config`                                   — update ACME certificate configuration
 /// - `POST /acme/issue`                                    — trigger certificate issuance / renewal
 /// - `GET  /acme/status`                                   — get certificate status for primary domain
+/// - `GET  /logs/ws`                                       — live log stream (WebSocket upgrade)
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         // System
@@ -108,5 +110,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/acme/config", post(acme::update_config))
         .route("/acme/issue", post(acme::issue_certificates))
         .route("/acme/status", get(acme::get_certificate_status))
+        // Live logs WebSocket
+        .route("/logs/ws", get(logs::ws_handler))
         .with_state(state)
 }

@@ -2,6 +2,7 @@
 
 mod acme;
 mod aliases;
+mod backup;
 mod crowdsec;
 mod dhcp;
 mod dns;
@@ -58,6 +59,13 @@ use crate::state::AppState;
 /// - `GET  /metrics`                                       — latest metrics snapshot (JSON)
 /// - `GET  /metrics/history?seconds=N`                     — last N seconds of metrics history
 /// - `GET  /metrics/ws`                                    — live metrics stream (WebSocket upgrade)
+/// - `POST /backup/create`                                 — create a new backup archive
+/// - `GET  /backup/list`                                   — list backup files on disk
+/// - `GET  /backup/download/{filename}`                    — download a specific backup file
+/// - `DELETE /backup/{filename}`                           — delete a specific backup file
+/// - `POST /backup/restore`                                — restore from an uploaded backup file
+/// - `GET  /backup/scheduler`                              — get the scheduler configuration
+/// - `POST /backup/scheduler`                              — update the scheduler configuration
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         // System
@@ -121,5 +129,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/metrics/history", get(metrics::get_history))
         // Metrics WebSocket streaming
         .route("/metrics/ws", get(metrics::ws_handler))
+        // Backup / restore
+        .route("/backup/create", post(backup::create_handler))
+        .route("/backup/list", get(backup::list_handler))
+        .route("/backup/download/{filename}", get(backup::download_handler))
+        .route("/backup/{filename}", delete(backup::delete_handler))
+        .route("/backup/restore", post(backup::restore_handler))
+        .route("/backup/scheduler", get(backup::get_scheduler_handler))
+        .route("/backup/scheduler", post(backup::update_scheduler_handler))
         .with_state(state)
 }

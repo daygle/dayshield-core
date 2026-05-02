@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
-use super::models::{FirewallRule, Interface, SystemConfig};
+use super::models::{DhcpConfig, DnsConfig, FirewallRule, Interface, SystemConfig};
 
 /// Default path to the configuration directory.
 const DEFAULT_CONFIG_DIR: &str = "/etc/dayshield/config";
@@ -80,7 +80,10 @@ impl ConfigStore {
     /// Returns `Ok(())` when the config is valid, or an [`anyhow::Error`]
     /// describing the first validation failure found.
     pub fn validate(&self, config: &SystemConfig) -> Result<()> {
-        use crate::config::models::{is_valid_cidr, is_valid_interface_name, is_valid_mtu};
+        use crate::config::models::{
+            is_valid_cidr, is_valid_domain, is_valid_interface_name, is_valid_ip,
+            is_valid_ipv4_range, is_valid_mac, is_valid_mtu,
+        };
 
         for iface in &config.interfaces {
             if !is_valid_interface_name(&iface.name) {
@@ -120,6 +123,117 @@ impl ConfigStore {
             }
         }
 
+        // DNS config validation.
+        if let Some(dns) = &config.dns {
+            for addr in &dns.listen_addresses {
+                if !is_valid_ip(addr) {
+                    anyhow::bail!("DNS listen address {:?} is not a valid IP address", addr);
+                }
+            }
+            if dns.port == 0 {
+                anyhow::bail!("DNS port must be non-zero");
+            }
+            for fwd in &dns.forwarders {
+                if !is_valid_ip(fwd) {
+                    anyhow::bail!("DNS forwarder {:?} is not a valid IP address", fwd);
+                }
+            }
+            for rec in &dns.local_records {
+                if rec.name.is_empty() {
+                    anyhow::bail!("DNS local record has an empty name");
+                }
+            }
+        }
+
+        // DHCP config validation.
+        if let Some(dhcp) = &config.dhcp {
+            for scope in &dhcp.scopes {
+                if !is_valid_cidr(&scope.subnet) {
+                    anyhow::bail!(
+                        "DHCP scope {} has invalid subnet {:?}",
+                        scope.id,
+                        scope.subnet
+                    );
+                }
+                if !is_valid_ip(&scope.pool_start) {
+                    anyhow::bail!(
+                        "DHCP scope {} has invalid pool_start {:?}",
+                        scope.id,
+                        scope.pool_start
+                    );
+                }
+                if !is_valid_ip(&scope.pool_end) {
+                    anyhow::bail!(
+                        "DHCP scope {} has invalid pool_end {:?}",
+                        scope.id,
+                        scope.pool_end
+                    );
+                }
+                if !is_valid_ipv4_range(&scope.pool_start, &scope.pool_end) {
+                    anyhow::bail!(
+                        "DHCP scope {} pool_start {} must be ≤ pool_end {}",
+                        scope.id,
+                        scope.pool_start,
+                        scope.pool_end
+                    );
+                }
+                if let Some(gw) = &scope.gateway {
+                    if !is_valid_ip(gw) {
+                        anyhow::bail!(
+                            "DHCP scope {} has invalid gateway {:?}",
+                            scope.id,
+                            gw
+                        );
+                    }
+                }
+                for dns in &scope.dns_servers {
+                    if !is_valid_ip(dns) {
+                        anyhow::bail!(
+                            "DHCP scope {} has invalid DNS server {:?}",
+                            scope.id,
+                            dns
+                        );
+                    }
+                }
+                for res in &scope.reservations {
+                    if !is_valid_mac(&res.mac_address) {
+                        anyhow::bail!(
+                            "DHCP reservation {} has invalid MAC {:?}",
+                            res.id,
+                            res.mac_address
+                        );
+                    }
+                    if !is_valid_ip(&res.ip_address) {
+                        anyhow::bail!(
+                            "DHCP reservation {} has invalid IP {:?}",
+                            res.id,
+                            res.ip_address
+                        );
+                    }
+                }
+            }
+        }
+
+        // DNS local record type validation.
+        if let Some(dns) = &config.dns {
+            for rec in &dns.local_records {
+                if !matches!(rec.record_type.to_uppercase().as_str(), "A" | "AAAA" | "CNAME" | "PTR" | "MX" | "TXT") {
+                    anyhow::bail!(
+                        "DNS local record {:?} has unsupported record type {:?}",
+                        rec.name,
+                        rec.record_type
+                    );
+                }
+            }
+        }
+
+        // Domain name validation at the system level.
+        if let Some(domain) = &config.domain {
+            if !is_valid_domain(domain) {
+                anyhow::bail!("System domain {:?} is not a valid domain name", domain);
+            }
+        }
+
         Ok(())
     }
 
@@ -155,6 +269,42 @@ impl ConfigStore {
     pub fn save_firewall_rules(&self, rules: Vec<FirewallRule>) -> Result<()> {
         let mut config = self.load()?;
         config.firewall_rules = rules;
+        self.save_with_rollback(&config)
+    }
+
+    /// Return the DNS configuration from the persisted config.
+    ///
+    /// Returns `None` if no DNS configuration has been saved yet.
+    pub fn load_dns_config(&self) -> Result<Option<DnsConfig>> {
+        Ok(self.load()?.dns)
+    }
+
+    /// Atomically replace the DNS configuration in the persisted config.
+    ///
+    /// Loads the current config, replaces `dns`, validates, then calls
+    /// [`Self::save_with_rollback`] to write atomically with rollback on
+    /// post-write validation failure.
+    pub fn save_dns_config(&self, dns: DnsConfig) -> Result<()> {
+        let mut config = self.load()?;
+        config.dns = Some(dns);
+        self.save_with_rollback(&config)
+    }
+
+    /// Return the DHCP configuration from the persisted config.
+    ///
+    /// Returns `None` if no DHCP configuration has been saved yet.
+    pub fn load_dhcp_config(&self) -> Result<Option<DhcpConfig>> {
+        Ok(self.load()?.dhcp)
+    }
+
+    /// Atomically replace the DHCP configuration in the persisted config.
+    ///
+    /// Loads the current config, replaces `dhcp`, validates, then calls
+    /// [`Self::save_with_rollback`] to write atomically with rollback on
+    /// post-write validation failure.
+    pub fn save_dhcp_config(&self, dhcp: DhcpConfig) -> Result<()> {
+        let mut config = self.load()?;
+        config.dhcp = Some(dhcp);
         self.save_with_rollback(&config)
     }
 
@@ -555,6 +705,275 @@ mod tests {
 
         let result = store.save_firewall_rules(vec![bad_rule]);
         assert!(result.is_err(), "negative priority must be rejected");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Validation helpers (new)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn is_valid_ip_v4() {
+        use crate::config::models::is_valid_ip;
+        assert!(is_valid_ip("192.168.1.1"));
+        assert!(is_valid_ip("0.0.0.0"));
+        assert!(is_valid_ip("255.255.255.255"));
+        assert!(!is_valid_ip("256.0.0.1"));
+        assert!(!is_valid_ip("192.168.1.0/24"));
+        assert!(!is_valid_ip(""));
+    }
+
+    #[test]
+    fn is_valid_ip_v6() {
+        use crate::config::models::is_valid_ip;
+        assert!(is_valid_ip("::1"));
+        assert!(is_valid_ip("2001:db8::1"));
+        assert!(is_valid_ip("fe80::1"));
+        assert!(!is_valid_ip("::1/128"));
+    }
+
+    #[test]
+    fn is_valid_ipv4_range_ok() {
+        use crate::config::models::is_valid_ipv4_range;
+        assert!(is_valid_ipv4_range("192.168.1.100", "192.168.1.200"));
+        assert!(is_valid_ipv4_range("10.0.0.1", "10.0.0.1")); // start == end is ok
+    }
+
+    #[test]
+    fn is_valid_ipv4_range_reversed() {
+        use crate::config::models::is_valid_ipv4_range;
+        assert!(!is_valid_ipv4_range("192.168.1.200", "192.168.1.100"));
+    }
+
+    #[test]
+    fn is_valid_ipv4_range_invalid_addresses() {
+        use crate::config::models::is_valid_ipv4_range;
+        assert!(!is_valid_ipv4_range("not-an-ip", "192.168.1.1"));
+    }
+
+    #[test]
+    fn is_valid_mac_colon() {
+        use crate::config::models::is_valid_mac;
+        assert!(is_valid_mac("aa:bb:cc:dd:ee:ff"));
+        assert!(is_valid_mac("AA:BB:CC:DD:EE:FF"));
+        assert!(is_valid_mac("00:11:22:33:44:55"));
+    }
+
+    #[test]
+    fn is_valid_mac_hyphen() {
+        use crate::config::models::is_valid_mac;
+        assert!(is_valid_mac("aa-bb-cc-dd-ee-ff"));
+    }
+
+    #[test]
+    fn is_valid_mac_invalid() {
+        use crate::config::models::is_valid_mac;
+        assert!(!is_valid_mac("aabbccddeeff"));         // no separator
+        assert!(!is_valid_mac("aa:bb:cc:dd:ee"));       // only 5 groups
+        assert!(!is_valid_mac("aa:bb:cc:dd:ee:gg"));    // invalid hex
+        assert!(!is_valid_mac(""));
+    }
+
+    #[test]
+    fn is_valid_domain_ok() {
+        use crate::config::models::is_valid_domain;
+        assert!(is_valid_domain("example.com"));
+        assert!(is_valid_domain("sub.example.com"));
+        assert!(is_valid_domain("example.com."));   // trailing dot
+        assert!(is_valid_domain("my-host.local"));
+        assert!(is_valid_domain("a"));              // single label
+    }
+
+    #[test]
+    fn is_valid_domain_invalid() {
+        use crate::config::models::is_valid_domain;
+        assert!(!is_valid_domain(""));
+        assert!(!is_valid_domain("-bad.com"));      // starts with hyphen
+        assert!(!is_valid_domain("bad-.com"));      // ends with hyphen
+        assert!(!is_valid_domain("bad..com"));      // empty label
+        assert!(!is_valid_domain(&"a".repeat(254))); // too long
+    }
+
+    // -----------------------------------------------------------------------
+    // DNS / DHCP storage round-trips
+    // -----------------------------------------------------------------------
+
+    fn make_dns_config() -> crate::config::models::DnsConfig {
+        use crate::config::models::DnsConfig;
+        DnsConfig {
+            enabled: true,
+            listen_addresses: vec!["127.0.0.1".into()],
+            port: 53,
+            forwarders: vec!["1.1.1.1".into()],
+            dnssec: false,
+            local_records: vec![],
+        }
+    }
+
+    fn make_dhcp_config() -> crate::config::models::DhcpConfig {
+        use crate::config::models::{DhcpConfig, DhcpScope};
+        DhcpConfig {
+            enabled: true,
+            scopes: vec![DhcpScope {
+                id: uuid::Uuid::new_v4(),
+                subnet: "192.168.1.0/24".into(),
+                pool_start: "192.168.1.100".into(),
+                pool_end: "192.168.1.200".into(),
+                gateway: Some("192.168.1.1".into()),
+                dns_servers: vec!["1.1.1.1".into()],
+                lease_seconds: 86400,
+                reservations: vec![],
+            }],
+        }
+    }
+
+    #[test]
+    fn load_dns_config_returns_none_when_missing() {
+        let dir = std::env::temp_dir().join(format!("ds-dns-missing-{}", uuid::Uuid::new_v4()));
+        let store = ConfigStore::with_dir(&dir);
+        let result = store.load_dns_config().unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn save_and_load_dns_config_roundtrip() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let dns = make_dns_config();
+        store.save_dns_config(dns.clone()).unwrap();
+
+        let loaded = store.load_dns_config().unwrap().expect("DNS config should be Some");
+        assert_eq!(loaded.port, 53);
+        assert_eq!(loaded.forwarders, vec!["1.1.1.1"]);
+        assert!(loaded.enabled);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_dns_config_preserves_other_fields() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        store.save_interfaces(vec![make_interface("eth0")]).unwrap();
+        store.save_dns_config(make_dns_config()).unwrap();
+
+        let cfg = store.load().unwrap();
+        assert_eq!(cfg.interfaces.len(), 1, "interfaces must survive dns save");
+        assert!(cfg.dns.is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_dhcp_config_returns_none_when_missing() {
+        let dir = std::env::temp_dir().join(format!("ds-dhcp-missing-{}", uuid::Uuid::new_v4()));
+        let store = ConfigStore::with_dir(&dir);
+        let result = store.load_dhcp_config().unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn save_and_load_dhcp_config_roundtrip() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let dhcp = make_dhcp_config();
+        store.save_dhcp_config(dhcp).unwrap();
+
+        let loaded = store.load_dhcp_config().unwrap().expect("DHCP config should be Some");
+        assert!(loaded.enabled);
+        assert_eq!(loaded.scopes.len(), 1);
+        assert_eq!(loaded.scopes[0].pool_start, "192.168.1.100");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_dhcp_config_preserves_other_fields() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        store.save_interfaces(vec![make_interface("eth0")]).unwrap();
+        store.save_dhcp_config(make_dhcp_config()).unwrap();
+
+        let cfg = store.load().unwrap();
+        assert_eq!(cfg.interfaces.len(), 1, "interfaces must survive dhcp save");
+        assert!(cfg.dhcp.is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_invalid_dns_forwarder() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        cfg.dns = Some(crate::config::models::DnsConfig {
+            enabled: true,
+            listen_addresses: vec![],
+            port: 53,
+            forwarders: vec!["not-an-ip".into()],
+            dnssec: false,
+            local_records: vec![],
+        });
+        assert!(store.validate(&cfg).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_dhcp_scope_with_invalid_mac() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        cfg.dhcp = Some(crate::config::models::DhcpConfig {
+            enabled: true,
+            scopes: vec![crate::config::models::DhcpScope {
+                id: uuid::Uuid::new_v4(),
+                subnet: "192.168.1.0/24".into(),
+                pool_start: "192.168.1.100".into(),
+                pool_end: "192.168.1.200".into(),
+                gateway: None,
+                dns_servers: vec![],
+                lease_seconds: 86400,
+                reservations: vec![crate::config::models::DhcpReservation {
+                    id: uuid::Uuid::new_v4(),
+                    hostname: None,
+                    mac_address: "not-a-mac".into(),
+                    ip_address: "192.168.1.50".into(),
+                }],
+            }],
+        });
+        assert!(store.validate(&cfg).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_reversed_dhcp_pool_range() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        cfg.dhcp = Some(crate::config::models::DhcpConfig {
+            enabled: true,
+            scopes: vec![crate::config::models::DhcpScope {
+                id: uuid::Uuid::new_v4(),
+                subnet: "192.168.1.0/24".into(),
+                pool_start: "192.168.1.200".into(), // reversed
+                pool_end: "192.168.1.100".into(),
+                gateway: None,
+                dns_servers: vec![],
+                lease_seconds: 86400,
+                reservations: vec![],
+            }],
+        });
+        assert!(store.validate(&cfg).is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

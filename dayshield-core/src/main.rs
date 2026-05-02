@@ -1,12 +1,13 @@
 //! DayShield Core — backend orchestrator entry point.
+//!
+//! Initialises logging, builds the shared application state, wires up the
+//! Axum router and starts the HTTP server on 0.0.0.0:3000.
+//
 // Suppress dead-code warnings for the many placeholder engine functions and
 // config types that are defined here as stubs and will be wired up in future
 // work.  This is intentional for an initial scaffold.
 #![allow(dead_code)]
 #![allow(unused_imports)]
-//!
-//! Initialises logging, builds the shared application state, wires up the
-//! Axum router and starts the HTTP server on 0.0.0.0:3000.
 
 use std::sync::Arc;
 

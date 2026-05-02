@@ -1,0 +1,49 @@
+//! DayShield Core — backend orchestrator entry point.
+//!
+//! Initialises logging, builds the shared application state, wires up the
+//! Axum router and starts the HTTP server on 0.0.0.0:3000.
+//
+// Suppress dead-code warnings for the many placeholder engine functions and
+// config types that are defined here as stubs and will be wired up in future
+// work.  This is intentional for an initial scaffold.
+#![allow(dead_code)]
+#![allow(unused_imports)]
+
+use std::sync::Arc;
+
+use axum::Router;
+use tokio::net::TcpListener;
+use tracing::info;
+
+mod api;
+mod config;
+mod engine;
+mod logging;
+mod metrics;
+mod state;
+mod utils;
+
+use state::AppState;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Initialise structured logging.
+    logging::init();
+
+    info!("Starting DayShield Core orchestrator");
+
+    // Build shared application state.
+    let app_state = Arc::new(AppState::new());
+
+    // Build the Axum router.
+    let app: Router = api::router(app_state);
+
+    // Bind and serve.
+    let addr = "0.0.0.0:3000";
+    let listener = TcpListener::bind(addr).await?;
+    info!("Listening on http://{}", addr);
+
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}

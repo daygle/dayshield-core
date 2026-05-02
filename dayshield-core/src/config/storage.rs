@@ -85,7 +85,8 @@ impl ConfigStore {
     pub fn validate(&self, config: &SystemConfig) -> Result<()> {
         use crate::config::models::{
             is_valid_cidr, is_valid_domain, is_valid_interface_name, is_valid_ip,
-            is_valid_ipv4_range, is_valid_mac, is_valid_mtu,
+            is_valid_ipv4_range, is_valid_mac, is_valid_mtu, validate_directory_url,
+            validate_email,
         };
 
         for iface in &config.interfaces {
@@ -387,7 +388,6 @@ impl ConfigStore {
 
         // ACME config validation.
         if let Some(acme) = &config.acme {
-            use crate::config::models::{validate_directory_url, validate_email, is_valid_domain};
             if acme.enabled {
                 if !validate_email(&acme.email) {
                     anyhow::bail!(

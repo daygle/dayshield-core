@@ -419,7 +419,7 @@ impl AcmeEngine {
                 }
                 AcmeChallengeType::Dns01 => {
                     // Compute the key-authorisation digest (base64url of SHA-256).
-                    let digest = ring_sha256(key_auth.as_bytes());
+                    let digest = compute_sha256(key_auth.as_bytes());
                     let txt_value = URL_SAFE_NO_PAD.encode(digest);
                     let domain = match &authz.identifier {
                         Identifier::Dns(d) => d.clone(),
@@ -557,7 +557,7 @@ impl AcmeEngine {
 // ---------------------------------------------------------------------------
 
 /// Compute a SHA-256 digest of `data`.
-fn ring_sha256(data: &[u8]) -> Vec<u8> {
+fn compute_sha256(data: &[u8]) -> Vec<u8> {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(data);
@@ -676,22 +676,22 @@ mod tests {
     }
 
     #[test]
-    fn ring_sha256_produces_32_bytes() {
-        let hash = ring_sha256(b"hello world");
+    fn compute_sha256_produces_32_bytes() {
+        let hash = compute_sha256(b"hello world");
         assert_eq!(hash.len(), 32);
     }
 
     #[test]
-    fn ring_sha256_deterministic() {
-        let h1 = ring_sha256(b"test");
-        let h2 = ring_sha256(b"test");
+    fn compute_sha256_deterministic() {
+        let h1 = compute_sha256(b"test");
+        let h2 = compute_sha256(b"test");
         assert_eq!(h1, h2);
     }
 
     #[test]
-    fn ring_sha256_different_inputs_differ() {
-        let h1 = ring_sha256(b"foo");
-        let h2 = ring_sha256(b"bar");
+    fn compute_sha256_different_inputs_differ() {
+        let h1 = compute_sha256(b"foo");
+        let h2 = compute_sha256(b"bar");
         assert_ne!(h1, h2);
     }
 }

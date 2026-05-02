@@ -437,6 +437,70 @@ pub struct CrowdsecPolicy {
 }
 
 // ---------------------------------------------------------------------------
+// Suricata IPS
+// ---------------------------------------------------------------------------
+
+/// Configuration for the Suricata intrusion-prevention / detection system.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuricataConfig {
+    /// Whether the Suricata service should be running.
+    pub enabled: bool,
+    /// CIDRs that define the HOME_NET variable in suricata.yaml.
+    pub home_nets: Vec<String>,
+    /// CIDRs for EXTERNAL_NET; when empty, Suricata uses `"any"`.
+    pub external_nets: Vec<String>,
+    /// Rule sources (ET/Open, local files, etc.).
+    pub rule_sources: Vec<RuleSource>,
+    /// Whether to write EVE JSON alert/flow logs.
+    pub eve_log_enabled: bool,
+    /// Path for the EVE JSON log file, e.g. `/var/log/suricata/eve.json`.
+    pub eve_log_path: String,
+    /// Whether to write periodic stats logs.
+    pub stats_log_enabled: bool,
+    /// Path for the stats log file, e.g. `/var/log/suricata/stats.log`.
+    pub stats_log_path: String,
+    /// How often (in seconds) Suricata flushes stats to disk.
+    /// Defaults to 8 seconds (Suricata upstream default).
+    pub stats_interval_seconds: u32,
+}
+
+/// A Suricata rule source — either a remote URL (fetched via suricata-update)
+/// or a local rule file path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuleSource {
+    /// Human-readable name, e.g. `"emerging-threats"` or `"local"`.
+    pub name: String,
+    /// Whether this rule source is active.
+    pub enabled: bool,
+    /// Remote URL for rule sets fetched via suricata-update.
+    pub url: Option<String>,
+    /// Absolute path to a local `.rules` file.
+    pub path: Option<String>,
+}
+
+/// Return `Ok(())` if the [`SuricataConfig`] is valid, or `Err` with a
+/// descriptive message.
+///
+/// Rules:
+/// - All `home_nets` / `external_nets` entries must be valid CIDRs.
+/// - `eve_log_path` must be non-empty when `eve_log_enabled` is `true`.
+/// - `stats_log_path` must be non-empty when `stats_log_enabled` is `true`.
+pub fn validate_suricata_config(config: &SuricataConfig) -> Result<(), String> {
+    for cidr in config.home_nets.iter().chain(config.external_nets.iter()) {
+        if !is_valid_cidr(cidr) {
+            return Err(format!("invalid CIDR in home_nets/external_nets: {cidr}"));
+        }
+    }
+    if config.eve_log_enabled && config.eve_log_path.is_empty() {
+        return Err("eve_log_path must not be empty when eve_log_enabled is true".into());
+    }
+    if config.stats_log_enabled && config.stats_log_path.is_empty() {
+        return Err("stats_log_path must not be empty when stats_log_enabled is true".into());
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Top-level system config
 // ---------------------------------------------------------------------------
 
@@ -453,4 +517,5 @@ pub struct SystemConfig {
     pub vpn_tunnels: Vec<VpnTunnel>,
     pub acme: Option<AcmeConfig>,
     pub crowdsec_policies: Vec<CrowdsecPolicy>,
+    pub suricata: Option<SuricataConfig>,
 }

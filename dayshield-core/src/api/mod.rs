@@ -4,6 +4,7 @@ mod dhcp;
 mod dns;
 mod firewall;
 mod interfaces;
+mod suricata;
 mod system;
 
 use std::sync::Arc;
@@ -27,6 +28,8 @@ use crate::state::AppState;
 /// - `POST /dns/config`      — update DNS (Unbound) configuration
 /// - `GET  /dhcp/config`     — get DHCP (dnsmasq) configuration
 /// - `POST /dhcp/config`     — update DHCP (dnsmasq) configuration
+/// - `GET  /ips/config`      — get Suricata IPS configuration
+/// - `POST /ips/config`      — update Suricata IPS configuration
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         // System
@@ -43,5 +46,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         // DHCP
         .route("/dhcp/config", get(dhcp::get_config))
         .route("/dhcp/config", post(dhcp::update_config))
+        // Suricata IPS
+        .route("/ips/config", get(suricata::get_config))
+        .route("/ips/config", post(suricata::update_config))
         .with_state(state)
 }

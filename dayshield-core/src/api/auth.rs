@@ -93,10 +93,19 @@ pub struct LoginRequest {
     pub password: String,
 }
 
-/// Response body for `POST /auth/login`.
+/// Inner data for the `POST /auth/login` response.
+#[derive(Debug, Serialize)]
+pub struct LoginData {
+    pub authenticated: bool,
+    pub username: String,
+    pub token: String,
+}
+
+/// Response body for `POST /auth/login` — follows the standard ApiResponse envelope.
 #[derive(Debug, Serialize)]
 pub struct LoginResponse {
-    pub token: String,
+    pub success: bool,
+    pub data: LoginData,
 }
 
 /// Authenticate with username + password and receive a JWT.
@@ -142,7 +151,17 @@ pub async fn login_with_paths(
 
     info!(username = %req.username, "login successful");
 
-    Ok((StatusCode::OK, Json(LoginResponse { token })))
+    Ok((
+        StatusCode::OK,
+        Json(LoginResponse {
+            success: true,
+            data: LoginData {
+                authenticated: true,
+                username: user.username,
+                token,
+            },
+        }),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -170,7 +189,9 @@ pub async fn logout(
 /// Request body for `POST /auth/change-password`.
 #[derive(Debug, Deserialize)]
 pub struct ChangePasswordRequest {
+    #[serde(rename = "currentPassword")]
     pub old_password: String,
+    #[serde(rename = "newPassword")]
     pub new_password: String,
 }
 

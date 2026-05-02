@@ -1,23 +1,58 @@
 //! Firewall rule endpoints — `GET /firewall/rules` and `POST /firewall/rules`.
+//!
+//! # GET /firewall/rules
+//!
+//! Returns the persisted [`FirewallRule`] list, syncing the in-memory cache as
+//! a side-effect.
+//!
+//! # POST /firewall/rules
+//!
+//! Accepts a new firewall rule, validates all fields, appends it to the
+//! persisted list, and triggers the nftables engine to regenerate and apply
+//! the full ruleset.
 
 use std::sync::Arc;
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use serde::Deserialize;
+use tracing::{info, warn};
 
 use crate::{
-    config::models::{Action, FirewallRule, Protocol},
+    config::models::{
+        is_valid_cidr, is_valid_interface_name, is_valid_port, Action, FirewallRule, Protocol,
+    },
+    engine::nftables::{apply_rules, NftError},
     state::AppState,
 };
 
-/// Handler: list all firewall rules held in state.
-pub async fn list_rules(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let rules = state.firewall_rules.read().await;
-    Json(rules.clone())
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
+/// Handler: list all persisted firewall rules.
+///
+/// Loads the rule list from config storage, syncs the in-memory cache, and
+/// returns the list as JSON.
+pub async fn list_rules(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, NftError> {
+    let rules = state
+        .config_store
+        .load_firewall_rules()
+        .map_err(NftError::StorageError)?;
+
+    info!(count = rules.len(), "firewall: loaded rules from storage");
+
+    // Sync the in-memory cache.
+    {
+        let mut fw = state.firewall_rules.write().await;
+        *fw = rules.clone();
+    }
+
+    Ok(Json(rules))
 }
 
 /// Request body for `POST /firewall/rules`.
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 pub struct CreateRuleRequest {
     pub description: Option<String>,
     pub priority: i32,
@@ -31,11 +66,64 @@ pub struct CreateRuleRequest {
     pub log: bool,
 }
 
-/// Handler: append a new firewall rule.
+/// Handler: create a new firewall rule.
+///
+/// Validates all fields, appends the rule to persistent storage, and
+/// re-applies the full ruleset via the nftables engine.  Returns the
+/// newly-created rule with a `201 Created` status on success.
 pub async fn create_rule(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateRuleRequest>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, NftError> {
+    // --- Validation --------------------------------------------------------
+
+    if let Some(src) = &req.source {
+        if !is_valid_cidr(src) {
+            warn!(src = %src, "firewall: invalid source CIDR");
+            return Err(NftError::ValidationFailed(format!(
+                "invalid source CIDR: {src}"
+            )));
+        }
+    }
+
+    if let Some(dst) = &req.destination {
+        if !is_valid_cidr(dst) {
+            warn!(dst = %dst, "firewall: invalid destination CIDR");
+            return Err(NftError::ValidationFailed(format!(
+                "invalid destination CIDR: {dst}"
+            )));
+        }
+    }
+
+    if let Some(sport) = req.source_port {
+        if !is_valid_port(sport) {
+            warn!(port = sport, "firewall: invalid source port");
+            return Err(NftError::ValidationFailed(format!(
+                "invalid source port: {sport} (must be 1–65535)"
+            )));
+        }
+    }
+
+    if let Some(dport) = req.destination_port {
+        if !is_valid_port(dport) {
+            warn!(port = dport, "firewall: invalid destination port");
+            return Err(NftError::ValidationFailed(format!(
+                "invalid destination port: {dport} (must be 1–65535)"
+            )));
+        }
+    }
+
+    if let Some(iface) = &req.interface {
+        if !is_valid_interface_name(iface) {
+            warn!(iface = %iface, "firewall: invalid interface name");
+            return Err(NftError::ValidationFailed(format!(
+                "invalid interface name: {iface}"
+            )));
+        }
+    }
+
+    // --- Build rule --------------------------------------------------------
+
     let rule = FirewallRule {
         id: uuid::Uuid::new_v4(),
         description: req.description,
@@ -50,10 +138,46 @@ pub async fn create_rule(
         log: req.log,
     };
 
+    info!(
+        id = %rule.id,
+        priority = rule.priority,
+        action = ?rule.action,
+        "firewall: received create rule request"
+    );
+
+    // --- Persist -----------------------------------------------------------
+
+    // Append to in-memory cache and persist atomically.
+    // Hold the write lock across the disk write so that no concurrent reader
+    // can observe the new rule before it has been durably stored.
     {
         let mut rules = state.firewall_rules.write().await;
         rules.push(rule.clone());
+
+        if let Err(e) = state.config_store.save_firewall_rules(rules.clone()) {
+            // Roll back the in-memory change before returning the error.
+            rules.pop();
+            return Err(NftError::StorageError(e));
+        }
     }
 
-    (StatusCode::CREATED, Json(rule))
+    info!(id = %rule.id, "firewall: rule persisted");
+
+    // --- Apply -------------------------------------------------------------
+
+    // Load current NAT rules so the full ruleset can be regenerated.
+    let nat_rules = state
+        .config_store
+        .load()
+        .map_err(NftError::StorageError)?
+        .nat_rules;
+
+    {
+        let rules = state.firewall_rules.read().await;
+        apply_rules(&rules, &nat_rules).await?;
+    }
+
+    info!(id = %rule.id, "firewall: nftables engine apply complete");
+
+    Ok((StatusCode::CREATED, Json(rule)))
 }

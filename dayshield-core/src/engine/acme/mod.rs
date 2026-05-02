@@ -442,7 +442,7 @@ impl AcmeEngine {
             .unwrap_or(Duration::from_secs(u64::MAX));
 
         // Renew if the certificate is older than 60 days.
-        let renewal_threshold = Duration::from_secs(60 * 24 * 3600);
+        let renewal_threshold = Duration::from_secs(60 * 86400);
         let needs_renewal = age > renewal_threshold;
 
         if needs_renewal {

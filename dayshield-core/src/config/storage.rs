@@ -1436,8 +1436,8 @@ mod tests {
     fn validate_email_rejects_invalid_emails() {
         use crate::config::models::validate_email;
         assert!(!validate_email("not-an-email"));
-        assert!(!validate_email("@example.com"));   // empty local part
-        assert!(!validate_email("user@"));          // empty domain
+        assert!(!validate_email("@example.com"));      // empty local part
+        assert!(!validate_email("user@"));             // empty domain
         assert!(!validate_email("user@@example.com")); // multiple @
         assert!(!validate_email(""));
     }

@@ -25,7 +25,8 @@ use tracing::{debug, info, warn};
 
 use super::models::{
     AcmeConfig, CrowdSecConfig, DhcpConfig, DnsConfig, DnsDomainOverride, DnsHostOverride,
-    FirewallAlias, FirewallRule, Interface, SuricataConfig, SystemConfig, WireGuardInterface,
+    FirewallAlias, FirewallRule, Interface, NotifyConfig, SuricataConfig, SystemConfig,
+    WireGuardInterface,
 };
 
 /// Default path to the configuration directory.
@@ -431,6 +432,14 @@ impl ConfigStore {
             }
         }
 
+        // Notify config validation.
+        if let Some(notify) = &config.notify {
+            use crate::config::models::validate_notify_config;
+            if let Err(msg) = validate_notify_config(notify) {
+                anyhow::bail!("Notify config is invalid: {msg}");
+            }
+        }
+
         Ok(())
     }
 
@@ -614,6 +623,24 @@ impl ConfigStore {
         let mut config = self.load()?;
         config.dns_host_overrides = host_overrides;
         config.dns_domain_overrides = domain_overrides;
+        self.save_with_rollback(&config)
+    }
+
+    /// Return the notification configuration from the persisted config.
+    ///
+    /// Returns `None` if no notification configuration has been saved yet.
+    pub fn load_notify_config(&self) -> Result<Option<NotifyConfig>> {
+        Ok(self.load()?.notify)
+    }
+
+    /// Atomically replace the notification configuration in the persisted config.
+    ///
+    /// Loads the current config, replaces `notify`, validates, then calls
+    /// [`Self::save_with_rollback`] to write atomically with rollback on
+    /// post-write validation failure.
+    pub fn save_notify_config(&self, notify: NotifyConfig) -> Result<()> {
+        let mut config = self.load()?;
+        config.notify = Some(notify);
         self.save_with_rollback(&config)
     }
 

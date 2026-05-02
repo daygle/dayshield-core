@@ -89,6 +89,11 @@ pub fn generate_config(iface: &WireGuardInterface) -> String {
 ///    `wg syncconf` to apply changes without dropping existing sessions.
 ///    Otherwise, bring the interface up with `wg-quick up`.
 pub async fn apply_interface(iface: &WireGuardInterface) -> Result<()> {
+    use crate::config::models::validate_wg_interface_name;
+
+    if !validate_wg_interface_name(&iface.name) {
+        anyhow::bail!("invalid WireGuard interface name: {:?}", iface.name);
+    }
     info!(
         name = %iface.name,
         enabled = iface.enabled,
@@ -141,6 +146,12 @@ pub async fn apply_interface(iface: &WireGuardInterface) -> Result<()> {
 ///
 /// Calls `wg-quick down <name>` and removes the config file if it exists.
 pub async fn remove_interface(name: &str) -> Result<()> {
+    use crate::config::models::validate_wg_interface_name;
+
+    if !validate_wg_interface_name(name) {
+        anyhow::bail!("invalid WireGuard interface name: {:?}", name);
+    }
+
     info!(name = %name, "vpn: removing WireGuard interface");
 
     bring_down(name).await?;
@@ -195,8 +206,10 @@ pub async fn generate_keypair() -> Result<(String, String)> {
     if let Some(stdin) = child.stdin.take() {
         use tokio::io::AsyncWriteExt;
         let mut stdin = stdin;
+        // `wg pubkey` expects the private key followed by a newline.
+        let key_with_newline = format!("{private_key}\n");
         stdin
-            .write_all(private_key.as_bytes())
+            .write_all(key_with_newline.as_bytes())
             .await
             .context("failed to write private key to wg pubkey stdin")?;
     }

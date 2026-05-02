@@ -164,7 +164,7 @@ pub async fn create_interface(
         }
     }
 
-    let mut peers: Vec<WireGuardPeer> = Vec::with_capacity(req.peers.len());
+    let mut peers: Vec<WireGuardPeer> = Vec::new();
     for p in &req.peers {
         if !validate_wg_key(&p.public_key) {
             return Err(WireGuardError::ValidationFailed(format!(

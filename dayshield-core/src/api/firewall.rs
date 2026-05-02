@@ -165,16 +165,15 @@ pub async fn create_rule(
 
     // --- Apply -------------------------------------------------------------
 
-    // Load current NAT rules so the full ruleset can be regenerated.
-    let nat_rules = state
+    // Load current NAT rules and aliases so the full ruleset can be regenerated.
+    let full_cfg = state
         .config_store
         .load()
-        .map_err(NftError::StorageError)?
-        .nat_rules;
+        .map_err(NftError::StorageError)?;
 
     {
         let rules = state.firewall_rules.read().await;
-        apply_rules(&rules, &nat_rules).await?;
+        apply_rules(&rules, &full_cfg.nat_rules, &full_cfg.firewall_aliases).await?;
     }
 
     info!(id = %rule.id, "firewall: nftables engine apply complete");

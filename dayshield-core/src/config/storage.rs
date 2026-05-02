@@ -23,7 +23,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
-use super::models::{DhcpConfig, DnsConfig, FirewallRule, Interface, SuricataConfig, SystemConfig};
+use super::models::{
+    DhcpConfig, DnsConfig, DnsDomainOverride, DnsHostOverride, FirewallAlias, FirewallRule,
+    Interface, SuricataConfig, SystemConfig,
+};
 
 /// Default path to the configuration directory.
 const DEFAULT_CONFIG_DIR: &str = "/etc/dayshield/config";
@@ -242,6 +245,65 @@ impl ConfigStore {
             }
         }
 
+        // Firewall alias validation.
+        {
+            use crate::config::models::{validate_alias_name, validate_alias_values};
+            let mut seen_names = std::collections::HashSet::new();
+            for alias in &config.firewall_aliases {
+                if !validate_alias_name(&alias.name) {
+                    anyhow::bail!(
+                        "Firewall alias has invalid name {:?} \
+                         (must be 1–63 chars, start with letter or _, contain only [A-Za-z0-9_])",
+                        alias.name
+                    );
+                }
+                if !seen_names.insert(alias.name.clone()) {
+                    anyhow::bail!("Duplicate firewall alias name {:?}", alias.name);
+                }
+                if let Err(msg) = validate_alias_values(alias) {
+                    anyhow::bail!("{msg}");
+                }
+            }
+        }
+
+        // DNS host-override validation.
+        {
+            use crate::config::models::{validate_dns_hostname, is_valid_ip};
+            for ov in &config.dns_host_overrides {
+                if !validate_dns_hostname(&ov.hostname) {
+                    anyhow::bail!(
+                        "DNS host override has invalid hostname {:?}",
+                        ov.hostname
+                    );
+                }
+                if !is_valid_ip(&ov.address) {
+                    anyhow::bail!(
+                        "DNS host override {:?} has invalid address {:?}",
+                        ov.hostname, ov.address
+                    );
+                }
+            }
+        }
+
+        // DNS domain-override validation.
+        {
+            use crate::config::models::{validate_dns_domain, is_valid_ip};
+            for ov in &config.dns_domain_overrides {
+                if !validate_dns_domain(&ov.domain) {
+                    anyhow::bail!(
+                        "DNS domain override has invalid domain {:?}",
+                        ov.domain
+                    );
+                }
+                if !is_valid_ip(&ov.forward_to) {
+                    anyhow::bail!(
+                        "DNS domain override {:?} has invalid forward_to address {:?}",
+                        ov.domain, ov.forward_to
+                    );
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -331,6 +393,48 @@ impl ConfigStore {
     pub fn save_suricata_config(&self, suricata: SuricataConfig) -> Result<()> {
         let mut config = self.load()?;
         config.suricata = Some(suricata);
+        self.save_with_rollback(&config)
+    }
+
+    /// Return the firewall alias list from the persisted config.
+    pub fn load_firewall_aliases(&self) -> Result<Vec<FirewallAlias>> {
+        Ok(self.load()?.firewall_aliases)
+    }
+
+    /// Atomically replace the firewall alias list in the persisted config.
+    ///
+    /// Loads the current config, replaces `firewall_aliases`, validates, then
+    /// calls [`Self::save_with_rollback`] to write atomically with rollback on
+    /// post-write validation failure.
+    pub fn save_firewall_aliases(&self, aliases: Vec<FirewallAlias>) -> Result<()> {
+        let mut config = self.load()?;
+        config.firewall_aliases = aliases;
+        self.save_with_rollback(&config)
+    }
+
+    /// Return the DNS host and domain overrides from the persisted config.
+    ///
+    /// Returns `(host_overrides, domain_overrides)`.
+    pub fn load_dns_overrides(
+        &self,
+    ) -> Result<(Vec<DnsHostOverride>, Vec<DnsDomainOverride>)> {
+        let cfg = self.load()?;
+        Ok((cfg.dns_host_overrides, cfg.dns_domain_overrides))
+    }
+
+    /// Atomically replace the DNS override lists in the persisted config.
+    ///
+    /// Loads the current config, replaces `dns_host_overrides` and
+    /// `dns_domain_overrides`, validates, then calls
+    /// [`Self::save_with_rollback`] to write atomically.
+    pub fn save_dns_overrides(
+        &self,
+        host_overrides: Vec<DnsHostOverride>,
+        domain_overrides: Vec<DnsDomainOverride>,
+    ) -> Result<()> {
+        let mut config = self.load()?;
+        config.dns_host_overrides = host_overrides;
+        config.dns_domain_overrides = domain_overrides;
         self.save_with_rollback(&config)
     }
 

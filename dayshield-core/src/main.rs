@@ -36,6 +36,9 @@ async fn main() -> anyhow::Result<()> {
     // Build shared application state.
     let app_state = Arc::new(AppState::new());
 
+    // Start the background metrics collector.
+    metrics::collector::start_metrics_collector(Arc::clone(&app_state)).await;
+
     // Build the Axum router.
     let app: Router = api::router(app_state);
 

@@ -1098,6 +1098,104 @@ impl Default for SystemSettings {
     }
 }
 
+// ---------------------------------------------------------------------------
+// NTP
+// ---------------------------------------------------------------------------
+
+/// Configuration for the NTP client/server subsystem.
+///
+/// When `serve_clients` is `false`, DayShield configures `systemd-timesyncd`
+/// to synchronise the host clock against `upstream_servers` only.
+///
+/// When `serve_clients` is `true`, DayShield installs and configures `chrony`
+/// which both synchronises the host clock and serves NTP to LAN clients via
+/// the interfaces listed in `listen_interfaces`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NtpConfig {
+    /// Whether the NTP subsystem is enabled.
+    pub enabled: bool,
+    /// IPv4 addresses or hostnames of upstream NTP servers.
+    ///
+    /// At least one entry is required when `enabled` is `true`.
+    /// IPv6 addresses are rejected by the validator.
+    pub upstream_servers: Vec<String>,
+    /// Whether to also serve NTP time to LAN clients.
+    pub serve_clients: bool,
+    /// Network interface names on which chrony should listen when
+    /// `serve_clients` is `true`.
+    pub listen_interfaces: Vec<String>,
+}
+
+impl Default for NtpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            upstream_servers: vec!["0.pool.ntp.org".into(), "1.pool.ntp.org".into()],
+            serve_clients: false,
+            listen_interfaces: vec![],
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Validation helpers — NTP
+// ---------------------------------------------------------------------------
+
+/// Return `true` if `server` is a valid IPv4 address or a valid hostname.
+///
+/// Rejects bare IPv6 addresses (square-bracket notation and plain `::` form).
+pub fn validate_ntp_server(server: &str) -> bool {
+    // Reject explicit IPv6 (bracket form used in URIs).
+    if server.starts_with('[') {
+        return false;
+    }
+    // Reject bare IPv6 addresses.
+    if server.parse::<std::net::Ipv6Addr>().is_ok() {
+        return false;
+    }
+    // Accept valid IPv4 addresses.
+    if server.parse::<std::net::Ipv4Addr>().is_ok() {
+        return true;
+    }
+    // Accept valid hostnames / FQDNs.
+    is_valid_domain(server)
+}
+
+/// Return `Ok(())` if `config` is a valid [`NtpConfig`], or `Err` with a
+/// descriptive message describing the first validation failure found.
+pub fn validate_ntp_config(config: &NtpConfig) -> Result<(), String> {
+    if !config.enabled {
+        return Ok(());
+    }
+    if config.upstream_servers.is_empty() {
+        return Err("ntp upstream_servers must contain at least one entry when enabled".into());
+    }
+    for server in &config.upstream_servers {
+        if !validate_ntp_server(server) {
+            return Err(format!(
+                "ntp upstream_servers contains invalid entry {:?} \
+                 (must be an IPv4 address or hostname, not IPv6)",
+                server
+            ));
+        }
+    }
+    if config.serve_clients && config.listen_interfaces.is_empty() {
+        return Err(
+            "ntp listen_interfaces must contain at least one interface when serve_clients is true"
+                .into(),
+        );
+    }
+    for iface in &config.listen_interfaces {
+        if !is_valid_interface_name(iface) {
+            return Err(format!(
+                "ntp listen_interfaces contains invalid interface name {:?}",
+                iface
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Root configuration object that is persisted to disk and loaded on startup.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SystemConfig {
@@ -1133,4 +1231,7 @@ pub struct SystemConfig {
     /// Host-level system settings (hostname, timezone, NTP, SSH).
     #[serde(default)]
     pub system_settings: Option<SystemSettings>,
+    /// NTP client/server configuration.
+    #[serde(default)]
+    pub ntp: Option<NtpConfig>,
 }

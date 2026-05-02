@@ -23,6 +23,7 @@ mod logs;
 mod logging;
 mod metrics;
 mod notify;
+mod ntp;
 mod state;
 mod utils;
 

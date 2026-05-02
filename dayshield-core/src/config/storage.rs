@@ -56,6 +56,13 @@ impl ConfigStore {
         }
     }
 
+    /// Return the path to the configuration file managed by this store.
+    ///
+    /// The parent directory of this path is the configuration directory.
+    pub fn config_path(&self) -> &Path {
+        &self.config_path
+    }
+
     /// Load the [`SystemConfig`] from disk.
     ///
     /// Returns a default (empty) config if the file does not exist yet.

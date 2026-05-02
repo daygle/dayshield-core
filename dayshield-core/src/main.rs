@@ -16,6 +16,7 @@ use tokio::net::TcpListener;
 use tracing::info;
 
 mod api;
+mod backup;
 mod config;
 mod engine;
 mod logs;
@@ -38,6 +39,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Start the background metrics collector.
     metrics::collector::start_metrics_collector(Arc::clone(&app_state)).await;
+
+    // Start the automatic backup scheduler.
+    backup::scheduler::start_backup_scheduler(Arc::clone(&app_state)).await;
 
     // Build the Axum router.
     let app: Router = api::router(app_state);

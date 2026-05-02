@@ -30,9 +30,6 @@ use crate::auth::model::{AuthError, User};
 /// Default path to the persisted admin user record.
 pub const DEFAULT_ADMIN_PATH: &str = "/etc/dayshield/admin.json";
 
-/// Temporary file suffix used for atomic writes.
-const TMP_SUFFIX: &str = ".tmp";
-
 // ---------------------------------------------------------------------------
 // UserStore
 // ---------------------------------------------------------------------------
@@ -103,7 +100,14 @@ pub fn save_user(path: &Path, user: &User) -> Result<(), AuthError> {
         .map_err(|e| AuthError::StorageError(format!("serialise user: {e}")))?;
 
     // Write to a temporary sibling file then rename for atomicity.
-    let tmp_path = path.with_extension(TMP_SUFFIX.trim_start_matches('.'));
+    let tmp_path = {
+        let mut name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_os_string();
+        name.push(".tmp");
+        path.with_file_name(name)
+    };
 
     std::fs::write(&tmp_path, json)
         .map_err(|e| AuthError::StorageError(format!("write tmp file: {e}")))?;

@@ -127,7 +127,8 @@ pub async fn login_with_paths(
     }
 
     // Verify password.
-    verify_password(&req.password, &user.password_hash).map_err(|_| AuthApiError::InvalidCredentials)?;
+    verify_password(&req.password, &user.password_hash)
+        .map_err(|_| AuthApiError::InvalidCredentials)?;
 
     // Load (or create) the signing key.
     let key = load_or_create_key(key_path).map_err(AuthApiError::from)?;

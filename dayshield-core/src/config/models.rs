@@ -70,6 +70,62 @@ pub fn is_valid_interface_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
+/// Return `true` if `addr` is a valid IPv4 or IPv6 address (without prefix).
+///
+/// Accepts any string parseable as [`std::net::IpAddr`].
+pub fn is_valid_ip(addr: &str) -> bool {
+    addr.parse::<std::net::IpAddr>().is_ok()
+}
+
+/// Return `true` if `start` and `end` are valid IPv4 addresses and
+/// `start` ≤ `end` in numeric order.
+pub fn is_valid_ipv4_range(start: &str, end: &str) -> bool {
+    match (
+        start.parse::<std::net::Ipv4Addr>(),
+        end.parse::<std::net::Ipv4Addr>(),
+    ) {
+        (Ok(s), Ok(e)) => u32::from(s) <= u32::from(e),
+        _ => false,
+    }
+}
+
+/// Return `true` if `mac` is a valid IEEE 802 MAC address.
+///
+/// Accepts colon-separated (`aa:bb:cc:dd:ee:ff`) or hyphen-separated
+/// (`aa-bb-cc-dd-ee-ff`) hex pairs (case-insensitive).
+pub fn is_valid_mac(mac: &str) -> bool {
+    let sep = if mac.contains(':') {
+        ':'
+    } else if mac.contains('-') {
+        '-'
+    } else {
+        return false;
+    };
+    let parts: Vec<&str> = mac.split(sep).collect();
+    parts.len() == 6 && parts.iter().all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// Return `true` if `domain` is a syntactically valid domain name.
+///
+/// Rules (per RFC 1035 / 952):
+/// - Non-empty.
+/// - Each label is 1–63 ASCII alphanumeric characters or hyphens, and must
+///   not start or end with a hyphen.
+/// - Total length ≤ 253 characters (excluding any trailing dot).
+pub fn is_valid_domain(domain: &str) -> bool {
+    let domain = domain.strip_suffix('.').unwrap_or(domain);
+    if domain.is_empty() || domain.len() > 253 {
+        return false;
+    }
+    domain.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+    })
+}
+
 /// Return `true` if `cidr` is a valid IPv4 or IPv6 CIDR string.
 ///
 /// Accepts `"<addr>/<prefix-len>"` where `addr` is parseable as either

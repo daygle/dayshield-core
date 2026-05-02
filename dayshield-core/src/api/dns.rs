@@ -1,0 +1,200 @@
+//! DNS endpoints — `GET /dns/config` and `POST /dns/config`.
+//!
+//! # GET /dns/config
+//!
+//! Returns the persisted [`DnsConfig`].  When no DNS configuration has been
+//! saved yet, returns a default (disabled) configuration.
+//!
+//! # POST /dns/config
+//!
+//! Accepts a full [`DnsConfig`] JSON body, validates all fields, atomically
+//! persists it, and triggers the DNS engine to regenerate and apply the Unbound
+//! configuration.
+
+use std::sync::Arc;
+
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use tracing::{info, warn};
+
+use crate::{
+    config::models::{
+        is_valid_domain, is_valid_interface_name, is_valid_ip, DnsConfig, DnsLocalRecord,
+    },
+    engine::dns::apply_config,
+    state::AppState,
+};
+
+// ---------------------------------------------------------------------------
+// Error type
+// ---------------------------------------------------------------------------
+
+/// Errors produced by the DNS API handlers.
+#[derive(Debug, thiserror::Error)]
+pub enum DnsError {
+    /// A field failed validation.
+    #[error("validation error: {0}")]
+    ValidationFailed(String),
+
+    /// A persistent-storage operation failed.
+    #[error("storage error: {0:#}")]
+    StorageError(#[from] anyhow::Error),
+
+    /// The DNS engine failed to apply the configuration.
+    #[error("engine error: {0:#}")]
+    EngineError(String),
+}
+
+impl IntoResponse for DnsError {
+    fn into_response(self) -> axum::response::Response {
+        let status = match &self {
+            DnsError::ValidationFailed(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            DnsError::StorageError(_) | DnsError::EngineError(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        };
+        (
+            status,
+            Json(serde_json::json!({ "error": self.to_string() })),
+        )
+            .into_response()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Request body
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /dns/config`.
+#[derive(serde::Deserialize)]
+pub struct UpdateDnsConfigRequest {
+    pub enabled: bool,
+    pub listen_addresses: Vec<String>,
+    pub port: u16,
+    pub forwarders: Vec<String>,
+    pub dnssec: bool,
+    pub local_records: Vec<DnsLocalRecord>,
+}
+
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
+/// Handler: return the current DNS configuration.
+///
+/// Loads the DNS config from persistent storage.  If no configuration has been
+/// saved yet, returns a sensible default (disabled, port 53).
+pub async fn get_config(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, DnsError> {
+    let cfg = state
+        .config_store
+        .load_dns_config()
+        .map_err(DnsError::StorageError)?
+        .unwrap_or_else(|| DnsConfig {
+            enabled: false,
+            listen_addresses: vec![],
+            port: 53,
+            forwarders: vec![],
+            dnssec: false,
+            local_records: vec![],
+        });
+
+    info!(enabled = cfg.enabled, "dns: loaded config");
+
+    Ok(Json(cfg))
+}
+
+/// Handler: update the DNS configuration.
+///
+/// Validates all fields, persists atomically, then triggers the DNS engine to
+/// regenerate and apply the Unbound configuration.  Returns the saved config
+/// with `200 OK` on success.
+pub async fn update_config(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateDnsConfigRequest>,
+) -> Result<impl IntoResponse, DnsError> {
+    // --- Validation --------------------------------------------------------
+
+    if req.port == 0 {
+        return Err(DnsError::ValidationFailed(
+            "DNS port must be non-zero".into(),
+        ));
+    }
+
+    for addr in &req.listen_addresses {
+        // Accept plain IPs or interface names (e.g. "eth0").
+        if !is_valid_ip(addr) && !is_valid_interface_name(addr) {
+            warn!(addr = %addr, "dns: invalid listen address");
+            return Err(DnsError::ValidationFailed(format!(
+                "invalid listen address: {addr} (expected IP address or interface name)"
+            )));
+        }
+    }
+
+    for fwd in &req.forwarders {
+        if !is_valid_ip(fwd) {
+            warn!(fwd = %fwd, "dns: invalid forwarder");
+            return Err(DnsError::ValidationFailed(format!(
+                "invalid forwarder: {fwd} (expected IPv4 or IPv6 address)"
+            )));
+        }
+    }
+
+    for rec in &req.local_records {
+        if rec.name.is_empty() {
+            return Err(DnsError::ValidationFailed(
+                "local record name must not be empty".into(),
+            ));
+        }
+        let rtype = rec.record_type.to_uppercase();
+        if !matches!(rtype.as_str(), "A" | "AAAA" | "CNAME" | "PTR" | "MX" | "TXT") {
+            return Err(DnsError::ValidationFailed(format!(
+                "unsupported DNS record type: {} (supported: A, AAAA, CNAME, PTR, MX, TXT)",
+                rec.record_type
+            )));
+        }
+        if !is_valid_ip(&rec.value) && !is_valid_domain(&rec.value) {
+            return Err(DnsError::ValidationFailed(format!(
+                "local record {:?} has an invalid value: {}",
+                rec.name, rec.value
+            )));
+        }
+    }
+
+    // --- Build config ------------------------------------------------------
+
+    let cfg = DnsConfig {
+        enabled: req.enabled,
+        listen_addresses: req.listen_addresses,
+        port: req.port,
+        forwarders: req.forwarders,
+        dnssec: req.dnssec,
+        local_records: req.local_records,
+    };
+
+    info!(
+        enabled = cfg.enabled,
+        port = cfg.port,
+        dnssec = cfg.dnssec,
+        "dns: received update config request"
+    );
+
+    // --- Persist -----------------------------------------------------------
+
+    state
+        .config_store
+        .save_dns_config(cfg.clone())
+        .map_err(DnsError::StorageError)?;
+
+    info!("dns: config persisted");
+
+    // --- Apply -------------------------------------------------------------
+
+    apply_config(&cfg)
+        .await
+        .map_err(|e| DnsError::EngineError(e.to_string()))?;
+
+    info!("dns: engine apply complete");
+
+    Ok(Json(cfg))
+}

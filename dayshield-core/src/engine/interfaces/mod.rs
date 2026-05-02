@@ -14,6 +14,8 @@
 //! | [`list_kernel_interfaces`] | Enumerate live interfaces from the kernel.    |
 //! | [`apply_interface`]        | Apply a single [`Interface`] config.          |
 //! | [`sync_interfaces`]        | Reconcile desired config against kernel state. |
+//! | `start_dhcp_client`        | Spawn dhclient for a DHCP4 interface.         |
+//! | `stop_dhcp_client`         | Release DHCP lease and stop dhclient.         |
 
 use std::collections::HashMap;
 
@@ -211,12 +213,15 @@ pub async fn list_kernel_interfaces() -> Result<Vec<KernelInterface>, InterfaceE
 /// When `config.enabled` is `true`:
 /// - Brings the interface up (`ip link set dev <name> up`).
 /// - Sets the MTU if `config.mtu` is `Some`.
-/// - If `config.dhcp4` is `true`, logs a placeholder (dhclient integration is
-///   a future work item).
-/// - Otherwise adds each address in `config.addresses` via `ip addr add`.
+/// - If `config.dhcp4` is `true`, spawns `dhclient` (from `isc-dhcp-client`)
+///   to acquire an address from the upstream DHCP server.  Any previously
+///   running dhclient for the same interface is released first.
+/// - If `config.dhcp4` is `false`, any running dhclient for this interface is
+///   stopped before static addresses are configured via `ip addr add`.
 ///
 /// When `config.enabled` is `false`:
-/// - Brings the interface down (`ip link set dev <name> down`).
+/// - Releases any active DHCP lease (`dhclient -r`) before bringing the
+///   interface down.
 ///
 /// # Errors
 ///
@@ -247,10 +252,10 @@ pub async fn apply_interface(config: &Interface) -> Result<(), InterfaceError> {
         }
 
         if config.dhcp4 {
-            // TODO(#TBD): spawn / signal dhclient for the interface once
-            // dhclient integration is implemented in the DHCP engine module.
-            info!(name = %name, "interfaces: DHCP4 requested (dhclient integration pending)");
+            start_dhcp_client(name).await?;
         } else {
+            // Ensure no stale dhclient is running before applying static config.
+            stop_dhcp_client(name).await;
             for cidr in &config.addresses {
                 if !is_valid_cidr(cidr) {
                     return Err(InterfaceError::InvalidCIDR(cidr.clone()));
@@ -260,6 +265,8 @@ pub async fn apply_interface(config: &Interface) -> Result<(), InterfaceError> {
             }
         }
     } else {
+        // Release any active DHCP lease before taking the interface down.
+        stop_dhcp_client(name).await;
         info!(name = %name, "interfaces: bringing interface down");
         run_ip(&["link", "set", "dev", name, "down"]).await?;
     }
@@ -331,6 +338,70 @@ pub async fn sync_interfaces(configured: &[Interface]) -> Result<(), InterfaceEr
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
+
+/// Start `dhclient` for `name` to acquire an IPv4 address via DHCP.
+///
+/// A PID file is written to `/run/dhclient.<name>.pid`.  Any previously
+/// running dhclient for the same interface is stopped first.
+///
+/// dhclient runs as a detached background process; its Child handle is
+/// dropped intentionally so it continues renewing leases independently.
+async fn start_dhcp_client(name: &str) -> Result<(), InterfaceError> {
+    let pid_file = format!("/run/dhclient.{name}.pid");
+
+    // Release any existing lease and clean up the old process first.
+    stop_dhcp_client(name).await;
+
+    info!(name = %name, pid_file = %pid_file, "interfaces: starting dhclient");
+
+    // Spawn dhclient in background (no -1 flag so it keeps renewing).
+    Command::new("dhclient")
+        .args(["-pf", &pid_file, name])
+        .spawn()
+        .map_err(|e| {
+            InterfaceError::ApplyFailed(format!("failed to spawn dhclient for {name}: {e}"))
+        })?;
+    // Child handle dropped — dhclient runs as a background process.
+    Ok(())
+}
+
+/// Stop `dhclient` for `name`, releasing the DHCP lease.
+///
+/// Runs `dhclient -r` for a graceful release, then removes the PID file.
+/// Errors are logged and swallowed because dhclient may not be running.
+async fn stop_dhcp_client(name: &str) {
+    let pid_file = format!("/run/dhclient.{name}.pid");
+
+    // Attempt a graceful release (sends DHCPRELEASE to the upstream server).
+    let result = Command::new("dhclient")
+        .args(["-r", "-pf", &pid_file, name])
+        .output()
+        .await;
+
+    match result {
+        Ok(out) if out.status.success() => {
+            info!(name = %name, "interfaces: dhclient released DHCP lease");
+        }
+        Ok(out) => {
+            // Not running or already released — not an error worth surfacing.
+            debug!(
+                name = %name,
+                stderr = %String::from_utf8_lossy(&out.stderr),
+                "interfaces: dhclient -r exited non-zero (may not have been running)"
+            );
+        }
+        Err(e) => {
+            debug!(name = %name, error = %e, "interfaces: dhclient not found or not spawnable");
+        }
+    }
+
+    // Remove the PID file regardless of whether release succeeded.
+    if let Err(e) = std::fs::remove_file(&pid_file) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            debug!(name = %name, error = %e, "interfaces: could not remove dhclient PID file");
+        }
+    }
+}
 
 /// Run `ip <args>` and return an error if the command exits non-zero.
 async fn run_ip(args: &[&str]) -> Result<(), InterfaceError> {

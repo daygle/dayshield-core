@@ -22,6 +22,7 @@ mod engine;
 mod logs;
 mod logging;
 mod metrics;
+mod notify;
 mod state;
 mod utils;
 
@@ -35,13 +36,17 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting DayShield Core orchestrator");
 
     // Build shared application state.
-    let app_state = Arc::new(AppState::new());
+    let (app_state_inner, notify_rx) = AppState::new();
+    let app_state = Arc::new(app_state_inner);
 
     // Start the background metrics collector.
     metrics::collector::start_metrics_collector(Arc::clone(&app_state)).await;
 
     // Start the automatic backup scheduler.
     backup::scheduler::start_backup_scheduler(Arc::clone(&app_state)).await;
+
+    // Start the background notification worker.
+    notify::worker::start_notify_worker(Arc::clone(&app_state), notify_rx).await;
 
     // Build the Axum router.
     let app: Router = api::router(app_state);

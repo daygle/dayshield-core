@@ -929,6 +929,118 @@ pub fn validate_endpoint(endpoint: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
+
+/// Category of a notification event; used to filter which alerts are sent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum NotifyCategory {
+    Suricata,
+    CrowdSec,
+    Acme,
+    System,
+}
+
+fn default_notify_rate_limit() -> u32 {
+    10
+}
+
+fn default_notify_categories() -> Vec<NotifyCategory> {
+    vec![
+        NotifyCategory::Suricata,
+        NotifyCategory::CrowdSec,
+        NotifyCategory::Acme,
+        NotifyCategory::System,
+    ]
+}
+
+/// Configuration for the email notification subsystem.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotifyConfig {
+    /// Whether email notifications are enabled.
+    pub enabled: bool,
+    /// SMTP server hostname or IP address.
+    pub smtp_server: String,
+    /// SMTP server port (typically 587 for STARTTLS or 465 for SMTPS).
+    pub smtp_port: u16,
+    /// SMTP authentication username.
+    pub smtp_username: String,
+    /// SMTP authentication password.
+    pub smtp_password: String,
+    /// Envelope / header `From` address.
+    pub from_address: String,
+    /// List of recipient e-mail addresses.
+    pub to_addresses: Vec<String>,
+    /// Which alert categories should trigger notifications.
+    #[serde(default = "default_notify_categories")]
+    pub categories: Vec<NotifyCategory>,
+    /// Maximum number of emails sent per minute (token-bucket rate limit).
+    #[serde(default = "default_notify_rate_limit")]
+    pub rate_limit_per_minute: u32,
+    /// When true, buffer events for 5 minutes and send one combined digest.
+    #[serde(default)]
+    pub digest_mode: bool,
+}
+
+impl Default for NotifyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            smtp_server: String::new(),
+            smtp_port: 587,
+            smtp_username: String::new(),
+            smtp_password: String::new(),
+            from_address: String::new(),
+            to_addresses: vec![],
+            categories: default_notify_categories(),
+            rate_limit_per_minute: default_notify_rate_limit(),
+            digest_mode: false,
+        }
+    }
+}
+
+/// Validate a [`NotifyConfig`].
+///
+/// Returns `Ok(())` when all fields are consistent, or `Err` with the first
+/// problem found.
+pub fn validate_notify_config(cfg: &NotifyConfig) -> Result<(), String> {
+    if !cfg.enabled {
+        return Ok(());
+    }
+    if cfg.smtp_server.trim().is_empty() {
+        return Err("notify smtp_server must not be empty".into());
+    }
+    if cfg.smtp_port == 0 {
+        return Err("notify smtp_port must be non-zero".into());
+    }
+    if cfg.from_address.trim().is_empty() {
+        return Err("notify from_address must not be empty".into());
+    }
+    if !validate_email(&cfg.from_address) {
+        return Err(format!(
+            "notify from_address {:?} is not a valid e-mail address",
+            cfg.from_address
+        ));
+    }
+    if cfg.to_addresses.is_empty() {
+        return Err("notify to_addresses must contain at least one address".into());
+    }
+    for addr in &cfg.to_addresses {
+        if !validate_email(addr) {
+            return Err(format!(
+                "notify to_addresses contains invalid address {:?}",
+                addr
+            ));
+        }
+    }
+    if cfg.rate_limit_per_minute == 0 {
+        return Err("notify rate_limit_per_minute must be greater than 0".into());
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Top-level system config
 // ---------------------------------------------------------------------------
 
@@ -961,4 +1073,7 @@ pub struct SystemConfig {
     /// CrowdSec bouncer integration configuration.
     #[serde(default)]
     pub crowdsec: Option<CrowdSecConfig>,
+    /// Email notification configuration.
+    #[serde(default)]
+    pub notify: Option<NotifyConfig>,
 }

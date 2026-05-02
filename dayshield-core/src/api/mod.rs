@@ -11,6 +11,7 @@ mod firewall;
 mod interfaces;
 mod logs;
 mod metrics;
+mod notify;
 mod suricata;
 mod system;
 mod wireguard;
@@ -66,6 +67,10 @@ use crate::state::AppState;
 /// - `POST /backup/restore`                                — restore from an uploaded backup file
 /// - `GET  /backup/scheduler`                              — get the scheduler configuration
 /// - `POST /backup/scheduler`                              — update the scheduler configuration
+/// - `GET  /notify/config`                                 — get notification configuration
+/// - `POST /notify/config`                                 — update notification configuration
+/// - `POST /notify/test`                                   — send a test notification email
+/// - `GET  /notify/categories`                             — list available notification categories
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         // System
@@ -137,5 +142,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/backup/restore", post(backup::restore_handler))
         .route("/backup/scheduler", get(backup::get_scheduler_handler))
         .route("/backup/scheduler", post(backup::update_scheduler_handler))
+        // Notifications
+        .route("/notify/config", get(notify::get_config))
+        .route("/notify/config", post(notify::update_config))
+        .route("/notify/test", post(notify::send_test))
+        .route("/notify/categories", get(notify::get_categories))
         .with_state(state)
 }

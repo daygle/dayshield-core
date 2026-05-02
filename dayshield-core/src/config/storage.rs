@@ -211,14 +211,10 @@ impl ConfigStore {
                         );
                     }
                 }
-                if let Some(domain) = scope.dns_servers.first() {
-                    // domain is a DNS server here, already validated above
-                    let _ = domain;
-                }
             }
         }
 
-        // VPN tunnel validation.
+        // DNS local record type validation.
         if let Some(dns) = &config.dns {
             for rec in &dns.local_records {
                 if !matches!(rec.record_type.to_uppercase().as_str(), "A" | "AAAA" | "CNAME" | "PTR" | "MX" | "TXT") {

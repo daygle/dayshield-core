@@ -147,17 +147,59 @@ pub async fn update_config(
             ));
         }
         let rtype = rec.record_type.to_uppercase();
-        if !matches!(rtype.as_str(), "A" | "AAAA" | "CNAME" | "PTR" | "MX" | "TXT") {
-            return Err(DnsError::ValidationFailed(format!(
-                "unsupported DNS record type: {} (supported: A, AAAA, CNAME, PTR, MX, TXT)",
-                rec.record_type
-            )));
-        }
-        if !is_valid_ip(&rec.value) && !is_valid_domain(&rec.value) {
-            return Err(DnsError::ValidationFailed(format!(
-                "local record {:?} has an invalid value: {}",
-                rec.name, rec.value
-            )));
+        match rtype.as_str() {
+            "A" => {
+                if rec.value.parse::<std::net::Ipv4Addr>().is_err() {
+                    return Err(DnsError::ValidationFailed(format!(
+                        "A record {:?} value must be an IPv4 address, got: {}",
+                        rec.name, rec.value
+                    )));
+                }
+            }
+            "AAAA" => {
+                if rec.value.parse::<std::net::Ipv6Addr>().is_err() {
+                    return Err(DnsError::ValidationFailed(format!(
+                        "AAAA record {:?} value must be an IPv6 address, got: {}",
+                        rec.name, rec.value
+                    )));
+                }
+            }
+            "CNAME" | "PTR" => {
+                if !is_valid_domain(&rec.value) {
+                    return Err(DnsError::ValidationFailed(format!(
+                        "{} record {:?} value must be a valid domain name, got: {}",
+                        rtype, rec.name, rec.value
+                    )));
+                }
+            }
+            "MX" => {
+                // MX value: "<priority> <domain>" e.g. "10 mail.example.com"
+                let parts: Vec<&str> = rec.value.splitn(2, ' ').collect();
+                let valid = parts.len() == 2
+                    && parts[0].parse::<u16>().is_ok()
+                    && is_valid_domain(parts[1]);
+                if !valid {
+                    return Err(DnsError::ValidationFailed(format!(
+                        "MX record {:?} value must be \"<priority> <domain>\", got: {}",
+                        rec.name, rec.value
+                    )));
+                }
+            }
+            "TXT" => {
+                // TXT records are freeform; only check non-empty.
+                if rec.value.is_empty() {
+                    return Err(DnsError::ValidationFailed(format!(
+                        "TXT record {:?} value must not be empty",
+                        rec.name
+                    )));
+                }
+            }
+            _ => {
+                return Err(DnsError::ValidationFailed(format!(
+                    "unsupported DNS record type: {} (supported: A, AAAA, CNAME, PTR, MX, TXT)",
+                    rec.record_type
+                )));
+            }
         }
     }
 

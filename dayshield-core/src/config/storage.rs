@@ -610,6 +610,23 @@ impl ConfigStore {
         self.save_with_rollback(&config)
     }
 
+    /// Return the automatic backup schedule configuration.
+    ///
+    /// Returns `None` if no schedule configuration has been saved yet.
+    pub fn load_backup_schedule(&self) -> Result<Option<super::models::BackupScheduleConfig>> {
+        Ok(self.load()?.backup_schedule)
+    }
+
+    /// Atomically replace the backup schedule configuration in the persisted config.
+    pub fn save_backup_schedule(
+        &self,
+        schedule: super::models::BackupScheduleConfig,
+    ) -> Result<()> {
+        let mut config = self.load()?;
+        config.backup_schedule = Some(schedule);
+        self.save_with_rollback(&config)
+    }
+
     /// Validate and atomically write config to disk.
     ///
     /// The write is performed by:

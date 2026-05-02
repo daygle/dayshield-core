@@ -932,6 +932,36 @@ pub fn validate_endpoint(endpoint: &str) -> bool {
 // Top-level system config
 // ---------------------------------------------------------------------------
 
+/// Configuration for the automatic backup scheduler.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupScheduleConfig {
+    /// Whether the scheduler is active.
+    pub enabled: bool,
+    /// How often (in hours) to run an automatic backup.
+    pub interval_hours: u64,
+    /// How many backup files to keep on disk (oldest are pruned).
+    pub retention_count: usize,
+    /// Directory where backup files are written.
+    pub backup_dir: String,
+    /// Whether to encrypt backup archives.
+    pub encrypt: bool,
+    /// Passphrase used for encryption (required when `encrypt` is `true`).
+    pub passphrase: Option<String>,
+}
+
+impl Default for BackupScheduleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_hours: 24,
+            retention_count: 7,
+            backup_dir: "/etc/dayshield/backups".to_string(),
+            encrypt: false,
+            passphrase: None,
+        }
+    }
+}
+
 /// Root configuration object that is persisted to disk and loaded on startup.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SystemConfig {
@@ -961,4 +991,7 @@ pub struct SystemConfig {
     /// CrowdSec bouncer integration configuration.
     #[serde(default)]
     pub crowdsec: Option<CrowdSecConfig>,
+    /// Automatic backup scheduler configuration.
+    #[serde(default)]
+    pub backup_schedule: Option<BackupScheduleConfig>,
 }

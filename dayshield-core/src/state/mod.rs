@@ -8,7 +8,10 @@ use std::{collections::HashMap, sync::Arc};
 
 use tokio::sync::RwLock;
 
-use crate::config::models::{FirewallRule, Interface};
+use crate::config::{
+    models::{FirewallRule, Interface},
+    ConfigStore,
+};
 
 /// Known DayShield service names used as health-map keys.
 pub const SVC_NFTABLES: &str = "nftables";
@@ -20,8 +23,8 @@ pub const SVC_CROWDSEC: &str = "crowdsec";
 
 /// Shared application state.
 ///
-/// All fields are wrapped in [`RwLock`] so that handlers can hold read locks
-/// concurrently and only serialise on writes.
+/// All mutable fields are wrapped in [`RwLock`] so that handlers can hold read
+/// locks concurrently and only serialise on writes.
 pub struct AppState {
     /// Health map: `service_name -> is_healthy`.
     pub services: RwLock<HashMap<String, bool>>,
@@ -29,6 +32,8 @@ pub struct AppState {
     pub interfaces: RwLock<Vec<Interface>>,
     /// In-memory list of active firewall rules.
     pub firewall_rules: RwLock<Vec<FirewallRule>>,
+    /// Persistent configuration store.
+    pub config_store: ConfigStore,
 }
 
 impl AppState {
@@ -53,7 +58,16 @@ impl AppState {
             services: RwLock::new(services),
             interfaces: RwLock::new(vec![]),
             firewall_rules: RwLock::new(vec![]),
+            config_store: ConfigStore::new(),
         }
+    }
+
+    /// Create a new [`AppState`] using a custom config directory (useful for
+    /// tests that must not touch `/etc/dayshield`).
+    pub fn with_config_dir(dir: impl AsRef<std::path::Path>) -> Self {
+        let mut state = Self::new();
+        state.config_store = ConfigStore::with_dir(dir);
+        state
     }
 
     /// Mark a service as healthy.

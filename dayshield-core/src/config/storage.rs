@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
-use super::models::SystemConfig;
+use super::models::{Interface, SystemConfig};
 
 /// Default path to the configuration directory.
 const DEFAULT_CONFIG_DIR: &str = "/etc/dayshield/config";
@@ -79,18 +79,37 @@ impl ConfigStore {
     ///
     /// Returns `Ok(())` when the config is valid, or an [`anyhow::Error`]
     /// describing the first validation failure found.
-    ///
-    /// TODO: implement thorough semantic validation (e.g. overlapping DHCP
-    ///       pools, duplicate interface names, invalid CIDR ranges).
     pub fn validate(&self, config: &SystemConfig) -> Result<()> {
-        // Each interface must have a non-empty name.
+        use crate::config::models::{is_valid_cidr, is_valid_interface_name, is_valid_mtu};
+
         for iface in &config.interfaces {
-            if iface.name.is_empty() {
-                anyhow::bail!("Interface with id {} has an empty name", iface.id);
+            if !is_valid_interface_name(&iface.name) {
+                anyhow::bail!(
+                    "Interface {:?} has an invalid name (must be 1–15 alphanumeric/[-_.] chars)",
+                    iface.name
+                );
+            }
+            for cidr in &iface.addresses {
+                if !is_valid_cidr(cidr) {
+                    anyhow::bail!(
+                        "Interface {:?} has invalid CIDR address {:?}",
+                        iface.name,
+                        cidr
+                    );
+                }
+            }
+            if let Some(mtu) = iface.mtu {
+                if !is_valid_mtu(mtu) {
+                    anyhow::bail!(
+                        "Interface {:?} has invalid MTU {} (must be ≥ 68)",
+                        iface.name,
+                        mtu
+                    );
+                }
             }
         }
 
-        // Firewall rules must have a valid priority.
+        // Firewall rules must have a non-negative priority.
         for rule in &config.firewall_rules {
             if rule.priority < 0 {
                 anyhow::bail!(
@@ -102,6 +121,23 @@ impl ConfigStore {
         }
 
         Ok(())
+    }
+
+    /// Return only the interface slice from the persisted config.
+    ///
+    /// Equivalent to `load()?.interfaces` but makes intent explicit.
+    pub fn load_interfaces(&self) -> Result<Vec<Interface>> {
+        Ok(self.load()?.interfaces)
+    }
+
+    /// Atomically replace the interface list in the persisted config.
+    ///
+    /// Loads the current config, replaces `interfaces`, then calls
+    /// [`Self::save_with_rollback`] to write the updated config atomically.
+    pub fn save_interfaces(&self, interfaces: Vec<Interface>) -> Result<()> {
+        let mut config = self.load()?;
+        config.interfaces = interfaces;
+        self.save_with_rollback(&config)
     }
 
     /// Validate and atomically write config to disk.
@@ -211,12 +247,87 @@ impl Default for ConfigStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::models::{is_valid_cidr, is_valid_interface_name, is_valid_mtu, Interface};
 
     fn temp_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("ds-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
+
+    fn make_interface(name: &str) -> Interface {
+        Interface {
+            name: name.into(),
+            description: None,
+            addresses: vec!["192.168.1.1/24".into()],
+            mtu: None,
+            enabled: true,
+            dhcp4: false,
+            dhcp6: false,
+            vlan: None,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Validation helpers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn interface_name_valid() {
+        assert!(is_valid_interface_name("eth0"));
+        assert!(is_valid_interface_name("wlan0"));
+        assert!(is_valid_interface_name("br-lan"));
+        assert!(is_valid_interface_name("wg0"));
+        assert!(is_valid_interface_name("eth0.100"));
+        assert!(is_valid_interface_name("bond_0"));
+    }
+
+    #[test]
+    fn interface_name_invalid() {
+        assert!(!is_valid_interface_name(""));
+        assert!(!is_valid_interface_name("this_name_is_too_long_for_linux"));
+        assert!(!is_valid_interface_name("eth 0"));
+        assert!(!is_valid_interface_name("eth/0"));
+        assert!(!is_valid_interface_name("eth:0"));
+    }
+
+    #[test]
+    fn cidr_valid() {
+        assert!(is_valid_cidr("192.168.1.0/24"));
+        assert!(is_valid_cidr("10.0.0.1/8"));
+        assert!(is_valid_cidr("0.0.0.0/0"));
+        assert!(is_valid_cidr("::1/128"));
+        assert!(is_valid_cidr("2001:db8::/32"));
+        assert!(is_valid_cidr("fe80::1/64"));
+    }
+
+    #[test]
+    fn cidr_invalid() {
+        assert!(!is_valid_cidr("192.168.1.0"));
+        assert!(!is_valid_cidr("192.168.1.0/33"));
+        assert!(!is_valid_cidr("::1/129"));
+        assert!(!is_valid_cidr("not-an-ip/24"));
+        assert!(!is_valid_cidr(""));
+        assert!(!is_valid_cidr("/24"));
+    }
+
+    #[test]
+    fn mtu_valid() {
+        assert!(is_valid_mtu(68));
+        assert!(is_valid_mtu(1500));
+        assert!(is_valid_mtu(9000));
+        assert!(is_valid_mtu(65535));
+    }
+
+    #[test]
+    fn mtu_invalid() {
+        assert!(!is_valid_mtu(0));
+        assert!(!is_valid_mtu(67));
+    }
+
+    // -----------------------------------------------------------------------
+    // Storage round-trip
+    // -----------------------------------------------------------------------
 
     #[test]
     fn load_returns_default_when_missing() {
@@ -242,8 +353,87 @@ mod tests {
     }
 
     #[test]
+    fn save_interfaces_roundtrip() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let ifaces = vec![make_interface("eth0"), make_interface("eth1")];
+        store.save_interfaces(ifaces.clone()).unwrap();
+
+        let loaded = store.load_interfaces().unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].name, "eth0");
+        assert_eq!(loaded[1].name, "eth1");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_invalid_interface_name() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        cfg.interfaces.push(Interface {
+            name: "".into(),
+            description: None,
+            addresses: vec![],
+            mtu: None,
+            enabled: true,
+            dhcp4: false,
+            dhcp6: false,
+            vlan: None,
+        });
+        assert!(store.validate(&cfg).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_invalid_cidr() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        cfg.interfaces.push(Interface {
+            name: "eth0".into(),
+            description: None,
+            addresses: vec!["not-a-cidr".into()],
+            mtu: None,
+            enabled: true,
+            dhcp4: false,
+            dhcp6: false,
+            vlan: None,
+        });
+        assert!(store.validate(&cfg).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_invalid_mtu() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        cfg.interfaces.push(Interface {
+            name: "eth0".into(),
+            description: None,
+            addresses: vec![],
+            mtu: Some(10),
+            enabled: true,
+            dhcp4: false,
+            dhcp6: false,
+            vlan: None,
+        });
+        assert!(store.validate(&cfg).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn save_with_rollback_restores_on_invalid_reload() {
-        // This test verifies that a good config can be saved and re-loaded.
+        // Verify that a good config can be saved and re-loaded successfully.
         let dir = temp_dir();
         let store = ConfigStore::with_dir(&dir);
 

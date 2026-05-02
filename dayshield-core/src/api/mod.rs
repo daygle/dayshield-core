@@ -13,6 +13,7 @@ mod interfaces;
 mod logs;
 mod metrics;
 mod notify;
+mod ntp;
 mod suricata;
 mod system;
 mod wireguard;
@@ -76,6 +77,9 @@ use crate::state::AppState;
 /// - `POST /notify/config`                                 — update notification configuration
 /// - `POST /notify/test`                                   — send a test notification email
 /// - `GET  /notify/categories`                             — list available notification categories
+/// - `GET  /ntp/config`                                    — get NTP configuration
+/// - `POST /ntp/config`                                    — update + apply NTP configuration
+/// - `GET  /ntp/status`                                    — live NTP synchronisation status
 /// - `GET  /dashboard/system`                              — host resource usage summary
 /// - `GET  /dashboard/network`                             — WAN/LAN network overview
 /// - `GET  /dashboard/security`                            — firewall, Suricata, CrowdSec summary
@@ -165,5 +169,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/notify/config", post(notify::update_config))
         .route("/notify/test", post(notify::send_test))
         .route("/notify/categories", get(notify::get_categories))
+        // NTP
+        .route("/ntp/config", get(ntp::get_config))
+        .route("/ntp/config", post(ntp::update_config))
+        .route("/ntp/status", get(ntp::get_status))
         .with_state(state)
 }

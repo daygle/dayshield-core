@@ -25,7 +25,7 @@ use tracing::{debug, info, warn};
 
 use super::models::{
     AcmeConfig, CrowdSecConfig, DhcpConfig, DnsConfig, DnsDomainOverride, DnsHostOverride,
-    FirewallAlias, FirewallRule, Interface, NotifyConfig, SuricataConfig, SystemConfig,
+    FirewallAlias, FirewallRule, Interface, NotifyConfig, NtpConfig, SuricataConfig, SystemConfig,
     WireGuardInterface,
 };
 
@@ -440,6 +440,27 @@ impl ConfigStore {
             }
         }
 
+        // NTP config validation.
+        if let Some(ntp) = &config.ntp {
+            use crate::config::models::validate_ntp_config;
+            if let Err(msg) = validate_ntp_config(ntp) {
+                anyhow::bail!("NTP config is invalid: {msg}");
+            }
+            // Cross-check listen_interfaces against the known interface names.
+            if ntp.enabled && ntp.serve_clients {
+                let known: std::collections::HashSet<&str> =
+                    config.interfaces.iter().map(|i| i.name.as_str()).collect();
+                for iface in &ntp.listen_interfaces {
+                    if !known.is_empty() && !known.contains(iface.as_str()) {
+                        anyhow::bail!(
+                            "NTP listen_interface {:?} is not defined in the interface config",
+                            iface
+                        );
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -644,11 +665,28 @@ impl ConfigStore {
         self.save_with_rollback(&config)
     }
 
+    /// Return the NTP configuration from the persisted config.
+    ///
+    /// Returns `None` if no NTP configuration has been saved yet.
+    pub fn load_ntp_config(&self) -> Result<Option<NtpConfig>> {
+        Ok(self.load()?.ntp)
+    }
+
+    /// Atomically replace the NTP configuration in the persisted config.
+    ///
+    /// Loads the current config, replaces `ntp`, validates, then calls
+    /// [`Self::save_with_rollback`] to write atomically with rollback on
+    /// post-write validation failure.
+    pub fn save_ntp_config(&self, ntp: NtpConfig) -> Result<()> {
+        let mut config = self.load()?;
+        config.ntp = Some(ntp);
+        self.save_with_rollback(&config)
+    }
+
     /// Return the system settings from the persisted config.
     ///
     /// Returns defaults when no settings have been saved yet.
-    pub fn load_system_settings(&self) -> Result<super::models::SystemSettings> {
-        Ok(self.load()?.system_settings.unwrap_or_default())
+    pub fn load_system_settings(&self) -> Result<super::models::SystemSettings> {        Ok(self.load()?.system_settings.unwrap_or_default())
     }
 
     /// Atomically replace the system settings in the persisted config.

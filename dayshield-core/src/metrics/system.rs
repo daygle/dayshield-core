@@ -3,7 +3,7 @@
 //! All data is read directly from the Linux `/proc` and `/sys` virtual
 //! file-systems; no external crates beyond `tokio` are required.
 
-use tokio::{fs, time::Duration};
+use tokio::fs;
 use tracing::warn;
 
 use crate::metrics::SystemMetrics;
@@ -228,10 +228,6 @@ pub async fn collect_system(prev_cpu: Option<&CpuStat>) -> (SystemMetrics, CpuSt
         curr_cpu,
     )
 }
-
-// Unused in non-Linux builds, suppress the warning.
-#[allow(dead_code)]
-const _INTERVAL: Duration = Duration::from_secs(1);
 
 // ---------------------------------------------------------------------------
 // Tests

@@ -386,29 +386,128 @@ pub struct VpnPeer {
 // ACME / TLS certificates
 // ---------------------------------------------------------------------------
 
+fn default_acme_directory_url() -> String {
+    "https://acme-v02.api.letsencrypt.org/directory".to_string()
+}
+
+fn default_acme_renew_interval_hours() -> u64 {
+    24
+}
+
+fn default_acme_cert_storage_path() -> String {
+    "/etc/dayshield/certs".to_string()
+}
+
 /// ACME provider to use for certificate issuance.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AcmeProvider {
+    #[default]
     LetsEncrypt,
     ZeroSSL,
     Buypass,
     Custom,
 }
 
+/// Challenge type used for ACME domain validation.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AcmeChallengeType {
+    /// HTTP-01: serve a token at `http://<domain>/.well-known/acme-challenge/<token>`.
+    /// Requires port 80 to be reachable from the ACME server.
+    #[default]
+    Http01,
+    /// DNS-01: create a TXT record `_acme-challenge.<domain>` with the key-authorization digest.
+    Dns01,
+}
+
 /// Configuration for automatic TLS certificate management via ACME.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcmeConfig {
+    /// Whether ACME certificate automation is enabled.
     pub enabled: bool,
-    pub provider: AcmeProvider,
+    /// ACME directory URL.  Defaults to the Let's Encrypt production endpoint.
+    #[serde(default = "default_acme_directory_url")]
+    pub directory_url: String,
     /// ACME account e-mail address.
     pub email: String,
-    /// Directory URL override (used when provider is `Custom`).
-    pub directory_url: Option<String>,
     /// Domains for which certificates should be issued.
     pub domains: Vec<String>,
-    /// Path where issued certificates will be stored.
+    /// Challenge type used to prove domain ownership.
+    #[serde(default)]
+    pub challenge_type: AcmeChallengeType,
+    /// How often (in hours) the renewal scheduler checks for expiring certificates.
+    #[serde(default = "default_acme_renew_interval_hours")]
+    pub renew_interval_hours: u64,
+    /// ACME provider hint (retained for backward compatibility).
+    #[serde(default)]
+    pub provider: AcmeProvider,
+    /// Path where issued certificates and account credentials will be stored.
+    #[serde(default = "default_acme_cert_storage_path")]
     pub cert_storage_path: String,
+}
+
+// ---------------------------------------------------------------------------
+// Validation helpers — ACME
+// ---------------------------------------------------------------------------
+
+/// Return `true` if `email` is a syntactically valid e-mail address.
+///
+/// Accepts any string of the form `<local>@<domain>` where `<local>` is
+/// non-empty and `<domain>` passes [`is_valid_domain`].
+pub fn validate_email(email: &str) -> bool {
+    let mut parts = email.splitn(2, '@');
+    let local = parts.next().unwrap_or("");
+    let domain = match parts.next() {
+        Some(d) => d,
+        None => return false,
+    };
+    !local.is_empty() && is_valid_domain(domain)
+}
+
+/// Return `true` if `url` is a syntactically valid ACME directory URL.
+///
+/// Delegates to [`validate_url`]: accepts any `http://` or `https://` URL
+/// with a non-empty host component.
+pub fn validate_directory_url(url: &str) -> bool {
+    validate_url(url)
+}
+
+/// Return `true` for any [`AcmeChallengeType`] value.
+///
+/// All variants are valid; this helper provides a uniform `validate_*`
+/// surface alongside the other ACME validators.
+pub fn validate_challenge_type(_t: &AcmeChallengeType) -> bool {
+    true
+}
+
+/// Return `Ok(())` if `config` is a valid [`AcmeConfig`], or `Err` with a
+/// descriptive message describing the first validation failure.
+pub fn validate_acme_config(config: &AcmeConfig) -> Result<(), String> {
+    if !validate_email(&config.email) {
+        return Err(format!(
+            "acme email {:?} is not a valid e-mail address",
+            config.email
+        ));
+    }
+    if config.domains.is_empty() {
+        return Err("acme domains must not be empty".into());
+    }
+    for domain in &config.domains {
+        if !is_valid_domain(domain) {
+            return Err(format!(
+                "acme domain {:?} is not a valid domain name",
+                domain
+            ));
+        }
+    }
+    if !validate_directory_url(&config.directory_url) {
+        return Err(format!(
+            "acme directory_url {:?} is not a valid HTTP/HTTPS URL",
+            config.directory_url
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

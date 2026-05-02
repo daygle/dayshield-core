@@ -20,6 +20,7 @@ pub const SVC_DNS: &str = "dns";
 pub const SVC_DHCP: &str = "dhcp";
 pub const SVC_VPN: &str = "vpn";
 pub const SVC_CROWDSEC: &str = "crowdsec";
+pub const SVC_ACME: &str = "acme";
 
 /// Shared application state.
 ///
@@ -52,6 +53,7 @@ impl AppState {
             SVC_DHCP,
             SVC_VPN,
             SVC_CROWDSEC,
+            SVC_ACME,
         ] {
             services.insert(name.to_string(), false);
         }

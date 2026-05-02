@@ -455,7 +455,7 @@ pub struct CrowdSecConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CrowdSecDecision {
     /// Numeric decision ID assigned by the LAPI.
-    pub id: u64,
+    pub id: i64,
     /// The IP address or CIDR range to act on.
     pub value: String,
     /// Remediation type — `"ban"`, `"captcha"`, etc.

@@ -436,6 +436,58 @@ pub struct CrowdsecPolicy {
     pub sync_to_nftables: bool,
 }
 
+/// Configuration for the CrowdSec bouncer integration.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CrowdSecConfig {
+    /// Whether the CrowdSec integration is active.
+    pub enabled: bool,
+    /// URL of the CrowdSec Local API, e.g. `http://127.0.0.1:8080`.
+    pub lapi_url: String,
+    /// Bouncer API key issued by the CrowdSec agent.
+    pub api_key: String,
+    /// How often (in seconds) to poll the LAPI for new decisions.
+    pub update_interval: u64,
+    /// Name of the nftables set that receives banned IPs/CIDRs.
+    pub ban_alias_name: String,
+}
+
+/// A CrowdSec remediation decision received from the Local API.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CrowdSecDecision {
+    /// Numeric decision ID assigned by the LAPI.
+    pub id: i64,
+    /// The IP address or CIDR range to act on.
+    pub value: String,
+    /// Remediation type — `"ban"`, `"captcha"`, etc.
+    #[serde(rename = "type")]
+    pub type_: String,
+    /// Scope of the decision — `"Ip"`, `"Range"`, etc.
+    pub scope: String,
+    /// Human-readable duration string, e.g. `"4h"`, `"1d"`.
+    pub duration: String,
+}
+
+// ---------------------------------------------------------------------------
+// Validation helpers — CrowdSec
+// ---------------------------------------------------------------------------
+
+/// Return `true` if `api_key` is a non-empty string.
+///
+/// CrowdSec API keys are opaque strings; the only hard requirement is that
+/// they must not be empty.
+pub fn validate_api_key(api_key: &str) -> bool {
+    !api_key.trim().is_empty()
+}
+
+/// Return `true` if `value` is either a valid IP address or a valid CIDR.
+///
+/// Accepts:
+/// - Any bare IP parseable as [`std::net::IpAddr`].
+/// - Any CIDR string accepted by [`is_valid_cidr`].
+pub fn validate_ip_or_cidr(value: &str) -> bool {
+    value.parse::<std::net::IpAddr>().is_ok() || is_valid_cidr(value)
+}
+
 // ---------------------------------------------------------------------------
 // Suricata IPS
 // ---------------------------------------------------------------------------
@@ -807,4 +859,7 @@ pub struct SystemConfig {
     /// Per-domain DNS forwarding overrides.
     #[serde(default)]
     pub dns_domain_overrides: Vec<DnsDomainOverride>,
+    /// CrowdSec bouncer integration configuration.
+    #[serde(default)]
+    pub crowdsec: Option<CrowdSecConfig>,
 }

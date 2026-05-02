@@ -33,4 +33,4 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # HTTP client (used for URL-table alias fetching)
-reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["rustls-tls", "json"], default-features = false }

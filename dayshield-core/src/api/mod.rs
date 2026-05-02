@@ -1,6 +1,7 @@
 //! API module — assembles the Axum router and registers all route handlers.
 
 mod aliases;
+mod crowdsec;
 mod dhcp;
 mod dns;
 mod dns_overrides;
@@ -43,6 +44,9 @@ use crate::state::AppState;
 /// - `POST /wireguard/interfaces`                          — create / update a WireGuard interface
 /// - `DELETE /wireguard/interfaces/{name}`                 — remove a WireGuard interface
 /// - `POST /wireguard/interfaces/{name}/generate-keys`     — generate a WireGuard keypair
+/// - `GET  /crowdsec/config`                                  — get CrowdSec bouncer configuration
+/// - `POST /crowdsec/config`                                  — update CrowdSec bouncer configuration
+/// - `GET  /crowdsec/decisions`                               — list cached CrowdSec decisions
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         // System
@@ -73,6 +77,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Suricata IPS
         .route("/ips/config", get(suricata::get_config))
         .route("/ips/config", post(suricata::update_config))
+        // CrowdSec
+        .route("/crowdsec/config", get(crowdsec::get_config))
+        .route("/crowdsec/config", post(crowdsec::update_config))
+        .route("/crowdsec/decisions", get(crowdsec::get_decisions))
         // WireGuard VPN
         .route(
             "/wireguard/interfaces",

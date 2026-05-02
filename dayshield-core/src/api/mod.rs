@@ -52,6 +52,7 @@ use crate::state::AppState;
 /// - `POST /acme/issue`                                    — trigger immediate certificate issuance
 /// - `GET  /acme/status`                                   — certificate status and expiry info
 /// - `GET  /.well-known/acme-challenge/{token}`            — serve HTTP-01 challenge token
+/// - `POST /wireguard/interfaces/{name}/generate-keys`     — generate a WireGuard keypair
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         // System

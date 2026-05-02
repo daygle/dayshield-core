@@ -8,9 +8,12 @@ use std::{collections::HashMap, sync::Arc};
 
 use tokio::sync::RwLock;
 
-use crate::config::{
-    models::{CrowdSecDecision, FirewallRule, Interface},
-    ConfigStore,
+use crate::{
+    config::{
+        models::{CrowdSecDecision, FirewallRule, Interface},
+        ConfigStore,
+    },
+    metrics::buffer::MetricsBuffer,
 };
 
 /// Known DayShield service names used as health-map keys.
@@ -37,6 +40,8 @@ pub struct AppState {
     pub crowdsec_decisions: RwLock<Vec<CrowdSecDecision>>,
     /// Persistent configuration store.
     pub config_store: ConfigStore,
+    /// In-memory time-series buffer for metrics snapshots.
+    pub metrics_buffer: RwLock<MetricsBuffer>,
 }
 
 impl AppState {
@@ -64,6 +69,7 @@ impl AppState {
             firewall_rules: RwLock::new(vec![]),
             crowdsec_decisions: RwLock::new(vec![]),
             config_store: ConfigStore::new(),
+            metrics_buffer: RwLock::new(MetricsBuffer::default()),
         }
     }
 

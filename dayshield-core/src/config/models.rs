@@ -33,26 +33,75 @@ pub enum InterfaceType {
 /// Represents a managed network interface.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Interface {
-    /// Unique identifier.
-    pub id: Uuid,
     /// OS-level interface name, e.g. `eth0` or `wg0`.
     pub name: String,
     /// Optional human-readable description.
     pub description: Option<String>,
-    /// Interface type.
-    pub if_type: InterfaceType,
-    /// Whether the interface should be brought up.
-    pub enabled: bool,
-    /// IPv4 address in dotted-decimal notation.
-    pub ipv4_address: Option<String>,
-    /// IPv4 prefix length (CIDR).
-    pub ipv4_prefix_len: Option<u8>,
-    /// IPv6 address.
-    pub ipv6_address: Option<String>,
-    /// IPv6 prefix length (CIDR).
-    pub ipv6_prefix_len: Option<u8>,
+    /// IP addresses in CIDR notation, e.g. `["192.168.1.1/24", "10.0.0.1/8"]`.
+    #[serde(default)]
+    pub addresses: Vec<String>,
     /// MTU in bytes (defaults to 1500 when `None`).
     pub mtu: Option<u16>,
+    /// Whether the interface should be brought up.
+    pub enabled: bool,
+    /// Obtain an IPv4 address via DHCP.
+    pub dhcp4: bool,
+    /// Obtain an IPv6 address via DHCP (reserved for future use).
+    pub dhcp6: bool,
+    /// VLAN tag ID (802.1Q), if this is a VLAN sub-interface.
+    pub vlan: Option<u16>,
+}
+
+// ---------------------------------------------------------------------------
+// Validation helpers
+// ---------------------------------------------------------------------------
+
+/// Return `true` if `name` is a valid Linux network interface name.
+///
+/// Rules:
+/// - Non-empty.
+/// - At most 15 bytes (Linux `IFNAMSIZ - 1`).
+/// - Only alphanumeric characters, hyphens (`-`), underscores (`_`), dots (`.`).
+pub fn is_valid_interface_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 15
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
+/// Return `true` if `cidr` is a valid IPv4 or IPv6 CIDR string.
+///
+/// Accepts `"<addr>/<prefix-len>"` where `addr` is parseable as either
+/// [`std::net::Ipv4Addr`] or [`std::net::Ipv6Addr`] and the prefix length is
+/// in the valid range for the address family.
+pub fn is_valid_cidr(cidr: &str) -> bool {
+    let mut parts = cidr.splitn(2, '/');
+    let addr_str = match parts.next() {
+        Some(s) => s,
+        None => return false,
+    };
+    let prefix_str = match parts.next() {
+        Some(s) => s,
+        None => return false,
+    };
+    let prefix_len: u8 = match prefix_str.parse() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+
+    if let Ok(_) = addr_str.parse::<std::net::Ipv4Addr>() {
+        return prefix_len <= 32;
+    }
+    if let Ok(_) = addr_str.parse::<std::net::Ipv6Addr>() {
+        return prefix_len <= 128;
+    }
+    false
+}
+
+/// Return `true` if `mtu` is within the acceptable range (68–65 535 bytes).
+pub fn is_valid_mtu(mtu: u16) -> bool {
+    mtu >= 68
 }
 
 // ---------------------------------------------------------------------------

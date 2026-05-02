@@ -1,57 +1,138 @@
 //! Interface endpoints — `GET /interfaces` and `POST /interfaces`.
+//!
+//! # GET /interfaces
+//!
+//! Returns a combined view of:
+//! - `configured` — the interface list persisted in config storage.
+//! - `kernel`     — live interfaces discovered via `ip -j link` / `ip -j addr`.
+//!
+//! # POST /interfaces
+//!
+//! Accepts an [`Interface`] JSON body, validates it, atomically persists it,
+//! and triggers the engine to apply the changes to the kernel.
 
 use std::sync::Arc;
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use serde::Deserialize;
+use serde::Serialize;
+use tracing::{info, warn};
 
 use crate::{
-    config::models::{Interface, InterfaceType},
+    config::models::{is_valid_cidr, is_valid_interface_name, is_valid_mtu, Interface},
+    engine::interfaces::{apply_interface, list_kernel_interfaces, InterfaceError, KernelInterface},
     state::AppState,
 };
 
-/// Handler: list all network interfaces currently held in state.
-pub async fn list_interfaces(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let ifaces = state.interfaces.read().await;
-    Json(ifaces.clone())
+// ---------------------------------------------------------------------------
+// Response types
+// ---------------------------------------------------------------------------
+
+/// Response body for `GET /interfaces`.
+#[derive(Serialize)]
+pub struct ListInterfacesResponse {
+    /// Interfaces stored in persistent configuration.
+    pub configured: Vec<Interface>,
+    /// Interfaces currently visible to the kernel.
+    pub kernel: Vec<KernelInterface>,
 }
 
-/// Request body for `POST /interfaces`.
-#[derive(Deserialize)]
-pub struct CreateInterfaceRequest {
-    pub name: String,
-    pub description: Option<String>,
-    pub if_type: InterfaceType,
-    pub enabled: bool,
-    pub ipv4_address: Option<String>,
-    pub ipv4_prefix_len: Option<u8>,
-    pub ipv6_address: Option<String>,
-    pub ipv6_prefix_len: Option<u8>,
-    pub mtu: Option<u16>,
-}
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
 
-/// Handler: create or replace a network interface entry.
-pub async fn create_interface(
+/// Handler: list configured and kernel-visible network interfaces.
+pub async fn list_interfaces(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<CreateInterfaceRequest>,
-) -> impl IntoResponse {
-    let iface = Interface {
-        id: uuid::Uuid::new_v4(),
-        name: req.name,
-        description: req.description,
-        if_type: req.if_type,
-        enabled: req.enabled,
-        ipv4_address: req.ipv4_address,
-        ipv4_prefix_len: req.ipv4_prefix_len,
-        ipv6_address: req.ipv6_address,
-        ipv6_prefix_len: req.ipv6_prefix_len,
-        mtu: req.mtu,
-    };
+) -> Result<impl IntoResponse, InterfaceError> {
+    // Load configured interfaces from persistent storage.
+    let configured = state
+        .config_store
+        .load_interfaces()
+        .map_err(InterfaceError::StorageError)?;
 
+    info!(count = configured.len(), "interfaces: loaded configured interfaces");
+
+    // Sync the in-memory cache with what is on disk.
     {
         let mut ifaces = state.interfaces.write().await;
-        ifaces.push(iface.clone());
+        *ifaces = configured.clone();
     }
 
-    (StatusCode::CREATED, Json(iface))
+    // Discover kernel interfaces.
+    let kernel = match list_kernel_interfaces().await {
+        Ok(k) => k,
+        Err(e) => {
+            warn!(error = %e, "interfaces: kernel discovery failed; returning empty list");
+            vec![]
+        }
+    };
+
+    info!(count = kernel.len(), "interfaces: discovered kernel interfaces");
+
+    Ok(Json(ListInterfacesResponse { configured, kernel }))
+}
+
+/// Handler: create or update a network interface.
+///
+/// Validates the incoming [`Interface`], upserts it in the in-memory cache and
+/// persistent storage, then asks the engine to apply the configuration.
+pub async fn create_interface(
+    State(state): State<Arc<AppState>>,
+    Json(iface): Json<Interface>,
+) -> Result<impl IntoResponse, InterfaceError> {
+    // --- Validation --------------------------------------------------------
+
+    if !is_valid_interface_name(&iface.name) {
+        return Err(InterfaceError::InvalidName(iface.name.clone()));
+    }
+
+    if let Some(mtu) = iface.mtu {
+        if !is_valid_mtu(mtu) {
+            return Err(InterfaceError::ApplyFailed(format!(
+                "invalid MTU {mtu}: must be ≥ 68"
+            )));
+        }
+    }
+
+    for cidr in &iface.addresses {
+        if !is_valid_cidr(cidr) {
+            return Err(InterfaceError::InvalidCIDR(cidr.clone()));
+        }
+    }
+
+    info!(
+        name = %iface.name,
+        enabled = iface.enabled,
+        "interfaces: received create/update request"
+    );
+
+    // --- Persist -----------------------------------------------------------
+
+    // Upsert in the in-memory cache (match by name).
+    {
+        let mut ifaces = state.interfaces.write().await;
+        match ifaces.iter().position(|i| i.name == iface.name) {
+            Some(pos) => ifaces[pos] = iface.clone(),
+            None => ifaces.push(iface.clone()),
+        }
+    }
+
+    // Atomically write the updated list to disk.
+    {
+        let ifaces = state.interfaces.read().await;
+        state
+            .config_store
+            .save_interfaces(ifaces.clone())
+            .map_err(InterfaceError::StorageError)?;
+    }
+
+    info!(name = %iface.name, "interfaces: configuration persisted");
+
+    // --- Apply -------------------------------------------------------------
+
+    apply_interface(&iface).await?;
+
+    info!(name = %iface.name, "interfaces: engine apply complete");
+
+    Ok((StatusCode::CREATED, Json(iface)))
 }

@@ -9,7 +9,7 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 
 use crate::config::{
-    models::{FirewallRule, Interface},
+    models::{CrowdSecDecision, FirewallRule, Interface},
     ConfigStore,
 };
 use crate::engine::acme::ChallengeStore;
@@ -34,6 +34,8 @@ pub struct AppState {
     pub interfaces: RwLock<Vec<Interface>>,
     /// In-memory list of active firewall rules.
     pub firewall_rules: RwLock<Vec<FirewallRule>>,
+    /// Cached CrowdSec decisions fetched from the LAPI.
+    pub crowdsec_decisions: RwLock<Vec<CrowdSecDecision>>,
     /// Persistent configuration store.
     pub config_store: ConfigStore,
     /// In-process store for pending HTTP-01 ACME challenge tokens.
@@ -63,6 +65,7 @@ impl AppState {
             services: RwLock::new(services),
             interfaces: RwLock::new(vec![]),
             firewall_rules: RwLock::new(vec![]),
+            crowdsec_decisions: RwLock::new(vec![]),
             config_store: ConfigStore::new(),
             acme_challenge_store: ChallengeStore::default(),
         }

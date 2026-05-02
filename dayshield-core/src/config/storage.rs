@@ -24,8 +24,8 @@ use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
 use super::models::{
-    AcmeConfig, DhcpConfig, DnsConfig, DnsDomainOverride, DnsHostOverride, FirewallAlias,
-    FirewallRule, Interface, SuricataConfig, SystemConfig, WireGuardInterface,
+    AcmeConfig, CrowdSecConfig, DhcpConfig, DnsConfig, DnsDomainOverride, DnsHostOverride,
+    FirewallAlias, FirewallRule, Interface, SuricataConfig, SystemConfig, WireGuardInterface,
 };
 
 /// Default path to the configuration directory.
@@ -421,7 +421,51 @@ impl ConfigStore {
             }
         }
 
+        // CrowdSec config validation.
+        if let Some(cs) = &config.crowdsec {
+            use crate::config::models::{validate_alias_name, validate_api_key, validate_url};
+            if cs.enabled {
+                if !validate_url(&cs.lapi_url) {
+                    anyhow::bail!(
+                        "CrowdSec lapi_url {:?} is not a valid HTTP/HTTPS URL",
+                        cs.lapi_url
+                    );
+                }
+                if !validate_api_key(&cs.api_key) {
+                    anyhow::bail!("CrowdSec api_key must not be empty");
+                }
+                if cs.update_interval == 0 {
+                    anyhow::bail!("CrowdSec update_interval must be greater than 0");
+                }
+                if !validate_alias_name(&cs.ban_alias_name) {
+                    anyhow::bail!(
+                        "CrowdSec ban_alias_name {:?} is invalid \
+                         (must be 1–63 chars, start with letter or _, contain only [A-Za-z0-9_])",
+                        cs.ban_alias_name
+                    );
+                }
+            }
+        }
+
         Ok(())
+    }
+
+    /// Return the CrowdSec configuration from the persisted config.
+    ///
+    /// Returns `None` if no CrowdSec configuration has been saved yet.
+    pub fn load_crowdsec_config(&self) -> Result<Option<CrowdSecConfig>> {
+        Ok(self.load()?.crowdsec)
+    }
+
+    /// Atomically replace the CrowdSec configuration in the persisted config.
+    ///
+    /// Loads the current config, replaces `crowdsec`, validates, then calls
+    /// [`Self::save_with_rollback`] to write atomically with rollback on
+    /// post-write validation failure.
+    pub fn save_crowdsec_config(&self, crowdsec: CrowdSecConfig) -> Result<()> {
+        let mut config = self.load()?;
+        config.crowdsec = Some(crowdsec);
+        self.save_with_rollback(&config)
     }
 
     /// Return the WireGuard interface list from the persisted config.

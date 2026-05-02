@@ -185,7 +185,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_tail_detects_rotation() {
-        use std::io::Write;
         use tokio::time::{sleep, Duration};
 
         // Start with a file containing one line.

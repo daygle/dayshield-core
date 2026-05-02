@@ -9,10 +9,12 @@
 //! | [`apply_rules`]       | Write ruleset to a temp file and run `nft -f`.      |
 //! | [`flush_rules`]       | Flush the entire nftables ruleset.                  |
 
+use std::collections::HashMap;
+
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
-use crate::config::models::{Action, FirewallRule, NatRule, NatType, Protocol};
+use crate::config::models::{Action, AliasType, FirewallAlias, FirewallRule, NatRule, NatType, Protocol};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -69,17 +71,28 @@ impl axum::response::IntoResponse for NftError {
 ///
 /// The ruleset includes:
 /// - `flush ruleset` to replace any existing state atomically.
+/// - Named `set` declarations inside `table inet filter` for each enabled alias.
 /// - `table inet filter` with `input`, `forward`, and `output` chains.
 /// - Rules translated from [`FirewallRule`], sorted by `priority` (ascending).
 /// - `table inet nat` with `prerouting` and `postrouting` chains (only when
 ///   `nat_rules` is non-empty).
-pub fn generate_ruleset(rules: &[FirewallRule], nat_rules: &[NatRule]) -> String {
+///
+/// `resolved_url_tables` maps alias name → resolved IP/CIDR list for
+/// [`AliasType::UrlTable`] aliases (fetched asynchronously by the caller
+/// before generating the ruleset).
+pub fn generate_ruleset(
+    rules: &[FirewallRule],
+    nat_rules: &[NatRule],
+    aliases: &[FirewallAlias],
+    resolved_url_tables: &HashMap<String, Vec<String>>,
+) -> String {
     let mut sorted: Vec<&FirewallRule> = rules.iter().collect();
     sorted.sort_by_key(|r| r.priority);
 
     debug!(
         fw_rules = sorted.len(),
         nat_rules = nat_rules.len(),
+        aliases = aliases.len(),
         "nftables: generating ruleset"
     );
 
@@ -91,6 +104,16 @@ pub fn generate_ruleset(rules: &[FirewallRule], nat_rules: &[NatRule]) -> String
     // inet filter table
     // ------------------------------------------------------------------
     out.push_str("table inet filter {\n");
+
+    // Emit named sets for each enabled alias.
+    for alias in aliases.iter().filter(|a| a.enabled) {
+        let set_body = alias_set_body(alias, resolved_url_tables);
+        if let Some(body) = set_body {
+            out.push_str(&format!("    set {} {{\n", alias.name));
+            out.push_str(&body);
+            out.push_str("    }\n\n");
+        }
+    }
 
     // input chain
     out.push_str("    chain input {\n");
@@ -148,6 +171,7 @@ pub fn generate_ruleset(rules: &[FirewallRule], nat_rules: &[NatRule]) -> String
     info!(
         fw_rules = rules.len(),
         nat_rules = nat_rules.len(),
+        aliases = aliases.len(),
         "nftables: ruleset generated ({} bytes)",
         out.len()
     );
@@ -158,12 +182,23 @@ pub fn generate_ruleset(rules: &[FirewallRule], nat_rules: &[NatRule]) -> String
 /// Write `rules` + `nat_rules` as a complete nftables ruleset to a temp file
 /// and apply it with `nft -f <tempfile>`.
 ///
+/// URL-table aliases are fetched via HTTP before the ruleset is generated and
+/// their resolved IP/CIDR lists are cached under
+/// `/var/lib/dayshield/aliases/<alias_name>.cache`.
+///
 /// # Errors
 ///
 /// Returns [`NftError::ApplyFailed`] if the temp file cannot be written or
 /// `nft` exits non-zero.
-pub async fn apply_rules(rules: &[FirewallRule], nat_rules: &[NatRule]) -> Result<(), NftError> {
-    let ruleset = generate_ruleset(rules, nat_rules);
+pub async fn apply_rules(
+    rules: &[FirewallRule],
+    nat_rules: &[NatRule],
+    aliases: &[FirewallAlias],
+) -> Result<(), NftError> {
+    // Resolve URL-table aliases (fetch + cache).
+    let resolved_url_tables = resolve_url_tables(aliases).await;
+
+    let ruleset = generate_ruleset(rules, nat_rules, aliases, &resolved_url_tables);
 
     // Unique temp file name based on milliseconds since UNIX epoch.
     let ts = std::time::SystemTime::now()
@@ -241,6 +276,144 @@ pub async fn flush_rules() -> Result<(), NftError> {
 
     info!("nftables: ruleset flushed");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Private: alias expansion helpers
+// ---------------------------------------------------------------------------
+
+/// Cache directory for URL-table alias contents.
+const ALIAS_CACHE_DIR: &str = "/var/lib/dayshield/aliases";
+
+/// Fetch and cache all URL-table aliases, returning a map of alias name →
+/// resolved IP/CIDR list.
+///
+/// Each URL is fetched via HTTP GET.  The response body is split on whitespace
+/// and blank lines; lines starting with `#` are treated as comments and
+/// ignored.  The resolved list is written to a cache file so that subsequent
+/// calls can fall back to stale data when the remote is unreachable.
+async fn resolve_url_tables(aliases: &[FirewallAlias]) -> HashMap<String, Vec<String>> {
+    let mut result = HashMap::new();
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("nftables: failed to build HTTP client for URL-table fetch: {e}");
+            return result;
+        }
+    };
+
+    let cache_dir = std::path::Path::new(ALIAS_CACHE_DIR);
+    let _ = std::fs::create_dir_all(cache_dir);
+
+    for alias in aliases.iter().filter(|a| a.enabled && a.alias_type == AliasType::UrlTable) {
+        let mut entries: Vec<String> = Vec::new();
+
+        for url in &alias.values {
+            match client.get(url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.text().await {
+                        Ok(body) => {
+                            let fetched: Vec<String> = body
+                                .lines()
+                                .map(|l| l.split('#').next().unwrap_or("").trim().to_string())
+                                .filter(|l| !l.is_empty())
+                                .collect();
+                            // Write cache file.
+                            let cache_path = cache_dir.join(format!("{}.cache", alias.name));
+                            if let Err(e) = std::fs::write(&cache_path, body.as_bytes()) {
+                                warn!(
+                                    alias = %alias.name,
+                                    path = %cache_path.display(),
+                                    "nftables: failed to write URL-table cache: {e}"
+                                );
+                            }
+                            entries.extend(fetched);
+                        }
+                        Err(e) => {
+                            warn!(alias = %alias.name, url = %url,
+                                  "nftables: failed to decode URL-table response: {e}");
+                        }
+                    }
+                }
+                Ok(resp) => {
+                    warn!(alias = %alias.name, url = %url,
+                          status = %resp.status(),
+                          "nftables: URL-table fetch returned non-success status");
+                }
+                Err(e) => {
+                    warn!(alias = %alias.name, url = %url,
+                          "nftables: URL-table fetch failed: {e}");
+                    // Try to use cached data as fallback.
+                    let cache_path = cache_dir.join(format!("{}.cache", alias.name));
+                    if let Ok(cached) = std::fs::read_to_string(&cache_path) {
+                        let fallback: Vec<String> = cached
+                            .lines()
+                            .map(|l| l.split('#').next().unwrap_or("").trim().to_string())
+                            .filter(|l| !l.is_empty())
+                            .collect();
+                        warn!(alias = %alias.name, count = fallback.len(),
+                              "nftables: using cached URL-table data as fallback");
+                        entries.extend(fallback);
+                    }
+                }
+            }
+        }
+
+        if !entries.is_empty() {
+            result.insert(alias.name.clone(), entries);
+        }
+    }
+
+    result
+}
+
+/// Build the nftables `set` body for a single alias, or return `None` if the
+/// alias has no values to emit.
+///
+/// For URL-table aliases the `resolved_url_tables` map is consulted.
+fn alias_set_body(
+    alias: &FirewallAlias,
+    resolved_url_tables: &HashMap<String, Vec<String>>,
+) -> Option<String> {
+    let values: Vec<String> = match alias.alias_type {
+        AliasType::Host | AliasType::Network => alias.values.clone(),
+        AliasType::Port => alias.values.clone(),
+        AliasType::UrlTable => resolved_url_tables
+            .get(&alias.name)
+            .cloned()
+            .unwrap_or_default(),
+    };
+
+    if values.is_empty() {
+        return None;
+    }
+
+    let mut body = String::new();
+
+    match alias.alias_type {
+        AliasType::Host => {
+            // Determine address family from the first entry.
+            let af = if values[0].contains(':') { "ipv6_addr" } else { "ipv4_addr" };
+            body.push_str(&format!("        type {af}\n"));
+        }
+        AliasType::Network | AliasType::UrlTable => {
+            let af = if values[0].contains(':') { "ipv6_addr" } else { "ipv4_addr" };
+            body.push_str(&format!("        type {af}\n"));
+            body.push_str("        flags interval\n");
+        }
+        AliasType::Port => {
+            body.push_str("        type inet_service\n");
+        }
+    }
+
+    let elements = values.join(", ");
+    body.push_str(&format!("        elements = {{ {elements} }}\n"));
+
+    Some(body)
 }
 
 // ---------------------------------------------------------------------------
@@ -412,7 +585,7 @@ mod tests {
 
     #[test]
     fn empty_ruleset_has_base_structure() {
-        let rs = generate_ruleset(&[], &[]);
+        let rs = generate_ruleset(&[], &[], &[], &HashMap::new());
         assert!(rs.contains("flush ruleset"), "must flush existing rules");
         assert!(rs.contains("table inet filter"), "filter table missing");
         assert!(rs.contains("chain input"), "input chain missing");
@@ -435,7 +608,7 @@ mod tests {
             destination: Some("10.0.0.1/32".into()),
             ..base_rule(0, Action::Accept)
         };
-        let rs = generate_ruleset(&[rule], &[]);
+        let rs = generate_ruleset(&[rule], &[], &[], &HashMap::new());
         assert!(rs.contains("ip saddr 192.168.1.0/24"));
         assert!(rs.contains("ip daddr 10.0.0.1/32"));
         assert!(rs.contains("accept"));
@@ -448,7 +621,7 @@ mod tests {
             destination_port: Some(443),
             ..base_rule(10, Action::Accept)
         };
-        let rs = generate_ruleset(&[rule], &[]);
+        let rs = generate_ruleset(&[rule], &[], &[], &HashMap::new());
         assert!(rs.contains("tcp dport 443"), "tcp dport must appear");
         assert!(rs.contains("accept"));
     }
@@ -461,7 +634,7 @@ mod tests {
             action: Action::Drop,
             ..base_rule(20, Action::Drop)
         };
-        let rs = generate_ruleset(&[rule], &[]);
+        let rs = generate_ruleset(&[rule], &[], &[], &HashMap::new());
         assert!(rs.contains("udp sport 53"));
         assert!(rs.contains("drop"));
     }
@@ -472,21 +645,21 @@ mod tests {
             protocol: Some(Protocol::Tcp),
             ..base_rule(0, Action::Accept)
         };
-        let rs = generate_ruleset(&[rule], &[]);
+        let rs = generate_ruleset(&[rule], &[], &[], &HashMap::new());
         assert!(rs.contains("meta l4proto tcp"));
     }
 
     #[test]
     fn drop_rule() {
         let rule = base_rule(0, Action::Drop);
-        let rs = generate_ruleset(&[rule], &[]);
+        let rs = generate_ruleset(&[rule], &[], &[], &HashMap::new());
         assert!(rs.contains("drop"));
     }
 
     #[test]
     fn reject_rule() {
         let rule = base_rule(0, Action::Reject);
-        let rs = generate_ruleset(&[rule], &[]);
+        let rs = generate_ruleset(&[rule], &[], &[], &HashMap::new());
         assert!(rs.contains("reject"));
     }
 
@@ -496,7 +669,7 @@ mod tests {
             log: true,
             ..base_rule(0, Action::Accept)
         };
-        let rs = generate_ruleset(&[rule], &[]);
+        let rs = generate_ruleset(&[rule], &[], &[], &HashMap::new());
         assert!(rs.contains("log prefix"), "log prefix must appear");
     }
 
@@ -506,7 +679,7 @@ mod tests {
             interface: Some("eth0".into()),
             ..base_rule(0, Action::Accept)
         };
-        let rs = generate_ruleset(&[rule], &[]);
+        let rs = generate_ruleset(&[rule], &[], &[], &HashMap::new());
         assert!(rs.contains("iif \"eth0\""));
     }
 
@@ -516,7 +689,7 @@ mod tests {
             source: Some("2001:db8::/32".into()),
             ..base_rule(0, Action::Accept)
         };
-        let rs = generate_ruleset(&[rule], &[]);
+        let rs = generate_ruleset(&[rule], &[], &[], &HashMap::new());
         assert!(rs.contains("ip6 saddr 2001:db8::/32"));
     }
 
@@ -531,7 +704,7 @@ mod tests {
             ..base_rule(5, Action::Drop)
         };
         // Pass higher-priority rule first; expect lower priority (5) to appear earlier.
-        let rs = generate_ruleset(&[r_high, r_low], &[]);
+        let rs = generate_ruleset(&[r_high, r_low], &[], &[], &HashMap::new());
         let pos_high_prio = rs.find("2.2.2.2").expect("2.2.2.2 not found");
         let pos_low_prio = rs.find("1.1.1.1").expect("1.1.1.1 not found");
         assert!(
@@ -552,7 +725,7 @@ mod tests {
             translated_port: None,
             out_interface: Some("eth0".into()),
         };
-        let rs = generate_ruleset(&[], &[nat]);
+        let rs = generate_ruleset(&[], &[nat], &[], &HashMap::new());
         assert!(rs.contains("table inet nat"));
         assert!(rs.contains("chain postrouting"));
         assert!(rs.contains("ip saddr 192.168.0.0/24"));
@@ -572,7 +745,7 @@ mod tests {
             translated_port: None,
             out_interface: None,
         };
-        let rs = generate_ruleset(&[], &[nat]);
+        let rs = generate_ruleset(&[], &[nat], &[], &HashMap::new());
         assert!(rs.contains("snat to 203.0.113.5"));
     }
 
@@ -588,10 +761,96 @@ mod tests {
             translated_port: Some(8080),
             out_interface: None,
         };
-        let rs = generate_ruleset(&[], &[nat]);
+        let rs = generate_ruleset(&[], &[nat], &[], &HashMap::new());
         assert!(rs.contains("chain prerouting"));
         assert!(rs.contains("ip daddr 203.0.113.1/32"));
         assert!(rs.contains("dnat to 10.0.0.1:8080"));
+    }
+
+    // ------------------------------------------------------------------
+    // Alias set generation
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn host_alias_emits_named_set() {
+        use crate::config::models::{AliasType, FirewallAlias};
+        let alias = FirewallAlias {
+            name: "web_servers".into(),
+            description: None,
+            alias_type: AliasType::Host,
+            values: vec!["192.168.1.10".into(), "192.168.1.11".into()],
+            ttl: None,
+            enabled: true,
+        };
+        let rs = generate_ruleset(&[], &[], &[alias], &HashMap::new());
+        assert!(rs.contains("set web_servers"), "named set must appear");
+        assert!(rs.contains("192.168.1.10"), "IP must appear in set");
+        assert!(rs.contains("ipv4_addr"), "type must be ipv4_addr for IPv4 hosts");
+    }
+
+    #[test]
+    fn network_alias_emits_interval_flag() {
+        use crate::config::models::{AliasType, FirewallAlias};
+        let alias = FirewallAlias {
+            name: "private_nets".into(),
+            description: None,
+            alias_type: AliasType::Network,
+            values: vec!["10.0.0.0/8".into()],
+            ttl: None,
+            enabled: true,
+        };
+        let rs = generate_ruleset(&[], &[], &[alias], &HashMap::new());
+        assert!(rs.contains("set private_nets"));
+        assert!(rs.contains("flags interval"), "network aliases need interval flag");
+    }
+
+    #[test]
+    fn port_alias_emits_inet_service_type() {
+        use crate::config::models::{AliasType, FirewallAlias};
+        let alias = FirewallAlias {
+            name: "web_ports".into(),
+            description: None,
+            alias_type: AliasType::Port,
+            values: vec!["80".into(), "443".into()],
+            ttl: None,
+            enabled: true,
+        };
+        let rs = generate_ruleset(&[], &[], &[alias], &HashMap::new());
+        assert!(rs.contains("set web_ports"));
+        assert!(rs.contains("inet_service"), "port aliases must use inet_service type");
+    }
+
+    #[test]
+    fn disabled_alias_not_emitted() {
+        use crate::config::models::{AliasType, FirewallAlias};
+        let alias = FirewallAlias {
+            name: "disabled_alias".into(),
+            description: None,
+            alias_type: AliasType::Host,
+            values: vec!["1.2.3.4".into()],
+            ttl: None,
+            enabled: false,
+        };
+        let rs = generate_ruleset(&[], &[], &[alias], &HashMap::new());
+        assert!(!rs.contains("disabled_alias"), "disabled alias must not appear in ruleset");
+    }
+
+    #[test]
+    fn url_table_alias_uses_resolved_values() {
+        use crate::config::models::{AliasType, FirewallAlias};
+        let alias = FirewallAlias {
+            name: "blocklist".into(),
+            description: None,
+            alias_type: AliasType::UrlTable,
+            values: vec!["https://example.com/blocklist.txt".into()],
+            ttl: None,
+            enabled: true,
+        };
+        let mut resolved = HashMap::new();
+        resolved.insert("blocklist".into(), vec!["198.51.100.1".into(), "198.51.100.2".into()]);
+        let rs = generate_ruleset(&[], &[], &[alias], &resolved);
+        assert!(rs.contains("set blocklist"));
+        assert!(rs.contains("198.51.100.1"));
     }
 
     // ------------------------------------------------------------------
@@ -620,7 +879,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_rules_does_not_panic_without_nft() {
-        let result = apply_rules(&[], &[]).await;
+        let result = apply_rules(&[], &[], &[]).await;
         match result {
             Ok(()) => {}
             Err(NftError::ApplyFailed(_)) => {}

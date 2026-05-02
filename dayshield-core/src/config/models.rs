@@ -501,6 +501,166 @@ pub fn validate_suricata_config(config: &SuricataConfig) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// Firewall Aliases
+// ---------------------------------------------------------------------------
+
+/// The kind of value stored in a [`FirewallAlias`].
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum AliasType {
+    /// One or more individual IP addresses.
+    Host,
+    /// One or more CIDR network prefixes.
+    Network,
+    /// One or more port numbers or port ranges (e.g. `"80"`, `"8000:8080"`).
+    Port,
+    /// Remote list of IPs/CIDRs fetched via HTTP.
+    UrlTable,
+}
+
+/// A named alias that can be referenced in firewall rules.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FirewallAlias {
+    /// Unique alias name (alphanumeric + underscore, 1–63 chars).
+    pub name: String,
+    /// Optional human-readable description.
+    pub description: Option<String>,
+    /// What kind of values are stored in this alias.
+    pub alias_type: AliasType,
+    /// The alias values: IPs, CIDRs, port strings, or URLs, depending on `alias_type`.
+    pub values: Vec<String>,
+    /// Time-to-live in seconds for URL-table cache refresh.  Only used when
+    /// `alias_type` is [`AliasType::UrlTable`].
+    pub ttl: Option<u64>,
+    /// Whether this alias is currently active.
+    pub enabled: bool,
+}
+
+// ---------------------------------------------------------------------------
+// DNS Overrides
+// ---------------------------------------------------------------------------
+
+/// A host-level DNS override: maps a fully-qualified hostname to an A or AAAA
+/// record address.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DnsHostOverride {
+    /// Fully-qualified hostname, e.g. `"myhost.example.com"`.
+    pub hostname: String,
+    /// IPv4 or IPv6 address to return for this hostname.
+    pub address: String,
+}
+
+/// A domain-level DNS override: forwards all queries for `domain` to a
+/// specific resolver.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DnsDomainOverride {
+    /// Domain to forward, e.g. `"internal.corp"`.
+    pub domain: String,
+    /// IP address of the DNS server to forward queries to.
+    pub forward_to: String,
+}
+
+// ---------------------------------------------------------------------------
+// Validation helpers — aliases
+// ---------------------------------------------------------------------------
+
+/// Return `true` if `name` is a valid firewall alias name.
+///
+/// Rules: non-empty, at most 63 characters, only ASCII letters, digits, and
+/// underscores, must start with a letter or underscore.
+pub fn validate_alias_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 63 {
+        return false;
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Return `true` if `url` looks like a syntactically valid HTTP or HTTPS URL.
+///
+/// Accepts any string that starts with `http://` or `https://` and has a
+/// non-empty host component.
+pub fn validate_url(url: &str) -> bool {
+    let rest = if let Some(r) = url.strip_prefix("https://") {
+        r
+    } else if let Some(r) = url.strip_prefix("http://") {
+        r
+    } else {
+        return false;
+    };
+    // The host part is everything before the first `/` or `?` or end of string.
+    let host = rest.split(&['/', '?']).next().unwrap_or("");
+    !host.is_empty()
+}
+
+/// Return `true` if `port_or_range` is a valid port number or port range.
+///
+/// Accepts:
+/// - A single port number `"80"` (1–65535).
+/// - A range `"8000:8080"` where both ends are valid ports and start ≤ end.
+pub fn validate_port_or_range(port_or_range: &str) -> bool {
+    if let Some((start_str, end_str)) = port_or_range.split_once(':') {
+        match (start_str.parse::<u16>(), end_str.parse::<u16>()) {
+            (Ok(s), Ok(e)) => s > 0 && e > 0 && s <= e,
+            _ => false,
+        }
+    } else {
+        match port_or_range.parse::<u16>() {
+            Ok(p) => p > 0,
+            Err(_) => false,
+        }
+    }
+}
+
+/// Validate all values in a [`FirewallAlias`] against its declared type.
+///
+/// Returns `Ok(())` when every value is consistent with `alias_type`, or an
+/// `Err` describing the first invalid value.
+pub fn validate_alias_values(alias: &FirewallAlias) -> Result<(), String> {
+    if alias.values.is_empty() {
+        return Err(format!("alias {:?} has no values", alias.name));
+    }
+    for v in &alias.values {
+        let ok = match alias.alias_type {
+            AliasType::Host => is_valid_ip(v),
+            AliasType::Network => is_valid_cidr(v),
+            AliasType::Port => validate_port_or_range(v),
+            AliasType::UrlTable => validate_url(v),
+        };
+        if !ok {
+            return Err(format!(
+                "alias {:?}: value {:?} is not valid for type {:?}",
+                alias.name, v, alias.alias_type
+            ));
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Validation helpers — DNS overrides
+// ---------------------------------------------------------------------------
+
+/// Return `true` if `hostname` is a syntactically valid fully-qualified or
+/// relative DNS hostname.
+///
+/// Applies the same rules as [`is_valid_domain`].
+pub fn validate_dns_hostname(hostname: &str) -> bool {
+    is_valid_domain(hostname)
+}
+
+/// Return `true` if `domain` is a syntactically valid DNS domain name.
+///
+/// Applies the same rules as [`is_valid_domain`].
+pub fn validate_dns_domain(domain: &str) -> bool {
+    is_valid_domain(domain)
+}
+
+// ---------------------------------------------------------------------------
 // Top-level system config
 // ---------------------------------------------------------------------------
 
@@ -518,4 +678,13 @@ pub struct SystemConfig {
     pub acme: Option<AcmeConfig>,
     pub crowdsec_policies: Vec<CrowdsecPolicy>,
     pub suricata: Option<SuricataConfig>,
+    /// Named firewall aliases (IP sets, network sets, port sets, URL tables).
+    #[serde(default)]
+    pub firewall_aliases: Vec<FirewallAlias>,
+    /// Per-hostname DNS overrides (A / AAAA records).
+    #[serde(default)]
+    pub dns_host_overrides: Vec<DnsHostOverride>,
+    /// Per-domain DNS forwarding overrides.
+    #[serde(default)]
+    pub dns_domain_overrides: Vec<DnsDomainOverride>,
 }

@@ -21,7 +21,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::model::AuthError;
@@ -76,7 +76,7 @@ pub fn load_or_create_key(path: &Path) -> Result<Vec<u8>, AuthError> {
 
     // Generate a new random key.
     let mut key = vec![0u8; KEY_BYTES];
-    rand::thread_rng().fill_bytes(&mut key);
+    rand::rng().fill(&mut key[..]);
 
     // Ensure parent directory exists.
     if let Some(parent) = path.parent() {

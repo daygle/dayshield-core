@@ -501,18 +501,18 @@ pub async fn delete_static_lease(
 // GET /dhcp/leases
 // ---------------------------------------------------------------------------
 
-/// Return currently active DHCP leases parsed from the dnsmasq leases file.
+/// Return currently active DHCP leases parsed from the Kea memfile lease database.
 ///
-/// File format (one lease per line):
-/// `<expiry_epoch> <mac> <ip> <hostname> <client-id>`
+/// Kea CSV format (one lease per line, first line is header):
+/// `address,hwaddr,client-id,valid-lifetime,expire,subnet-id,fqdn-fwd,fqdn-rev,hostname,state,user-context`
 ///
 /// Returns an empty array when the file does not exist.
 pub async fn list_active_leases(
     State(_state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    const LEASES_FILE: &str = "/var/lib/misc/dnsmasq.leases";
+    use crate::engine::dhcp::KEA_LEASES_PATH;
 
-    let content = match tokio::fs::read_to_string(LEASES_FILE).await {
+    let content = match tokio::fs::read_to_string(KEA_LEASES_PATH).await {
         Ok(c) => c,
         Err(_) => {
             return Json(serde_json::json!({ "success": true, "data": serde_json::json!([]) }));
@@ -524,25 +524,37 @@ pub async fn list_active_leases(
         .unwrap_or_default()
         .as_secs();
 
+    // Skip the CSV header line.
     let leases: Vec<DhcpLeaseResponse> = content
         .lines()
+        .filter(|l| !l.starts_with("address") && !l.is_empty())
         .filter_map(|line| {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() < 4 {
-                return None;
-            }
-            let expiry: u64 = parts[0].parse().ok()?;
-            let state_str = if expiry > now { "active" } else { "expired" };
+            // address,hwaddr,client-id,valid-lifetime,expire,subnet-id,
+            //   fqdn-fwd,fqdn-rev,hostname,state,user-context
+            let mut cols = line.splitn(11, ',');
+            let address       = cols.next()?.to_string();
+            let hwaddr        = cols.next()?.to_string();
+            let _client_id    = cols.next();
+            let _valid_life   = cols.next();
+            let expire: u64   = cols.next()?.parse().ok()?;
+            let _subnet_id    = cols.next();
+            let _fqdn_fwd     = cols.next();
+            let _fqdn_rev     = cols.next();
+            let hostname      = cols.next().unwrap_or("").to_string();
+            let state_col: u8 = cols.next().unwrap_or("0").trim().parse().unwrap_or(0);
+            // Kea state: 0=default(active), 1=declined, 2=expired-reclaimed
+            let state_str = match state_col {
+                0 if expire > now => "active",
+                0                 => "expired",
+                1                 => "declined",
+                _                 => "reclaimed",
+            };
             Some(DhcpLeaseResponse {
-                mac: parts[1].to_string(),
-                ip_address: parts[2].to_string(),
-                hostname: if parts[3] == "*" {
-                    String::new()
-                } else {
-                    parts[3].to_string()
-                },
+                mac: hwaddr,
+                ip_address: address,
+                hostname,
                 starts: String::new(),
-                ends: expiry.to_string(),
+                ends: expire.to_string(),
                 state: state_str.to_string(),
             })
         })

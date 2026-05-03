@@ -112,6 +112,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Interfaces
         .route("/interfaces", get(interfaces::list_interfaces))
         .route("/interfaces", post(interfaces::create_interface))
+        .route("/interfaces/{name}", delete(interfaces::delete_interface))
         // Firewall rules
         .route("/firewall/rules", get(firewall::list_rules))
         .route("/firewall/rules", post(firewall::create_rule))
@@ -132,9 +133,17 @@ pub fn router(state: Arc<AppState>) -> Router {
         // DHCP
         .route("/dhcp/config", get(dhcp::get_config))
         .route("/dhcp/config", post(dhcp::update_config))
-        // Suricata IPS
-        .route("/ips/config", get(suricata::get_config))
-        .route("/ips/config", post(suricata::update_config))
+        .route("/dhcp/static-leases", get(dhcp::list_static_leases))
+        .route("/dhcp/static-leases", post(dhcp::create_static_lease))
+        .route("/dhcp/static-leases/{id}", delete(dhcp::delete_static_lease))
+        .route("/dhcp/leases", get(dhcp::list_active_leases))
+        .route("/dhcp/pools", get(dhcp::list_pools))
+        // Suricata IPS/IDS
+        .route("/suricata/config", get(suricata::get_config))
+        .route("/suricata/config", post(suricata::update_config))
+        .route("/suricata/rulesets", get(suricata::list_rulesets))
+        .route("/suricata/rulesets/{id}", put(suricata::update_ruleset))
+        .route("/suricata/alerts", get(suricata::list_alerts))
         // CrowdSec
         .route("/crowdsec/config", get(crowdsec::get_config))
         .route("/crowdsec/config", post(crowdsec::update_config))
@@ -185,6 +194,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/ntp/config", get(ntp::get_config))
         .route("/ntp/config", post(ntp::update_config))
         .route("/ntp/status", get(ntp::get_status))
+        .route("/ntp/resync", post(ntp::resync))
         // Apply authentication middleware to all routes.
         .layer(middleware::from_fn(auth_middleware))
         .with_state(state)

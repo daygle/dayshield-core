@@ -1,25 +1,31 @@
-//! DHCP endpoints — `GET /dhcp/config` and `POST /dhcp/config`.
+//! DHCP endpoints.
 //!
-//! # GET /dhcp/config
-//!
-//! Returns the persisted [`DhcpConfig`].  When no DHCP configuration has been
-//! saved yet, returns a default (disabled) configuration.
-//!
-//! # POST /dhcp/config
-//!
-//! Accepts a full [`DhcpConfig`] JSON body, validates all fields, atomically
-//! persists it, and triggers the DHCP engine to regenerate and apply the
-//! dnsmasq configuration.
+//! | Method | Path                          | Description                          |
+//! |--------|-------------------------------|--------------------------------------|
+//! | GET    | `/dhcp/config`                | Get flat DHCP configuration          |
+//! | POST   | `/dhcp/config`                | Update flat DHCP configuration       |
+//! | GET    | `/dhcp/static-leases`         | List all static MAC → IP bindings    |
+//! | POST   | `/dhcp/static-leases`         | Add a static lease                   |
+//! | DELETE | `/dhcp/static-leases/{id}`    | Remove a static lease by UUID        |
+//! | GET    | `/dhcp/leases`                | List active leases from dnsmasq      |
+//! | GET    | `/dhcp/pools`                 | List DHCP scopes as pool view        |
 
 use std::sync::Arc;
 
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+};
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use crate::{
     config::models::{
-        is_valid_cidr, is_valid_ip, is_valid_ipv4_range, is_valid_mac,
-        DhcpConfig, DhcpScope,
+        is_valid_ip, is_valid_ipv4_range, is_valid_mac,
+        DhcpConfig, DhcpReservation, DhcpScope,
     },
     engine::dhcp::apply_config,
     state::AppState,
@@ -62,24 +68,149 @@ impl IntoResponse for DhcpError {
 }
 
 // ---------------------------------------------------------------------------
-// Request body
+// API DTO types (camelCase for UI compatibility)
 // ---------------------------------------------------------------------------
 
-/// Request body for `POST /dhcp/config`.
-#[derive(serde::Deserialize)]
-pub struct UpdateDhcpConfigRequest {
+/// Flat DHCP config response matching the TypeScript `DhcpConfig` interface.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DhcpFlatConfigResponse {
     pub enabled: bool,
-    pub scopes: Vec<DhcpScope>,
+    pub interface: String,
+    pub range_start: String,
+    pub range_end: String,
+    pub subnet_mask: String,
+    pub gateway: String,
+    pub dns_servers: Vec<String>,
+    pub lease_time: u32,
+    pub domain_name: String,
+}
+
+/// Request body for `POST /dhcp/config` (flat format matching UI).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateDhcpFlatRequest {
+    pub enabled: Option<bool>,
+    pub interface: Option<String>,
+    pub range_start: Option<String>,
+    pub range_end: Option<String>,
+    pub gateway: Option<String>,
+    pub dns_servers: Option<Vec<String>>,
+    pub lease_time: Option<u32>,
+    pub domain_name: Option<String>,
+}
+
+/// Response for a single static lease (UUID id as string).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DhcpStaticLeaseResponse {
+    pub id: String,
+    pub mac: String,
+    pub ip_address: String,
+    pub hostname: String,
+    pub description: String,
+}
+
+/// Request body for `POST /dhcp/static-leases`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateStaticLeaseRequest {
+    pub mac: String,
+    pub ip_address: String,
+    pub hostname: Option<String>,
+    pub description: Option<String>,
+}
+
+/// Response for a single active lease parsed from dnsmasq.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DhcpLeaseResponse {
+    pub mac: String,
+    pub ip_address: String,
+    pub hostname: String,
+    pub starts: String,
+    pub ends: String,
+    pub state: String,
+}
+
+/// Pool view response (one per DhcpScope).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DhcpPoolResponse {
+    pub id: String,
+    pub interface: String,
+    pub range_start: String,
+    pub range_end: String,
+    pub description: String,
 }
 
 // ---------------------------------------------------------------------------
-// Handlers
+// Helpers
 // ---------------------------------------------------------------------------
 
-/// Handler: return the current DHCP configuration.
-///
-/// Loads the DHCP config from persistent storage.  If no configuration has
-/// been saved yet, returns a sensible default (disabled, no scopes).
+fn default_dhcp_cfg() -> DhcpConfig {
+    DhcpConfig {
+        enabled: false,
+        interface: String::new(),
+        scopes: vec![],
+    }
+}
+
+/// Convert the first scope of a DhcpConfig into a flat response.
+fn to_flat_response(cfg: &DhcpConfig) -> DhcpFlatConfigResponse {
+    if let Some(scope) = cfg.scopes.first() {
+        DhcpFlatConfigResponse {
+            enabled: cfg.enabled,
+            interface: cfg.interface.clone(),
+            range_start: scope.pool_start.clone(),
+            range_end: scope.pool_end.clone(),
+            subnet_mask: cidr_to_mask(&scope.subnet),
+            gateway: scope.gateway.clone().unwrap_or_default(),
+            dns_servers: scope.dns_servers.clone(),
+            lease_time: scope.lease_seconds,
+            domain_name: String::new(),
+        }
+    } else {
+        DhcpFlatConfigResponse {
+            enabled: cfg.enabled,
+            interface: cfg.interface.clone(),
+            range_start: String::new(),
+            range_end: String::new(),
+            subnet_mask: String::new(),
+            gateway: String::new(),
+            dns_servers: vec![],
+            lease_time: 86400,
+            domain_name: String::new(),
+        }
+    }
+}
+
+/// Derive a dotted-decimal subnet mask from a CIDR prefix, e.g. `192.168.1.0/24` → `255.255.255.0`.
+fn cidr_to_mask(cidr: &str) -> String {
+    let prefix: u8 = cidr
+        .split('/')
+        .nth(1)
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(24);
+    let mask: u32 = if prefix == 0 {
+        0
+    } else {
+        !0u32 << (32 - prefix as u32)
+    };
+    format!(
+        "{}.{}.{}.{}",
+        (mask >> 24) & 0xFF,
+        (mask >> 16) & 0xFF,
+        (mask >> 8) & 0xFF,
+        mask & 0xFF
+    )
+}
+
+// ---------------------------------------------------------------------------
+// GET /dhcp/config
+// ---------------------------------------------------------------------------
+
+/// Return the DHCP configuration in a flat format compatible with the UI.
 pub async fn get_config(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, DhcpError> {
@@ -87,105 +218,96 @@ pub async fn get_config(
         .config_store
         .load_dhcp_config()
         .map_err(DhcpError::StorageError)?
-        .unwrap_or_else(|| DhcpConfig {
-            enabled: false,
-            scopes: vec![],
-        });
+        .unwrap_or_else(default_dhcp_cfg);
 
     info!(enabled = cfg.enabled, scopes = cfg.scopes.len(), "dhcp: loaded config");
 
-    Ok(Json(cfg))
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": to_flat_response(&cfg)
+    })))
 }
 
-/// Handler: update the DHCP configuration.
+// ---------------------------------------------------------------------------
+// POST /dhcp/config
+// ---------------------------------------------------------------------------
+
+/// Update the DHCP configuration from a flat request body.
 ///
-/// Validates all fields, persists atomically, then triggers the DHCP engine to
-/// regenerate and apply the dnsmasq configuration.  Returns the saved config
-/// with `200 OK` on success.
+/// Maps the flat UI model onto the first scope (creating it if necessary),
+/// validates, persists, and applies via the engine.
 pub async fn update_config(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<UpdateDhcpConfigRequest>,
+    Json(req): Json<UpdateDhcpFlatRequest>,
 ) -> Result<impl IntoResponse, DhcpError> {
+    let mut cfg = state
+        .config_store
+        .load_dhcp_config()
+        .map_err(DhcpError::StorageError)?
+        .unwrap_or_else(default_dhcp_cfg);
+
+    // Apply top-level fields.
+    if let Some(v) = req.enabled    { cfg.enabled   = v; }
+    if let Some(v) = req.interface  { cfg.interface  = v; }
+
+    // Ensure at least one scope exists to hold the pool settings.
+    if cfg.scopes.is_empty() {
+        cfg.scopes.push(DhcpScope {
+            id: Uuid::new_v4(),
+            subnet: "192.168.1.0/24".to_string(),
+            pool_start: String::new(),
+            pool_end: String::new(),
+            gateway: None,
+            dns_servers: vec![],
+            lease_seconds: 86400,
+            reservations: vec![],
+        });
+    }
+
+    let scope = &mut cfg.scopes[0];
+    if let Some(v) = req.range_start { scope.pool_start    = v; }
+    if let Some(v) = req.range_end   { scope.pool_end      = v; }
+    if let Some(v) = req.gateway     { scope.gateway       = if v.is_empty() { None } else { Some(v) }; }
+    if let Some(v) = req.dns_servers { scope.dns_servers   = v; }
+    if let Some(v) = req.lease_time  { scope.lease_seconds = v; }
+    // domain_name is not stored in the scope model; silently accept it.
+
     // --- Validation --------------------------------------------------------
 
-    for scope in &req.scopes {
-        // Subnet must be a valid CIDR.
-        if !is_valid_cidr(&scope.subnet) {
-            warn!(subnet = %scope.subnet, "dhcp: invalid subnet");
-            return Err(DhcpError::ValidationFailed(format!(
-                "invalid subnet: {} (expected CIDR notation, e.g. 192.168.1.0/24)",
-                scope.subnet
-            )));
-        }
+    let scope = &cfg.scopes[0];
 
-        // Pool start and end must be valid IPs.
-        if !is_valid_ip(&scope.pool_start) {
-            return Err(DhcpError::ValidationFailed(format!(
-                "invalid pool_start: {}",
-                scope.pool_start
-            )));
+    if !scope.pool_start.is_empty() && !is_valid_ip(&scope.pool_start) {
+        return Err(DhcpError::ValidationFailed(format!(
+            "invalid rangeStart: {}", scope.pool_start
+        )));
+    }
+    if !scope.pool_end.is_empty() && !is_valid_ip(&scope.pool_end) {
+        return Err(DhcpError::ValidationFailed(format!(
+            "invalid rangeEnd: {}", scope.pool_end
+        )));
+    }
+    if !scope.pool_start.is_empty()
+        && !scope.pool_end.is_empty()
+        && !is_valid_ipv4_range(&scope.pool_start, &scope.pool_end)
+    {
+        return Err(DhcpError::ValidationFailed(format!(
+            "rangeStart {} must be ≤ rangeEnd {}", scope.pool_start, scope.pool_end
+        )));
+    }
+    if let Some(gw) = &scope.gateway {
+        if !is_valid_ip(gw) {
+            return Err(DhcpError::ValidationFailed(format!("invalid gateway: {gw}")));
         }
-        if !is_valid_ip(&scope.pool_end) {
-            return Err(DhcpError::ValidationFailed(format!(
-                "invalid pool_end: {}",
-                scope.pool_end
-            )));
-        }
-
-        // pool_start ≤ pool_end (IPv4 only; IPv6 pools are unsupported).
-        if !is_valid_ipv4_range(&scope.pool_start, &scope.pool_end) {
-            return Err(DhcpError::ValidationFailed(format!(
-                "pool_start {} must be ≤ pool_end {}",
-                scope.pool_start, scope.pool_end
-            )));
-        }
-
-        // Gateway, if provided, must be a valid IP.
-        if let Some(gw) = &scope.gateway {
-            if !is_valid_ip(gw) {
-                return Err(DhcpError::ValidationFailed(format!(
-                    "invalid gateway: {gw}"
-                )));
-            }
-        }
-
-        // DNS servers must be valid IPs.
-        for dns in &scope.dns_servers {
-            if !is_valid_ip(dns) {
-                return Err(DhcpError::ValidationFailed(format!(
-                    "invalid DNS server: {dns}"
-                )));
-            }
-        }
-
-        // Reservations: MAC and IP must be valid.
-        for res in &scope.reservations {
-            if !is_valid_mac(&res.mac_address) {
-                warn!(mac = %res.mac_address, "dhcp: invalid MAC in reservation");
-                return Err(DhcpError::ValidationFailed(format!(
-                    "invalid MAC address: {} (expected format aa:bb:cc:dd:ee:ff)",
-                    res.mac_address
-                )));
-            }
-            if !is_valid_ip(&res.ip_address) {
-                return Err(DhcpError::ValidationFailed(format!(
-                    "invalid reservation IP: {}",
-                    res.ip_address
-                )));
-            }
+    }
+    for dns in &scope.dns_servers {
+        if !is_valid_ip(dns) {
+            return Err(DhcpError::ValidationFailed(format!("invalid DNS server: {dns}")));
         }
     }
 
-    // --- Build config ------------------------------------------------------
-
-    let cfg = DhcpConfig {
-        enabled: req.enabled,
-        scopes: req.scopes,
-    };
-
     info!(
         enabled = cfg.enabled,
-        scopes = cfg.scopes.len(),
+        interface = %cfg.interface,
         "dhcp: received update config request"
     );
 
@@ -206,5 +328,254 @@ pub async fn update_config(
 
     info!("dhcp: engine apply complete");
 
-    Ok(Json(cfg))
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": to_flat_response(&cfg)
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// GET /dhcp/static-leases
+// ---------------------------------------------------------------------------
+
+/// Return all static MAC → IP reservations across all scopes.
+pub async fn list_static_leases(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, DhcpError> {
+    let cfg = state
+        .config_store
+        .load_dhcp_config()
+        .map_err(DhcpError::StorageError)?
+        .unwrap_or_else(default_dhcp_cfg);
+
+    let leases: Vec<DhcpStaticLeaseResponse> = cfg
+        .scopes
+        .iter()
+        .flat_map(|s| s.reservations.iter())
+        .map(|r| DhcpStaticLeaseResponse {
+            id: r.id.to_string(),
+            mac: r.mac_address.clone(),
+            ip_address: r.ip_address.clone(),
+            hostname: r.hostname.clone().unwrap_or_default(),
+            description: r.description.clone(),
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": leases
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// POST /dhcp/static-leases
+// ---------------------------------------------------------------------------
+
+/// Add a static MAC → IP reservation to the first DHCP scope.
+///
+/// Creates a default scope if none exists.
+pub async fn create_static_lease(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateStaticLeaseRequest>,
+) -> Result<impl IntoResponse, DhcpError> {
+    // --- Validation --------------------------------------------------------
+
+    if !is_valid_mac(&req.mac) {
+        warn!(mac = %req.mac, "dhcp: invalid MAC in static lease");
+        return Err(DhcpError::ValidationFailed(format!(
+            "invalid MAC address: {} (expected aa:bb:cc:dd:ee:ff)",
+            req.mac
+        )));
+    }
+    if !is_valid_ip(&req.ip_address) {
+        return Err(DhcpError::ValidationFailed(format!(
+            "invalid IP address: {}",
+            req.ip_address
+        )));
+    }
+
+    let mut cfg = state
+        .config_store
+        .load_dhcp_config()
+        .map_err(DhcpError::StorageError)?
+        .unwrap_or_else(default_dhcp_cfg);
+
+    // Ensure at least one scope.
+    if cfg.scopes.is_empty() {
+        cfg.scopes.push(DhcpScope {
+            id: Uuid::new_v4(),
+            subnet: "192.168.1.0/24".to_string(),
+            pool_start: String::new(),
+            pool_end: String::new(),
+            gateway: None,
+            dns_servers: vec![],
+            lease_seconds: 86400,
+            reservations: vec![],
+        });
+    }
+
+    let reservation = DhcpReservation {
+        id: Uuid::new_v4(),
+        hostname: req.hostname.filter(|h| !h.is_empty()),
+        mac_address: req.mac.clone(),
+        ip_address: req.ip_address.clone(),
+        description: req.description.unwrap_or_default(),
+    };
+
+    let resp = DhcpStaticLeaseResponse {
+        id: reservation.id.to_string(),
+        mac: reservation.mac_address.clone(),
+        ip_address: reservation.ip_address.clone(),
+        hostname: reservation.hostname.clone().unwrap_or_default(),
+        description: reservation.description.clone(),
+    };
+
+    cfg.scopes[0].reservations.push(reservation);
+
+    state
+        .config_store
+        .save_dhcp_config(cfg.clone())
+        .map_err(DhcpError::StorageError)?;
+
+    apply_config(&cfg)
+        .await
+        .map_err(|e| DhcpError::EngineError(e.to_string()))?;
+
+    info!(mac = %req.mac, ip = %req.ip_address, "dhcp: static lease created");
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "success": true, "data": resp })),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /dhcp/static-leases/{id}
+// ---------------------------------------------------------------------------
+
+/// Remove a static reservation by UUID string.
+pub async fn delete_static_lease(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, DhcpError> {
+    let target = id.parse::<Uuid>().map_err(|_| {
+        DhcpError::ValidationFailed(format!("invalid lease ID: {id}"))
+    })?;
+
+    let mut cfg = state
+        .config_store
+        .load_dhcp_config()
+        .map_err(DhcpError::StorageError)?
+        .unwrap_or_else(default_dhcp_cfg);
+
+    let mut found = false;
+    for scope in &mut cfg.scopes {
+        let before = scope.reservations.len();
+        scope.reservations.retain(|r| r.id != target);
+        if scope.reservations.len() < before {
+            found = true;
+        }
+    }
+
+    if !found {
+        return Err(DhcpError::ValidationFailed(format!(
+            "static lease {id} not found"
+        )));
+    }
+
+    state
+        .config_store
+        .save_dhcp_config(cfg.clone())
+        .map_err(DhcpError::StorageError)?;
+
+    apply_config(&cfg)
+        .await
+        .map_err(|e| DhcpError::EngineError(e.to_string()))?;
+
+    info!(%id, "dhcp: static lease deleted");
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// GET /dhcp/leases
+// ---------------------------------------------------------------------------
+
+/// Return currently active DHCP leases parsed from the dnsmasq leases file.
+///
+/// File format (one lease per line):
+/// `<expiry_epoch> <mac> <ip> <hostname> <client-id>`
+///
+/// Returns an empty array when the file does not exist.
+pub async fn list_active_leases(
+    State(_state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    const LEASES_FILE: &str = "/var/lib/misc/dnsmasq.leases";
+
+    let content = match tokio::fs::read_to_string(LEASES_FILE).await {
+        Ok(c) => c,
+        Err(_) => {
+            return Json(serde_json::json!({ "success": true, "data": serde_json::json!([]) }));
+        }
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let leases: Vec<DhcpLeaseResponse> = content
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 4 {
+                return None;
+            }
+            let expiry: u64 = parts[0].parse().ok()?;
+            let state_str = if expiry > now { "active" } else { "expired" };
+            Some(DhcpLeaseResponse {
+                mac: parts[1].to_string(),
+                ip_address: parts[2].to_string(),
+                hostname: if parts[3] == "*" {
+                    String::new()
+                } else {
+                    parts[3].to_string()
+                },
+                starts: String::new(),
+                ends: expiry.to_string(),
+                state: state_str.to_string(),
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!({ "success": true, "data": leases }))
+}
+
+// ---------------------------------------------------------------------------
+// GET /dhcp/pools
+// ---------------------------------------------------------------------------
+
+/// Return all DHCP scopes as a pool view (for UI compatibility).
+pub async fn list_pools(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, DhcpError> {
+    let cfg = state
+        .config_store
+        .load_dhcp_config()
+        .map_err(DhcpError::StorageError)?
+        .unwrap_or_else(default_dhcp_cfg);
+
+    let pools: Vec<DhcpPoolResponse> = cfg
+        .scopes
+        .iter()
+        .map(|s| DhcpPoolResponse {
+            id: s.id.to_string(),
+            interface: cfg.interface.clone(),
+            range_start: s.pool_start.clone(),
+            range_end: s.pool_end.clone(),
+            description: s.subnet.clone(),
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({ "success": true, "data": pools })))
 }

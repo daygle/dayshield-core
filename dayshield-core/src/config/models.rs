@@ -308,6 +308,9 @@ pub struct DnsLocalRecord {
 pub struct DhcpConfig {
     /// Whether the DHCP service should be running.
     pub enabled: bool,
+    /// Interface the DHCP server listens on (e.g. `"eth1"`).
+    #[serde(default)]
+    pub interface: String,
     /// DHCP scopes (one per subnet).
     pub scopes: Vec<DhcpScope>,
 }
@@ -339,6 +342,9 @@ pub struct DhcpReservation {
     pub hostname: Option<String>,
     pub mac_address: String,
     pub ip_address: String,
+    /// Optional human-readable label for this reservation.
+    #[serde(default)]
+    pub description: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -591,11 +597,21 @@ pub fn validate_ip_or_cidr(value: &str) -> bool {
 // Suricata IPS
 // ---------------------------------------------------------------------------
 
+fn default_suricata_mode() -> String {
+    "ids".to_string()
+}
+
 /// Configuration for the Suricata intrusion-prevention / detection system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SuricataConfig {
     /// Whether the Suricata service should be running.
     pub enabled: bool,
+    /// Network interface Suricata listens on (e.g. `"eth0"`).
+    #[serde(default)]
+    pub interface: String,
+    /// Operating mode: `"ids"` (alert-only) or `"ips"` (inline drop).
+    #[serde(default = "default_suricata_mode")]
+    pub mode: String,
     /// CIDRs that define the HOME_NET variable in suricata.yaml.
     pub home_nets: Vec<String>,
     /// CIDRs for EXTERNAL_NET; when empty, Suricata uses `"any"`.

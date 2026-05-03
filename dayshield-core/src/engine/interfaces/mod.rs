@@ -52,6 +52,10 @@ pub enum InterfaceError {
     #[error("failed to query kernel interfaces: {0}")]
     KernelQueryFailed(String),
 
+    /// The specified interface does not exist in persistent configuration.
+    #[error("interface not found: {0:?}")]
+    NotFound(String),
+
     /// A persistent-storage operation failed.
     #[error("storage error: {0:#}")]
     StorageError(#[from] anyhow::Error),
@@ -66,6 +70,7 @@ impl axum::response::IntoResponse for InterfaceError {
             InterfaceError::InvalidName(_)
             | InterfaceError::InvalidMtu(_)
             | InterfaceError::InvalidCIDR(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            InterfaceError::NotFound(_) => StatusCode::NOT_FOUND,
             InterfaceError::ApplyFailed(_)
             | InterfaceError::KernelQueryFailed(_)
             | InterfaceError::StorageError(_) => StatusCode::INTERNAL_SERVER_ERROR,

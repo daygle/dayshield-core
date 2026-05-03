@@ -116,6 +116,37 @@ pub async fn get_status() -> Json<NtpStatus> {
 }
 
 // ---------------------------------------------------------------------------
+// POST /ntp/resync
+// ---------------------------------------------------------------------------
+
+/// Trigger an immediate NTP time step resynchronisation.
+///
+/// Tries `chronyc makestep` first (chrony); falls back to restarting
+/// `systemd-timesyncd` if chrony is not available.
+pub async fn resync() -> impl IntoResponse {
+    let chrony = tokio::process::Command::new("chronyc")
+        .arg("makestep")
+        .output()
+        .await;
+
+    let message = match chrony {
+        Ok(out) if out.status.success() => "NTP resync triggered via chronyc",
+        _ => {
+            let _ = tokio::process::Command::new("systemctl")
+                .args(["restart", "systemd-timesyncd"])
+                .output()
+                .await;
+            "NTP resync triggered via systemd-timesyncd"
+        }
+    };
+
+    Json(serde_json::json!({
+        "success": true,
+        "data": { "message": message }
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 

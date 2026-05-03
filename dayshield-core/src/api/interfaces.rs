@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{extract::{Path, State}, http::StatusCode, response::IntoResponse, Json};
 use serde::Serialize;
 use tracing::{info, warn};
 
@@ -133,4 +133,46 @@ pub async fn create_interface(
     info!(name = %iface.name, "interfaces: engine apply complete");
 
     Ok((StatusCode::CREATED, Json(iface)))
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /interfaces/{name}
+// ---------------------------------------------------------------------------
+
+/// Remove a configured interface by name.
+///
+/// Updates the in-memory cache and persistent storage, then attempts to bring
+/// the interface down via `ip link set <name> down` (best-effort).
+pub async fn delete_interface(
+    Path(name): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, InterfaceError> {
+    // --- Remove from in-memory cache ---------------------------------------
+    {
+        let mut ifaces = state.interfaces.write().await;
+        let before = ifaces.len();
+        ifaces.retain(|i| i.name != name);
+        if ifaces.len() == before {
+            return Err(InterfaceError::NotFound(name));
+        }
+    }
+
+    // --- Persist -----------------------------------------------------------
+    {
+        let ifaces = state.interfaces.read().await;
+        state
+            .config_store
+            .save_interfaces(ifaces.clone())
+            .map_err(InterfaceError::StorageError)?;
+    }
+
+    // --- Best-effort kernel teardown ---------------------------------------
+    let _ = tokio::process::Command::new("ip")
+        .args(["link", "set", &name, "down"])
+        .output()
+        .await;
+
+    info!(%name, "interfaces: deleted interface");
+
+    Ok(StatusCode::NO_CONTENT)
 }

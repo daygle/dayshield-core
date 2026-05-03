@@ -13,6 +13,7 @@ mod firewall;
 mod interfaces;
 mod logs;
 mod metrics;
+mod nat;
 mod notify;
 mod ntp;
 mod suricata;
@@ -195,6 +196,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/ntp/config", post(ntp::update_config))
         .route("/ntp/status", get(ntp::get_status))
         .route("/ntp/resync", post(ntp::resync))
+        // NAT
+        .route("/nat/config", get(nat::get_config))
+        .route("/nat/config", put(nat::put_config))
+        .route("/nat/rules", get(nat::list_rules))
+        .route("/nat/rules", post(nat::create_rule))
+        .route("/nat/rules/{id}", delete(nat::delete_rule))
         // Apply authentication middleware to all routes.
         .layer(middleware::from_fn(auth_middleware))
         .with_state(state)

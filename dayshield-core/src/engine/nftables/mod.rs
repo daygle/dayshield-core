@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
-use crate::config::models::{Action, AliasType, FirewallAlias, FirewallRule, NatRule, NatType, Protocol};
+use crate::config::models::{Action, AliasType, FirewallAlias, FirewallRule, NatConfig, NatProtocol, NatRuleType, OutboundMode, Protocol};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -74,15 +74,15 @@ impl axum::response::IntoResponse for NftError {
 /// - Named `set` declarations inside `table inet filter` for each enabled alias.
 /// - `table inet filter` with `input`, `forward`, and `output` chains.
 /// - Rules translated from [`FirewallRule`], sorted by `priority` (ascending).
-/// - `table inet nat` with `prerouting` and `postrouting` chains (only when
-///   `nat_rules` is non-empty).
+/// - `table ip nat` with `postrouting`, `prerouting`, and (when reflection is
+///   enabled) `output` chains (only when `nat_config` is `Some`).
 ///
 /// `resolved_url_tables` maps alias name → resolved IP/CIDR list for
 /// [`AliasType::UrlTable`] aliases (fetched asynchronously by the caller
 /// before generating the ruleset).
 pub fn generate_ruleset(
     rules: &[FirewallRule],
-    nat_rules: &[NatRule],
+    nat_config: Option<&NatConfig>,
     aliases: &[FirewallAlias],
     resolved_url_tables: &HashMap<String, Vec<String>>,
 ) -> String {
@@ -91,7 +91,7 @@ pub fn generate_ruleset(
 
     debug!(
         fw_rules = sorted.len(),
-        nat_rules = nat_rules.len(),
+        nat_rules = nat_config.map(|c| c.rules.len()).unwrap_or(0),
         aliases = aliases.len(),
         "nftables: generating ruleset"
     );
@@ -142,35 +142,15 @@ pub fn generate_ruleset(
     out.push_str("}\n");
 
     // ------------------------------------------------------------------
-    // inet nat table (only when there are NAT rules)
+    // ip nat table (IPv4 only; only emitted when NAT is configured)
     // ------------------------------------------------------------------
-    if !nat_rules.is_empty() {
-        out.push_str("\ntable inet nat {\n");
-
-        out.push_str("    chain prerouting {\n");
-        out.push_str("        type nat hook prerouting priority -100;\n");
-        for nat in nat_rules {
-            if let Some(line) = format_nat_prerouting(nat) {
-                out.push_str(&format!("        {}\n", line));
-            }
-        }
-        out.push_str("    }\n\n");
-
-        out.push_str("    chain postrouting {\n");
-        out.push_str("        type nat hook postrouting priority 100;\n");
-        for nat in nat_rules {
-            if let Some(line) = format_nat_postrouting(nat) {
-                out.push_str(&format!("        {}\n", line));
-            }
-        }
-        out.push_str("    }\n");
-
-        out.push_str("}\n");
+    if let Some(nat) = nat_config {
+        out.push_str(&generate_nat_table(nat));
     }
 
     info!(
         fw_rules = rules.len(),
-        nat_rules = nat_rules.len(),
+        nat_rules = nat_config.map(|c| c.rules.len()).unwrap_or(0),
         aliases = aliases.len(),
         "nftables: ruleset generated ({} bytes)",
         out.len()
@@ -179,7 +159,7 @@ pub fn generate_ruleset(
     out
 }
 
-/// Write `rules` + `nat_rules` as a complete nftables ruleset to a temp file
+/// Write `rules` and `nat_config` as a complete nftables ruleset to a temp file
 /// and apply it with `nft -f <tempfile>`.
 ///
 /// URL-table aliases are fetched via HTTP before the ruleset is generated and
@@ -192,13 +172,13 @@ pub fn generate_ruleset(
 /// `nft` exits non-zero.
 pub async fn apply_rules(
     rules: &[FirewallRule],
-    nat_rules: &[NatRule],
+    nat_config: Option<&NatConfig>,
     aliases: &[FirewallAlias],
 ) -> Result<(), NftError> {
     // Resolve URL-table aliases (fetch + cache).
     let resolved_url_tables = resolve_url_tables(aliases).await;
 
-    let ruleset = generate_ruleset(rules, nat_rules, aliases, &resolved_url_tables);
+    let ruleset = generate_ruleset(rules, nat_config, aliases, &resolved_url_tables);
 
     // Unique temp file name based on milliseconds since UNIX epoch.
     let ts = std::time::SystemTime::now()
@@ -506,21 +486,48 @@ fn format_rule(rule: &FirewallRule) -> String {
 }
 
 /// Translate a [`NatRule`] into a prerouting statement (DNAT only).
-fn format_nat_prerouting(nat: &NatRule) -> Option<String> {
-    match nat.nat_type {
-        NatType::Dnat => {
+fn format_nat_prerouting(nat: &crate::config::models::NatRule) -> Option<String> {
+    match nat.rule_type {
+        NatRuleType::Dnat => {
             let mut parts: Vec<String> = Vec::new();
-            if let Some(dst) = &nat.destination {
-                if dst.contains(':') {
-                    parts.push(format!("ip6 daddr {}", dst));
-                } else {
-                    parts.push(format!("ip daddr {}", dst));
-                }
+            // Inbound interface match.
+            if let Some(iface) = &nat.interface {
+                parts.push(format!("iifname \"{}\"", iface));
             }
-            let translated = nat.translated_address.as_deref()?;
-            let target = match nat.translated_port {
-                Some(port) => format!("dnat to {}:{}", translated, port),
-                None => format!("dnat to {}", translated),
+            // Source address (IPv4 only).
+            if let Some(src) = &nat.source {
+                parts.push(format!("ip saddr {}", src));
+            }
+            // Destination address (IPv4 only).
+            if let Some(dst) = &nat.destination {
+                parts.push(format!("ip daddr {}", dst));
+            }
+            // Protocol + destination port.
+            match nat.protocol {
+                NatProtocol::Tcp => {
+                    if let Some(dport) = nat.destination_port {
+                        parts.push(format!("tcp dport {}", dport));
+                    }
+                }
+                NatProtocol::Udp => {
+                    if let Some(dport) = nat.destination_port {
+                        parts.push(format!("udp dport {}", dport));
+                    }
+                }
+                NatProtocol::TcpUdp => {
+                    if let Some(dport) = nat.destination_port {
+                        parts.push(format!("{{ tcp, udp }} dport {}", dport));
+                    }
+                }
+                NatProtocol::Any => {}
+            }
+            // Translation target.
+            let translation = nat.translation.as_ref()?;
+            let addr = translation.address.as_deref()?;
+            let target = match (translation.port, translation.port_end) {
+                (Some(p), Some(pe)) => format!("dnat to {}:{}-{}", addr, p, pe),
+                (Some(p), None) => format!("dnat to {}:{}", addr, p),
+                (None, _) => format!("dnat to {}", addr),
             };
             parts.push(target);
             Some(parts.join(" "))
@@ -530,38 +537,154 @@ fn format_nat_prerouting(nat: &NatRule) -> Option<String> {
 }
 
 /// Translate a [`NatRule`] into a postrouting statement (masquerade / SNAT).
-fn format_nat_postrouting(nat: &NatRule) -> Option<String> {
-    match nat.nat_type {
-        NatType::Masquerade => {
+fn format_nat_postrouting(nat: &crate::config::models::NatRule) -> Option<String> {
+    match nat.rule_type {
+        NatRuleType::Masquerade => {
             let mut parts: Vec<String> = Vec::new();
             if let Some(src) = &nat.source {
-                if src.contains(':') {
-                    parts.push(format!("ip6 saddr {}", src));
-                } else {
-                    parts.push(format!("ip saddr {}", src));
-                }
+                parts.push(format!("ip saddr {}", src));
             }
-            if let Some(oif) = &nat.out_interface {
-                parts.push(format!("oif \"{}\"", oif));
+            if let Some(iface) = &nat.interface {
+                parts.push(format!("oifname \"{}\"", iface));
             }
             parts.push("masquerade".to_string());
             Some(parts.join(" "))
         }
-        NatType::Snat => {
+        NatRuleType::Snat => {
             let mut parts: Vec<String> = Vec::new();
             if let Some(src) = &nat.source {
-                if src.contains(':') {
-                    parts.push(format!("ip6 saddr {}", src));
-                } else {
-                    parts.push(format!("ip saddr {}", src));
-                }
+                parts.push(format!("ip saddr {}", src));
             }
-            let translated = nat.translated_address.as_deref()?;
-            parts.push(format!("snat to {}", translated));
+            if let Some(iface) = &nat.interface {
+                parts.push(format!("oifname \"{}\"", iface));
+            }
+            let translation = nat.translation.as_ref()?;
+            let addr = translation.address.as_deref()?;
+            parts.push(format!("snat to {}", addr));
             Some(parts.join(" "))
         }
-        NatType::Dnat => None,
+        NatRuleType::Dnat => None,
     }
+}
+
+/// Generate the `table ip nat { … }` block from a [`NatConfig`].
+///
+/// Produces:
+/// - `postrouting` — auto masquerade (automatic/hybrid) + user masquerade/SNAT rules.
+/// - `prerouting`  — user DNAT rules.
+/// - `output`      — reflection DNAT rules (hairpin NAT) when enabled.
+///
+/// Returns an empty string when no rules would be emitted.
+fn generate_nat_table(config: &NatConfig) -> String {
+    // Sort user rules deterministically by priority.
+    let mut sorted: Vec<&crate::config::models::NatRule> =
+        config.rules.iter().filter(|r| r.enabled).collect();
+    sorted.sort_by_key(|r| r.priority);
+
+    let has_auto_masquerade = matches!(
+        config.outbound_mode,
+        OutboundMode::Automatic | OutboundMode::Hybrid
+    ) && !config.wan_interfaces.is_empty();
+
+    let user_postrouting: Vec<_> = sorted
+        .iter()
+        .filter(|r| matches!(r.rule_type, NatRuleType::Masquerade | NatRuleType::Snat))
+        .collect();
+
+    let emit_user_postrouting = matches!(
+        config.outbound_mode,
+        OutboundMode::Hybrid | OutboundMode::Manual
+    ) && !user_postrouting.is_empty();
+
+    let prerouting_rules: Vec<_> = sorted
+        .iter()
+        .filter(|r| matches!(r.rule_type, NatRuleType::Dnat))
+        .collect();
+
+    let reflection_rules: Vec<_> = sorted
+        .iter()
+        .filter(|r| {
+            matches!(r.rule_type, NatRuleType::Dnat)
+                && (r.nat_reflection || config.nat_reflection)
+        })
+        .collect();
+
+    let has_postrouting = has_auto_masquerade || emit_user_postrouting;
+    let has_prerouting = !prerouting_rules.is_empty();
+    let has_reflection = !reflection_rules.is_empty();
+
+    if !has_postrouting && !has_prerouting && !has_reflection {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    out.push_str("\ntable ip nat {\n");
+
+    // postrouting chain
+    if has_postrouting {
+        out.push_str("    chain postrouting {\n");
+        out.push_str(
+            "        type nat hook postrouting priority srcnat; policy accept;\n",
+        );
+        // Automatic masquerade rules for each WAN interface.
+        if has_auto_masquerade {
+            for iface in &config.wan_interfaces {
+                out.push_str(&format!("        oifname \"{}\" masquerade\n", iface));
+            }
+        }
+        // User masquerade / SNAT rules (hybrid or manual mode).
+        if emit_user_postrouting {
+            for rule in &user_postrouting {
+                if rule.log {
+                    out.push_str(&format!(
+                        "        log prefix \"dayshield-nat[{}]: \"\n",
+                        rule.id
+                    ));
+                }
+                if let Some(line) = format_nat_postrouting(rule) {
+                    out.push_str(&format!("        {}\n", line));
+                }
+            }
+        }
+        out.push_str("    }\n\n");
+    }
+
+    // prerouting chain (DNAT / port forwards)
+    if has_prerouting {
+        out.push_str("    chain prerouting {\n");
+        out.push_str(
+            "        type nat hook prerouting priority dstnat; policy accept;\n",
+        );
+        for rule in &prerouting_rules {
+            if rule.log {
+                out.push_str(&format!(
+                    "        log prefix \"dayshield-nat[{}]: \"\n",
+                    rule.id
+                ));
+            }
+            if let Some(line) = format_nat_prerouting(rule) {
+                out.push_str(&format!("        {}\n", line));
+            }
+        }
+        out.push_str("    }\n\n");
+    }
+
+    // output chain (hairpin / NAT reflection)
+    if has_reflection {
+        out.push_str("    chain output {\n");
+        out.push_str(
+            "        type nat hook output priority -100; policy accept;\n",
+        );
+        for rule in &reflection_rules {
+            if let Some(line) = format_nat_prerouting(rule) {
+                out.push_str(&format!("        {}\n", line));
+            }
+        }
+        out.push_str("    }\n");
+    }
+
+    out.push_str("}\n");
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -571,7 +694,10 @@ fn format_nat_postrouting(nat: &NatRule) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::models::{Action, FirewallRule, NatRule, NatType, Protocol};
+    use crate::config::models::{
+        Action, AddressFamily, FirewallRule, NatConfig, NatProtocol, NatRule, NatRuleType,
+        NatTranslation, OutboundMode, Protocol,
+    };
     use uuid::Uuid;
 
     /// Minimal valid [`FirewallRule`] with sensible defaults.
@@ -591,13 +717,59 @@ mod tests {
         }
     }
 
+    /// Minimal enabled [`NatRule`] for masquerade.
+    fn masquerade_rule(iface: &str, src: Option<&str>) -> NatRule {
+        NatRule {
+            id: Uuid::new_v4(),
+            enabled: true,
+            description: None,
+            rule_type: NatRuleType::Masquerade,
+            interface: Some(iface.to_string()),
+            source: src.map(|s| s.to_string()),
+            destination: None,
+            protocol: NatProtocol::Any,
+            source_port: None,
+            destination_port: None,
+            translation: None,
+            nat_reflection: false,
+            address_family: AddressFamily::Ipv4,
+            priority: 0,
+            log: false,
+        }
+    }
+
+    /// Minimal enabled DNAT [`NatRule`].
+    fn dnat_rule(dst: &str, translated_addr: &str, translated_port: Option<u16>) -> NatRule {
+        NatRule {
+            id: Uuid::new_v4(),
+            enabled: true,
+            description: None,
+            rule_type: NatRuleType::Dnat,
+            interface: None,
+            source: None,
+            destination: Some(dst.to_string()),
+            protocol: NatProtocol::Tcp,
+            source_port: None,
+            destination_port: translated_port,
+            translation: Some(NatTranslation {
+                address: Some(translated_addr.to_string()),
+                port: translated_port,
+                port_end: None,
+            }),
+            nat_reflection: false,
+            address_family: AddressFamily::Ipv4,
+            priority: 0,
+            log: false,
+        }
+    }
+
     // ------------------------------------------------------------------
     // generate_ruleset — structural checks
     // ------------------------------------------------------------------
 
     #[test]
     fn empty_ruleset_has_base_structure() {
-        let rs = generate_ruleset(&[], &[], &[], &HashMap::new());
+        let rs = generate_ruleset(&[], None, &[], &HashMap::new());
         assert!(rs.contains("flush ruleset"), "must flush existing rules");
         assert!(rs.contains("table inet filter"), "filter table missing");
         assert!(rs.contains("chain input"), "input chain missing");
@@ -608,8 +780,8 @@ mod tests {
             "stateful allow missing"
         );
         assert!(
-            !rs.contains("table inet nat"),
-            "nat table must not appear without nat rules"
+            !rs.contains("table ip nat"),
+            "nat table must not appear without nat config"
         );
     }
 
@@ -620,7 +792,7 @@ mod tests {
             destination: Some("10.0.0.1/32".into()),
             ..base_rule(0, Action::Accept)
         };
-        let rs = generate_ruleset(&[rule], &[], &[], &HashMap::new());
+        let rs = generate_ruleset(&[rule], None, &[], &HashMap::new());
         assert!(rs.contains("ip saddr 192.168.1.0/24"));
         assert!(rs.contains("ip daddr 10.0.0.1/32"));
         assert!(rs.contains("accept"));
@@ -633,7 +805,7 @@ mod tests {
             destination_port: Some(443),
             ..base_rule(10, Action::Accept)
         };
-        let rs = generate_ruleset(&[rule], &[], &[], &HashMap::new());
+        let rs = generate_ruleset(&[rule], None, &[], &HashMap::new());
         assert!(rs.contains("tcp dport 443"), "tcp dport must appear");
         assert!(rs.contains("accept"));
     }
@@ -646,7 +818,7 @@ mod tests {
             action: Action::Drop,
             ..base_rule(20, Action::Drop)
         };
-        let rs = generate_ruleset(&[rule], &[], &[], &HashMap::new());
+        let rs = generate_ruleset(&[rule], None, &[], &HashMap::new());
         assert!(rs.contains("udp sport 53"));
         assert!(rs.contains("drop"));
     }
@@ -657,21 +829,21 @@ mod tests {
             protocol: Some(Protocol::Tcp),
             ..base_rule(0, Action::Accept)
         };
-        let rs = generate_ruleset(&[rule], &[], &[], &HashMap::new());
+        let rs = generate_ruleset(&[rule], None, &[], &HashMap::new());
         assert!(rs.contains("meta l4proto tcp"));
     }
 
     #[test]
     fn drop_rule() {
         let rule = base_rule(0, Action::Drop);
-        let rs = generate_ruleset(&[rule], &[], &[], &HashMap::new());
+        let rs = generate_ruleset(&[rule], None, &[], &HashMap::new());
         assert!(rs.contains("drop"));
     }
 
     #[test]
     fn reject_rule() {
         let rule = base_rule(0, Action::Reject);
-        let rs = generate_ruleset(&[rule], &[], &[], &HashMap::new());
+        let rs = generate_ruleset(&[rule], None, &[], &HashMap::new());
         assert!(rs.contains("reject"));
     }
 
@@ -681,7 +853,7 @@ mod tests {
             log: true,
             ..base_rule(0, Action::Accept)
         };
-        let rs = generate_ruleset(&[rule], &[], &[], &HashMap::new());
+        let rs = generate_ruleset(&[rule], None, &[], &HashMap::new());
         assert!(rs.contains("log prefix"), "log prefix must appear");
     }
 
@@ -691,7 +863,7 @@ mod tests {
             interface: Some("eth0".into()),
             ..base_rule(0, Action::Accept)
         };
-        let rs = generate_ruleset(&[rule], &[], &[], &HashMap::new());
+        let rs = generate_ruleset(&[rule], None, &[], &HashMap::new());
         assert!(rs.contains("iif \"eth0\""));
     }
 
@@ -701,7 +873,7 @@ mod tests {
             source: Some("2001:db8::/32".into()),
             ..base_rule(0, Action::Accept)
         };
-        let rs = generate_ruleset(&[rule], &[], &[], &HashMap::new());
+        let rs = generate_ruleset(&[rule], None, &[], &HashMap::new());
         assert!(rs.contains("ip6 saddr 2001:db8::/32"));
     }
 
@@ -716,7 +888,7 @@ mod tests {
             ..base_rule(5, Action::Drop)
         };
         // Pass higher-priority rule first; expect lower priority (5) to appear earlier.
-        let rs = generate_ruleset(&[r_high, r_low], &[], &[], &HashMap::new());
+        let rs = generate_ruleset(&[r_high, r_low], None, &[], &HashMap::new());
         let pos_high_prio = rs.find("2.2.2.2").expect("2.2.2.2 not found");
         let pos_low_prio = rs.find("1.1.1.1").expect("1.1.1.1 not found");
         assert!(
@@ -725,58 +897,197 @@ mod tests {
         );
     }
 
+    // ------------------------------------------------------------------
+    // NAT table generation
+    // ------------------------------------------------------------------
+
     #[test]
-    fn nat_masquerade_appears_in_postrouting() {
-        let nat = NatRule {
-            id: Uuid::nil(),
-            description: None,
-            nat_type: NatType::Masquerade,
-            source: Some("192.168.0.0/24".into()),
-            destination: None,
-            translated_address: None,
-            translated_port: None,
-            out_interface: Some("eth0".into()),
-        };
-        let rs = generate_ruleset(&[], &[nat], &[], &HashMap::new());
-        assert!(rs.contains("table inet nat"));
-        assert!(rs.contains("chain postrouting"));
-        assert!(rs.contains("ip saddr 192.168.0.0/24"));
-        assert!(rs.contains("oif \"eth0\""));
-        assert!(rs.contains("masquerade"));
+    fn no_nat_config_omits_nat_table() {
+        let rs = generate_ruleset(&[], None, &[], &HashMap::new());
+        assert!(!rs.contains("table ip nat"), "nat table must not appear without config");
     }
 
     #[test]
-    fn nat_snat_appears_in_postrouting() {
-        let nat = NatRule {
-            id: Uuid::nil(),
+    fn automatic_mode_generates_postrouting_masquerade() {
+        let nat = NatConfig {
+            outbound_mode: OutboundMode::Automatic,
+            wan_interfaces: vec!["eth0".into()],
+            rules: vec![],
+            nat_reflection: false,
+        };
+        let rs = generate_ruleset(&[], Some(&nat), &[], &HashMap::new());
+        assert!(rs.contains("table ip nat"), "nat table must appear");
+        assert!(rs.contains("chain postrouting"), "postrouting chain missing");
+        assert!(rs.contains("oifname \"eth0\" masquerade"), "auto masquerade missing");
+    }
+
+    #[test]
+    fn automatic_mode_no_wan_interfaces_omits_nat_table() {
+        let nat = NatConfig {
+            outbound_mode: OutboundMode::Automatic,
+            wan_interfaces: vec![],
+            rules: vec![],
+            nat_reflection: false,
+        };
+        let rs = generate_ruleset(&[], Some(&nat), &[], &HashMap::new());
+        assert!(!rs.contains("table ip nat"), "nat table must not appear without WAN interfaces");
+    }
+
+    #[test]
+    fn manual_mode_with_masquerade_user_rule() {
+        let nat = NatConfig {
+            outbound_mode: OutboundMode::Manual,
+            wan_interfaces: vec!["eth0".into()],
+            rules: vec![masquerade_rule("eth0", Some("192.168.0.0/24"))],
+            nat_reflection: false,
+        };
+        let rs = generate_ruleset(&[], Some(&nat), &[], &HashMap::new());
+        assert!(rs.contains("table ip nat"), "nat table must appear");
+        assert!(rs.contains("chain postrouting"), "postrouting chain missing");
+        assert!(rs.contains("ip saddr 192.168.0.0/24"), "source address missing");
+        assert!(rs.contains("masquerade"), "masquerade missing");
+        // Auto rule must NOT appear in manual mode.
+        let postrouting_start = rs.find("chain postrouting").unwrap();
+        let postrouting_body = &rs[postrouting_start..];
+        // The oifname from the user rule must be present but auto-masquerade line
+        // should not appear as a standalone "oifname eth0 masquerade" without src.
+        let auto_line = "oifname \"eth0\" masquerade";
+        // Manual mode: no bare auto masquerade line.
+        assert!(!postrouting_body.contains(auto_line), "auto masquerade must not appear in manual mode");
+    }
+
+    #[test]
+    fn hybrid_mode_generates_both_auto_and_user_rules() {
+        let nat = NatConfig {
+            outbound_mode: OutboundMode::Hybrid,
+            wan_interfaces: vec!["eth0".into()],
+            rules: vec![masquerade_rule("eth1", Some("10.0.0.0/8"))],
+            nat_reflection: false,
+        };
+        let rs = generate_ruleset(&[], Some(&nat), &[], &HashMap::new());
+        assert!(rs.contains("oifname \"eth0\" masquerade"), "auto masquerade missing");
+        assert!(rs.contains("ip saddr 10.0.0.0/8"), "user rule src missing");
+        assert!(rs.contains("oifname \"eth1\" masquerade"), "user rule iface missing");
+    }
+
+    #[test]
+    fn dnat_rule_appears_in_prerouting() {
+        let nat = NatConfig {
+            outbound_mode: OutboundMode::Manual,
+            wan_interfaces: vec![],
+            rules: vec![dnat_rule("203.0.113.1/32", "10.0.0.1", Some(8080))],
+            nat_reflection: false,
+        };
+        let rs = generate_ruleset(&[], Some(&nat), &[], &HashMap::new());
+        assert!(rs.contains("chain prerouting"), "prerouting chain missing");
+        assert!(rs.contains("ip daddr 203.0.113.1/32"), "dst addr missing");
+        assert!(rs.contains("dnat to 10.0.0.1:8080"), "dnat target missing");
+    }
+
+    #[test]
+    fn snat_rule_appears_in_postrouting() {
+        let snat = NatRule {
+            id: Uuid::new_v4(),
+            enabled: true,
             description: None,
-            nat_type: NatType::Snat,
+            rule_type: NatRuleType::Snat,
+            interface: None,
             source: Some("10.0.0.0/8".into()),
             destination: None,
-            translated_address: Some("203.0.113.5".into()),
-            translated_port: None,
-            out_interface: None,
+            protocol: NatProtocol::Any,
+            source_port: None,
+            destination_port: None,
+            translation: Some(NatTranslation {
+                address: Some("203.0.113.5".into()),
+                port: None,
+                port_end: None,
+            }),
+            nat_reflection: false,
+            address_family: AddressFamily::Ipv4,
+            priority: 0,
+            log: false,
         };
-        let rs = generate_ruleset(&[], &[nat], &[], &HashMap::new());
-        assert!(rs.contains("snat to 203.0.113.5"));
+        let nat = NatConfig {
+            outbound_mode: OutboundMode::Manual,
+            wan_interfaces: vec![],
+            rules: vec![snat],
+            nat_reflection: false,
+        };
+        let rs = generate_ruleset(&[], Some(&nat), &[], &HashMap::new());
+        assert!(rs.contains("chain postrouting"), "postrouting missing");
+        assert!(rs.contains("snat to 203.0.113.5"), "snat target missing");
     }
 
     #[test]
-    fn nat_dnat_with_port_appears_in_prerouting() {
-        let nat = NatRule {
-            id: Uuid::nil(),
-            description: None,
-            nat_type: NatType::Dnat,
-            source: None,
-            destination: Some("203.0.113.1/32".into()),
-            translated_address: Some("10.0.0.1".into()),
-            translated_port: Some(8080),
-            out_interface: None,
+    fn nat_reflection_generates_output_chain() {
+        let mut rule = dnat_rule("203.0.113.1/32", "10.0.0.1", Some(80));
+        rule.nat_reflection = true;
+        let nat = NatConfig {
+            outbound_mode: OutboundMode::Manual,
+            wan_interfaces: vec![],
+            rules: vec![rule],
+            nat_reflection: false,
         };
-        let rs = generate_ruleset(&[], &[nat], &[], &HashMap::new());
-        assert!(rs.contains("chain prerouting"));
-        assert!(rs.contains("ip daddr 203.0.113.1/32"));
-        assert!(rs.contains("dnat to 10.0.0.1:8080"));
+        let rs = generate_ruleset(&[], Some(&nat), &[], &HashMap::new());
+        // Count occurrences of "chain output" — only the nat output chain should appear.
+        assert!(rs.contains("hook output"), "reflection output chain missing");
+    }
+
+    #[test]
+    fn global_nat_reflection_applies_to_all_dnat_rules() {
+        let nat = NatConfig {
+            outbound_mode: OutboundMode::Manual,
+            wan_interfaces: vec![],
+            rules: vec![dnat_rule("203.0.113.2/32", "192.168.1.10", Some(443))],
+            nat_reflection: true,
+        };
+        let rs = generate_ruleset(&[], Some(&nat), &[], &HashMap::new());
+        assert!(rs.contains("hook output"), "global reflection must generate output chain");
+    }
+
+    #[test]
+    fn nat_rules_sorted_by_priority() {
+        let mut rule_high = dnat_rule("203.0.113.10/32", "10.0.0.10", Some(9090));
+        rule_high.priority = 10;
+        let mut rule_low = dnat_rule("203.0.113.20/32", "10.0.0.20", Some(8080));
+        rule_low.priority = 5;
+        let nat = NatConfig {
+            outbound_mode: OutboundMode::Manual,
+            wan_interfaces: vec![],
+            rules: vec![rule_high, rule_low],
+            nat_reflection: false,
+        };
+        let rs = generate_ruleset(&[], Some(&nat), &[], &HashMap::new());
+        let pos_low = rs.find("203.0.113.20").expect("low priority rule not found");
+        let pos_high = rs.find("203.0.113.10").expect("high priority rule not found");
+        assert!(pos_low < pos_high, "priority 5 rule must appear before priority 10 rule");
+    }
+
+    #[test]
+    fn disabled_nat_rule_not_emitted() {
+        let mut rule = masquerade_rule("eth0", None);
+        rule.enabled = false;
+        let nat = NatConfig {
+            outbound_mode: OutboundMode::Manual,
+            wan_interfaces: vec![],
+            rules: vec![rule],
+            nat_reflection: false,
+        };
+        let rs = generate_ruleset(&[], Some(&nat), &[], &HashMap::new());
+        assert!(!rs.contains("table ip nat"), "disabled rule must not emit nat table");
+    }
+
+    #[test]
+    fn nat_uses_ip_not_inet_table() {
+        let nat = NatConfig {
+            outbound_mode: OutboundMode::Automatic,
+            wan_interfaces: vec!["eth0".into()],
+            rules: vec![],
+            nat_reflection: false,
+        };
+        let rs = generate_ruleset(&[], Some(&nat), &[], &HashMap::new());
+        assert!(rs.contains("table ip nat"), "must use 'table ip nat' (IPv4 only)");
+        assert!(!rs.contains("table inet nat"), "must not use 'table inet nat'");
     }
 
     // ------------------------------------------------------------------
@@ -794,7 +1105,7 @@ mod tests {
             ttl: None,
             enabled: true,
         };
-        let rs = generate_ruleset(&[], &[], &[alias], &HashMap::new());
+        let rs = generate_ruleset(&[], None, &[alias], &HashMap::new());
         assert!(rs.contains("set web_servers"), "named set must appear");
         assert!(rs.contains("192.168.1.10"), "IP must appear in set");
         assert!(rs.contains("ipv4_addr"), "type must be ipv4_addr for IPv4 hosts");
@@ -811,7 +1122,7 @@ mod tests {
             ttl: None,
             enabled: true,
         };
-        let rs = generate_ruleset(&[], &[], &[alias], &HashMap::new());
+        let rs = generate_ruleset(&[], None, &[alias], &HashMap::new());
         assert!(rs.contains("set private_nets"));
         assert!(rs.contains("flags interval"), "network aliases need interval flag");
     }
@@ -827,7 +1138,7 @@ mod tests {
             ttl: None,
             enabled: true,
         };
-        let rs = generate_ruleset(&[], &[], &[alias], &HashMap::new());
+        let rs = generate_ruleset(&[], None, &[alias], &HashMap::new());
         assert!(rs.contains("set web_ports"));
         assert!(rs.contains("inet_service"), "port aliases must use inet_service type");
     }
@@ -843,7 +1154,7 @@ mod tests {
             ttl: None,
             enabled: false,
         };
-        let rs = generate_ruleset(&[], &[], &[alias], &HashMap::new());
+        let rs = generate_ruleset(&[], None, &[alias], &HashMap::new());
         assert!(!rs.contains("disabled_alias"), "disabled alias must not appear in ruleset");
     }
 
@@ -860,7 +1171,7 @@ mod tests {
         };
         let mut resolved = HashMap::new();
         resolved.insert("blocklist".into(), vec!["198.51.100.1".into(), "198.51.100.2".into()]);
-        let rs = generate_ruleset(&[], &[], &[alias], &resolved);
+        let rs = generate_ruleset(&[], None, &[alias], &resolved);
         assert!(rs.contains("set blocklist"));
         assert!(rs.contains("198.51.100.1"));
     }
@@ -891,7 +1202,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_rules_does_not_panic_without_nft() {
-        let result = apply_rules(&[], &[], &[]).await;
+        let result = apply_rules(&[], None, &[]).await;
         match result {
             Ok(()) => {}
             Err(NftError::ApplyFailed(_)) => {}

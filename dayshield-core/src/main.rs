@@ -23,6 +23,7 @@ mod engine;
 mod logs;
 mod logging;
 mod metrics;
+mod nat;
 mod notify;
 mod ntp;
 mod state;

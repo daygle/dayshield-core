@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
-use crate::config::models::{is_valid_cidr, is_valid_interface_name, Interface};
+use crate::config::models::{is_valid_cidr, is_valid_interface_name, Interface, WanMode};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -256,21 +256,31 @@ pub async fn apply_interface(config: &Interface) -> Result<(), InterfaceError> {
             run_ip(&["link", "set", "dev", name, "mtu", &mtu.to_string()]).await?;
         }
 
-        if config.dhcp4 {
-            start_dhcp_client(name).await?;
-        } else {
-            // Ensure no stale dhclient is running before applying static config.
-            stop_dhcp_client(name).await;
-            for cidr in &config.addresses {
-                if !is_valid_cidr(cidr) {
-                    return Err(InterfaceError::InvalidCIDR(cidr.clone()));
+        match config.wan_mode.as_ref() {
+            Some(WanMode::Pppoe) => {
+                let username = config.pppoe_username.as_deref().unwrap_or("");
+                let password = config.pppoe_password.as_deref().unwrap_or("");
+                start_pppoe(name, username, password).await?;
+            }
+            _ => {
+                if config.dhcp4 {
+                    start_dhcp_client(name).await?;
+                } else {
+                    // Ensure no stale dhclient is running before applying static config.
+                    stop_dhcp_client(name).await;
+                    for cidr in &config.addresses {
+                        if !is_valid_cidr(cidr) {
+                            return Err(InterfaceError::InvalidCIDR(cidr.clone()));
+                        }
+                        debug!(name = %name, cidr = %cidr, "interfaces: adding address");
+                        run_ip(&["addr", "add", cidr, "dev", name]).await?;
+                    }
                 }
-                debug!(name = %name, cidr = %cidr, "interfaces: adding address");
-                run_ip(&["addr", "add", cidr, "dev", name]).await?;
             }
         }
     } else {
-        // Release any active DHCP lease before taking the interface down.
+        // Release any active DHCP or PPPoE session before taking the interface down.
+        stop_pppoe(name).await;
         stop_dhcp_client(name).await;
         info!(name = %name, "interfaces: bringing interface down");
         run_ip(&["link", "set", "dev", name, "down"]).await?;
@@ -406,6 +416,70 @@ async fn stop_dhcp_client(name: &str) {
             debug!(name = %name, error = %e, "interfaces: could not remove dhclient PID file");
         }
     }
+}
+
+/// Write PPPoE peer config and start `pppd` for `wan_iface`.
+///
+/// Creates:
+/// - `/etc/ppp/peers/wan-<wan_iface>` — pppd config using `rp-pppoe` plugin.
+/// - `/etc/ppp/chap-secrets` and `/etc/ppp/pap-secrets` with credentials.
+///
+/// Spawns `pppd call wan-<wan_iface>` as a background process.  `ppp0` will
+/// appear once the ISP authenticates.
+async fn start_pppoe(wan_iface: &str, username: &str, password: &str) -> Result<(), InterfaceError> {
+    use std::os::unix::fs::PermissionsExt;
+    use tokio::fs;
+
+    let peer_name = format!("wan-{wan_iface}");
+    let peer_path = format!("/etc/ppp/peers/{peer_name}");
+    let secrets_line = format!("\"{}\" * \"{}\" *\n", username, password);
+
+    // Ensure /etc/ppp exists
+    fs::create_dir_all("/etc/ppp/peers")
+        .await
+        .map_err(|e| InterfaceError::ApplyFailed(format!("pppoe: create /etc/ppp/peers: {e}")))?;
+
+    // Write peer config
+    let peer_cfg = format!(
+        "plugin rp-pppoe.so {wan_iface}\nuser \"{username}\"\nnoauth\ndefaultroute\n\
+replacedefaultroute\nhide-password\npersist\nmaxfail 0\nholdoff 5\nnoipv6\n"
+    );
+    fs::write(&peer_path, &peer_cfg)
+        .await
+        .map_err(|e| InterfaceError::ApplyFailed(format!("pppoe: write peer file: {e}")))?;
+    std::fs::set_permissions(&peer_path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| InterfaceError::ApplyFailed(format!("pppoe: chmod peer file: {e}")))?;
+
+    // Write secrets (600 permissions)
+    for path in ["/etc/ppp/chap-secrets", "/etc/ppp/pap-secrets"] {
+        fs::write(path, &secrets_line)
+            .await
+            .map_err(|e| InterfaceError::ApplyFailed(format!("pppoe: write {path}: {e}")))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| InterfaceError::ApplyFailed(format!("pppoe: chmod {path}: {e}")))?;
+    }
+
+    // Stop any existing pppd for this WAN first
+    stop_pppoe(wan_iface).await;
+
+    info!(wan_iface = %wan_iface, "interfaces: starting pppoe (pppd call {})", peer_name);
+
+    Command::new("pppd")
+        .args(["call", &peer_name])
+        .spawn()
+        .map_err(|e| InterfaceError::ApplyFailed(format!("pppoe: failed to spawn pppd: {e}")))?;
+
+    Ok(())
+}
+
+/// Stop `pppd` for the given WAN interface, if running.
+async fn stop_pppoe(wan_iface: &str) {
+    let peer_name = format!("wan-{wan_iface}");
+    // Best-effort: pkill any pppd calling this peer
+    let _ = Command::new("pkill")
+        .args(["-f", &format!("pppd call {peer_name}")])
+        .output()
+        .await;
 }
 
 /// Run `ip <args>` and return an error if the command exits non-zero.

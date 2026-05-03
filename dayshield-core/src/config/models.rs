@@ -30,6 +30,17 @@ pub enum InterfaceType {
     Dummy,
 }
 
+/// WAN connection mode, used when this interface is designated as the upstream.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum WanMode {
+    /// Obtain an IPv4 address via DHCP (default).
+    #[default]
+    Dhcp,
+    /// PPPoE (DSL / fibre) — requires `pppoe_username` and `pppoe_password`.
+    Pppoe,
+}
+
 /// Represents a managed network interface.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Interface {
@@ -50,6 +61,18 @@ pub struct Interface {
     pub dhcp6: bool,
     /// VLAN tag ID (802.1Q), if this is a VLAN sub-interface.
     pub vlan: Option<u16>,
+    /// WAN connection mode.  `None` means this interface is not a WAN uplink.
+    /// When `Some(WanMode::Pppoe)` the `pppoe_username` / `pppoe_password`
+    /// fields must also be present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wan_mode: Option<WanMode>,
+    /// PPPoE username (only used when `wan_mode == Some(WanMode::Pppoe)`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pppoe_username: Option<String>,
+    /// PPPoE password (only used when `wan_mode == Some(WanMode::Pppoe)`).
+    /// Stored in the local config file; never returned in API list responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pppoe_password: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

@@ -25,8 +25,8 @@ use tracing::{debug, info, warn};
 
 use super::models::{
     AcmeConfig, CrowdSecConfig, DhcpConfig, DnsConfig, DnsDomainOverride, DnsHostOverride,
-    FirewallAlias, FirewallRule, Interface, NatConfig, NotifyConfig, NtpConfig, SuricataConfig,
-    SystemConfig, WireGuardInterface,
+    FirewallAlias, FirewallRule, Gateway, Interface, NatConfig, NotifyConfig, NtpConfig,
+    SuricataConfig, SystemConfig, WireGuardInterface,
 };
 
 /// Default path to the configuration directory.
@@ -722,6 +722,18 @@ impl ConfigStore {
     pub fn save_system_settings(&self, settings: super::models::SystemSettings) -> Result<()> {
         let mut config = self.load()?;
         config.system_settings = Some(settings);
+        self.save_with_rollback(&config)
+    }
+
+    /// Return the gateway list from the persisted config.
+    pub fn load_gateways(&self) -> Result<Vec<Gateway>> {
+        Ok(self.load()?.gateways)
+    }
+
+    /// Atomically replace the gateway list in the persisted config.
+    pub fn save_gateways(&self, gateways: Vec<Gateway>) -> Result<()> {
+        let mut config = self.load()?;
+        config.gateways = gateways;
         self.save_with_rollback(&config)
     }
 

@@ -275,6 +275,11 @@ pub async fn apply_interface(config: &Interface) -> Result<(), InterfaceError> {
                         debug!(name = %name, cidr = %cidr, "interfaces: adding address");
                         run_ip(&["addr", "add", cidr, "dev", name]).await?;
                     }
+                    // Apply static default gateway if configured.
+                    if let Some(gw_ip) = &config.gateway {
+                        info!(name = %name, gateway = %gw_ip, "interfaces: applying static default route");
+                        run_ip(&["route", "replace", "default", "via", gw_ip, "dev", name]).await?;
+                    }
                 }
             }
         }

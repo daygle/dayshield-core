@@ -10,6 +10,7 @@ mod dhcp;
 mod dns;
 mod dns_overrides;
 mod firewall;
+mod gateways;
 mod interfaces;
 mod logs;
 mod metrics;
@@ -44,8 +45,9 @@ use crate::state::AppState;
 /// - `POST /system/reboot`                                 — trigger immediate system reboot
 /// - `POST /system/shutdown`                               — trigger immediate system shutdown
 /// - `GET  /interfaces`                                    — list all network interfaces
-/// - `POST /interfaces`                                    — create / update a network interface
-/// - `GET  /firewall/rules`                                — list firewall rules
+/// - `POST /interfaces`                                    — create / update a network interface/// - `GET  /gateways`                                       — list gateways with live routing and health state
+/// - `POST /gateways`                                       — create or update a gateway
+/// - `DELETE /gateways/{name}`                              — delete a gateway/// - `GET  /firewall/rules`                                — list firewall rules
 /// - `POST /firewall/rules`                                — add a new firewall rule
 /// - `GET  /firewall/aliases`                              — list firewall aliases
 /// - `POST /firewall/aliases`                              — create a firewall alias
@@ -114,6 +116,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/interfaces", get(interfaces::list_interfaces))
         .route("/interfaces", post(interfaces::create_interface))
         .route("/interfaces/{name}", delete(interfaces::delete_interface))
+        // Gateways
+        .route("/gateways", get(gateways::list_gateways))
+        .route("/gateways", post(gateways::upsert_gateway))
+        .route("/gateways/{name}", delete(gateways::delete_gateway))
         // Firewall rules
         .route("/firewall/rules", get(firewall::list_rules))
         .route("/firewall/rules", post(firewall::create_rule))

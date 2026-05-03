@@ -18,6 +18,7 @@ pub mod acme;
 pub mod crowdsec;
 pub mod dhcp;
 pub mod dns;
+pub mod gateway;
 pub mod interfaces;
 pub mod nftables;
 pub mod suricata;

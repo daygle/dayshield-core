@@ -73,6 +73,57 @@ pub struct Interface {
     /// Stored in the local config file; never returned in API list responses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pppoe_password: Option<String>,
+    /// Static WAN gateway IP address.
+    ///
+    /// Only used when `dhcp4` is `false` and `wan_mode` is not PPPoE.
+    /// When set, the engine applies `ip route replace default via <gateway> dev <name>`
+    /// after configuring the interface addresses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Gateway
+// ---------------------------------------------------------------------------
+
+/// A named upstream gateway.
+///
+/// Gateways are associated with a network interface and represent the
+/// next-hop IP address used to route traffic out of that interface.
+/// For DHCP and PPPoE uplinks the gateway IP is discovered automatically;
+/// for static uplinks it must be specified explicitly in [`Interface::gateway`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Gateway {
+    /// Unique gateway name, e.g. `"WAN_GW"` or `"WAN_DHCP"`.
+    pub name: String,
+    /// Optional human-readable description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The network interface this gateway is reachable via.
+    pub interface: String,
+    /// Static next-hop IP address.
+    ///
+    /// `None` for DHCP / PPPoE interfaces where the gateway is negotiated
+    /// automatically; `Some` for static WAN.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_ip: Option<String>,
+    /// IP address to use for health monitoring (ICMP ping).
+    ///
+    /// Defaults to `gateway_ip` at probe time when `None`.  For DHCP / PPPoE
+    /// gateways without a static `gateway_ip`, set this to a reliable public
+    /// address (e.g. `"8.8.8.8"`) to enable health checking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor_ip: Option<String>,
+    /// Routing priority weight (1–100, lower = higher priority).
+    /// Used for multi-WAN and gateway groups.
+    #[serde(default = "gateway_default_weight")]
+    pub weight: u8,
+    /// Whether this gateway is active.
+    pub enabled: bool,
+}
+
+fn gateway_default_weight() -> u8 {
+    1
 }
 
 // ---------------------------------------------------------------------------
@@ -1508,4 +1559,7 @@ pub struct SystemConfig {
     /// NTP client/server configuration.
     #[serde(default)]
     pub ntp: Option<NtpConfig>,
+    /// Named upstream gateways.
+    #[serde(default)]
+    pub gateways: Vec<Gateway>,
 }

@@ -12,10 +12,9 @@
 //! production deployment should consider PBKDF2 or Argon2.
 
 use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
+    aead::{Aead, KeyInit},
     Aes256Gcm, Key, Nonce,
 };
-use rand::RngCore;
 use sha2::{Digest, Sha256};
 
 /// Encrypt `plaintext` with AES-256-GCM using a key derived from
@@ -28,10 +27,8 @@ use sha2::{Digest, Sha256};
 /// Returns an [`anyhow::Error`] if the AEAD cipher fails.
 pub fn encrypt(plaintext: &[u8], passphrase: &str) -> anyhow::Result<Vec<u8>> {
     // Generate a random 16-byte salt and 12-byte nonce.
-    let mut salt = [0u8; 16];
-    let mut nonce_bytes = [0u8; 12];
-    OsRng.fill_bytes(&mut salt);
-    OsRng.fill_bytes(&mut nonce_bytes);
+    let salt: [u8; 16] = rand::random();
+    let nonce_bytes: [u8; 12] = rand::random();
 
     let key = derive_key(passphrase, &salt);
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));

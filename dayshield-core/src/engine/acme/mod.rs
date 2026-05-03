@@ -42,7 +42,7 @@ use axum::{
     Router,
 };
 use instant_acme::{
-    Account, AccountCredentials, ChallengeType, Identifier, LetsEncrypt, NewAccount, NewOrder,
+    Account, AccountCredentials, ChallengeType, Identifier, NewAccount, NewOrder,
     OrderStatus,
 };
 use rcgen::CertificateParams;
@@ -158,7 +158,9 @@ impl AcmeEngine {
             debug!(path = ?creds_path, "acme: loading existing account credentials");
             let json = std::fs::read_to_string(&creds_path)?;
             let creds: AccountCredentials = serde_json::from_str(&json)?;
-            let account = Account::from_credentials(creds)
+            let account = Account::builder()
+                .map_err(AcmeError::Protocol)?
+                .from_credentials(creds)
                 .await
                 .map_err(AcmeError::Protocol)?;
             info!("acme: account loaded from credentials file");
@@ -171,17 +173,21 @@ impl AcmeEngine {
             "acme: registering new account"
         );
 
-        let (account, credentials) = Account::create(
-            &NewAccount {
-                contact: &[&format!("mailto:{}", self.config.email)],
-                terms_of_service_agreed: true,
-                only_return_existing: false,
-            },
-            &self.config.directory_url,
-            None,
-        )
-        .await
-        .map_err(AcmeError::Protocol)?;
+        let contact = format!("mailto:{}", self.config.email);
+        let contacts = [contact.as_str()];
+        let (account, credentials) = Account::builder()
+            .map_err(AcmeError::Protocol)?
+            .create(
+                &NewAccount {
+                    contact: &contacts,
+                    terms_of_service_agreed: true,
+                    only_return_existing: false,
+                },
+                self.config.directory_url.clone(),
+                None,
+            )
+            .await
+            .map_err(AcmeError::Protocol)?;
 
         let creds_json = serde_json::to_string(&credentials)?;
         std::fs::write(&creds_path, &creds_json)?;
@@ -227,42 +233,41 @@ impl AcmeEngine {
             .collect();
 
         let mut order = account
-            .new_order(&NewOrder {
-                identifiers: &identifiers,
-            })
+            .new_order(&NewOrder::new(&identifiers))
             .await
             .map_err(AcmeError::Protocol)?;
 
-        let authorizations = order
-            .authorizations()
-            .await
-            .map_err(AcmeError::Protocol)?;
+        let challenge_map: ChallengeMap = Arc::new(RwLock::new(HashMap::new()));
+        let server_handle = if matches!(self.config.challenge_type, AcmeChallengeType::Http01) {
+            Some(start_http01_server(Arc::clone(&challenge_map)).await?)
+        } else {
+            None
+        };
 
         // Collect challenges ------------------------------------------------
 
-        // Map of token -> key-authorization string for all HTTP-01 challenges.
-        let mut http01_tokens: HashMap<String, String> = HashMap::new();
-        let mut challenge_urls: Vec<String> = Vec::new();
-
-        for auth in &authorizations {
-            let Identifier::Dns(domain) = &auth.identifier;
+        let mut authorizations = order.authorizations();
+        while let Some(next_auth) = authorizations.next().await {
+            let mut auth = next_auth.map_err(AcmeError::Protocol)?;
+            let domain = auth.identifier().to_string();
 
             match self.config.challenge_type {
                 AcmeChallengeType::Http01 => {
-                    let challenge = auth
-                        .challenges
-                        .iter()
-                        .find(|c| c.r#type == ChallengeType::Http01)
+                    let mut challenge = auth
+                        .challenge(ChallengeType::Http01)
                         .ok_or_else(|| {
                             AcmeError::Other(format!(
                                 "no HTTP-01 challenge available for domain {domain}"
                             ))
                         })?;
 
-                    let key_auth = order.key_authorization(challenge);
-                    http01_tokens
-                        .insert(challenge.token.clone(), key_auth.as_str().to_string());
-                    challenge_urls.push(challenge.url.clone());
+                    let key_auth = challenge.key_authorization();
+                    {
+                        let mut map = challenge_map.write().await;
+                        map.insert(challenge.token.clone(), key_auth.as_str().to_string());
+                    }
+
+                    challenge.set_ready().await.map_err(AcmeError::Protocol)?;
 
                     info!(
                         domain = %domain,
@@ -272,16 +277,14 @@ impl AcmeEngine {
                 }
                 AcmeChallengeType::Dns01 => {
                     let challenge = auth
-                        .challenges
-                        .iter()
-                        .find(|c| c.r#type == ChallengeType::Dns01)
+                        .challenge(ChallengeType::Dns01)
                         .ok_or_else(|| {
                             AcmeError::Other(format!(
                                 "no DNS-01 challenge available for domain {domain}"
                             ))
                         })?;
 
-                    let key_auth = order.key_authorization(challenge);
+                    let key_auth = challenge.key_authorization();
                     let dns_value = key_auth.dns_value();
 
                     warn!(
@@ -291,26 +294,16 @@ impl AcmeEngine {
                         "acme: DNS-01 requires manual TXT record creation"
                     );
 
+                    if let Some(handle) = &server_handle {
+                        handle.abort();
+                    }
+
                     return Err(AcmeError::Dns01ManualRequired {
-                        domain: domain.clone(),
+                        domain,
                         value: dns_value,
                     });
                 }
             }
-        }
-
-        // Start HTTP-01 challenge server (HTTP-01 path only) ----------------
-
-        let challenge_map: ChallengeMap = Arc::new(RwLock::new(http01_tokens));
-        let server_handle = start_http01_server(Arc::clone(&challenge_map)).await?;
-
-        // Mark challenges as ready ------------------------------------------
-
-        for url in &challenge_urls {
-            order
-                .set_challenge_ready(url)
-                .await
-                .map_err(AcmeError::Protocol)?;
         }
 
         // Poll until the order is Ready (or times out) ----------------------
@@ -327,7 +320,9 @@ impl AcmeEngine {
                     break;
                 }
                 OrderStatus::Invalid => {
-                    server_handle.abort();
+                    if let Some(handle) = &server_handle {
+                        handle.abort();
+                    }
                     return Err(AcmeError::Other(
                         "order became invalid during authorization".into(),
                     ));
@@ -338,7 +333,9 @@ impl AcmeEngine {
                 }
             }
             if attempt + 1 == MAX_ATTEMPTS {
-                server_handle.abort();
+                if let Some(handle) = &server_handle {
+                    handle.abort();
+                }
                 return Err(AcmeError::ChallengeTimeout(
                     "order did not become Ready within the polling window".into(),
                 ));
@@ -346,7 +343,9 @@ impl AcmeEngine {
         }
 
         // Stop the challenge server now that the order is Ready -------------
-        server_handle.abort();
+        if let Some(handle) = &server_handle {
+            handle.abort();
+        }
 
         if !ready {
             return Err(AcmeError::ChallengeTimeout(
@@ -369,7 +368,7 @@ impl AcmeEngine {
         // Finalise the order ------------------------------------------------
 
         order
-            .finalize(csr.der())
+            .finalize_csr(csr.der().as_ref())
             .await
             .map_err(AcmeError::Protocol)?;
 

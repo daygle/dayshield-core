@@ -25,8 +25,8 @@ use tracing::{debug, info, warn};
 
 use super::models::{
     AcmeConfig, CrowdSecConfig, DhcpConfig, DnsConfig, DnsDomainOverride, DnsHostOverride,
-    FirewallAlias, FirewallRule, Interface, NotifyConfig, NtpConfig, SuricataConfig, SystemConfig,
-    WireGuardInterface,
+    FirewallAlias, FirewallRule, Interface, NatConfig, NotifyConfig, NtpConfig, SuricataConfig,
+    SystemConfig, WireGuardInterface,
 };
 
 /// Default path to the configuration directory.
@@ -461,6 +461,14 @@ impl ConfigStore {
             }
         }
 
+        // NAT config validation.
+        if let Some(nat) = &config.nat {
+            use crate::config::models::validate_nat_config;
+            if let Err(msg) = validate_nat_config(nat) {
+                anyhow::bail!("NAT config is invalid: {msg}");
+            }
+        }
+
         Ok(())
     }
 
@@ -680,6 +688,24 @@ impl ConfigStore {
     pub fn save_ntp_config(&self, ntp: NtpConfig) -> Result<()> {
         let mut config = self.load()?;
         config.ntp = Some(ntp);
+        self.save_with_rollback(&config)
+    }
+
+    /// Return the NAT configuration from the persisted config.
+    ///
+    /// Returns `None` if no NAT configuration has been saved yet.
+    pub fn load_nat_config(&self) -> Result<Option<NatConfig>> {
+        Ok(self.load()?.nat)
+    }
+
+    /// Atomically replace the NAT configuration in the persisted config.
+    ///
+    /// Loads the current config, replaces `nat`, validates, then calls
+    /// [`Self::save_with_rollback`] to write atomically with rollback on
+    /// post-write validation failure.
+    pub fn save_nat_config(&self, nat: NatConfig) -> Result<()> {
+        let mut config = self.load()?;
+        config.nat = Some(nat);
         self.save_with_rollback(&config)
     }
 

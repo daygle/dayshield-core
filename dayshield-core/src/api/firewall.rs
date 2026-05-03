@@ -173,7 +173,7 @@ pub async fn create_rule(
 
     {
         let rules = state.firewall_rules.read().await;
-        apply_rules(&rules, &full_cfg.nat_rules, &full_cfg.firewall_aliases).await?;
+        apply_rules(&rules, full_cfg.nat.as_ref(), &full_cfg.firewall_aliases).await?;
     }
 
     info!(id = %rule.id, "firewall: nftables engine apply complete");

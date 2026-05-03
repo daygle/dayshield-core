@@ -266,31 +266,264 @@ pub struct FirewallRule {
 // NAT
 // ---------------------------------------------------------------------------
 
-/// Type of NAT translation to perform.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Outbound NAT mode — controls whether automatic masquerade rules are emitted.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
-pub enum NatType {
+pub enum OutboundMode {
+    /// Automatically masquerade all traffic leaving every WAN interface.
+    #[default]
+    Automatic,
+    /// Automatic masquerade for WAN interfaces **plus** any user-defined rules.
+    Hybrid,
+    /// Only user-defined rules; no automatic masquerade is generated.
+    Manual,
+}
+
+/// NAT rule type.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum NatRuleType {
+    /// Dynamic source NAT — rewrites the source IP to the outbound interface address.
     Masquerade,
+    /// Static source NAT — rewrites the source IP to a fixed address.
     Snat,
+    /// Destination NAT / port forward — rewrites the destination IP and/or port.
     Dnat,
 }
 
-/// A NAT rule to be compiled into the nftables `nat` table.
+/// Protocol selector for NAT rules.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum NatProtocol {
+    Tcp,
+    Udp,
+    /// Matches both TCP and UDP.
+    #[serde(rename = "tcp_udp")]
+    TcpUdp,
+    /// Match any protocol.
+    #[default]
+    Any,
+}
+
+/// Address family.  IPv4 only; IPv6 is explicitly unsupported.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AddressFamily {
+    #[default]
+    Ipv4,
+}
+
+/// Translated address and/or port for SNAT / DNAT rules.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NatTranslation {
+    /// IPv4 address to translate to.
+    pub address: Option<String>,
+    /// Single port to translate to (or lower bound of a port range).
+    pub port: Option<u16>,
+    /// Upper bound of a translated port range.  Must be ≥ `port` when set.
+    pub port_end: Option<u16>,
+}
+
+/// A WAN / LAN interface descriptor returned by the NAT interface listing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NatInterface {
+    /// OS-level interface name, e.g. `"eth0"`.
+    pub name: String,
+    /// `true` when this interface is the WAN uplink.
+    pub is_wan: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// A single NAT rule compiled into the nftables `nat` table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NatRule {
+    /// Unique identifier.
     pub id: Uuid,
+    /// Whether this rule is active.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Optional human-readable comment.
     pub description: Option<String>,
-    pub nat_type: NatType,
-    /// Source CIDR that should be translated.
+    /// Type of NAT to perform.
+    pub rule_type: NatRuleType,
+    /// WAN or LAN interface to match (outbound for masquerade/SNAT; inbound for DNAT).
+    pub interface: Option<String>,
+    /// Source IPv4 address or CIDR filter (`None` = any).
     pub source: Option<String>,
-    /// Destination CIDR that should be translated.
+    /// Destination IPv4 address or CIDR filter (`None` = any).
     pub destination: Option<String>,
-    /// Translated-to address (for SNAT/DNAT).
-    pub translated_address: Option<String>,
-    /// Translated-to port (for DNAT).
-    pub translated_port: Option<u16>,
-    /// Outbound interface for masquerade rules.
-    pub out_interface: Option<String>,
+    /// Protocol filter.
+    #[serde(default)]
+    pub protocol: NatProtocol,
+    /// Source port filter.
+    pub source_port: Option<u16>,
+    /// Destination port filter.
+    pub destination_port: Option<u16>,
+    /// Translation target (required for SNAT / DNAT; absent for masquerade).
+    pub translation: Option<NatTranslation>,
+    /// Enable NAT reflection (hairpin NAT) for this rule.
+    #[serde(default)]
+    pub nat_reflection: bool,
+    /// Address family — IPv4 only; IPv6 values are rejected by the validator.
+    #[serde(default)]
+    pub address_family: AddressFamily,
+    /// Rule priority — lower values are evaluated first.
+    #[serde(default)]
+    pub priority: i32,
+    /// Emit a log statement before applying the NAT action.
+    #[serde(default)]
+    pub log: bool,
+}
+
+/// Top-level NAT configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NatConfig {
+    /// Outbound NAT mode.
+    #[serde(default)]
+    pub outbound_mode: OutboundMode,
+    /// WAN interface names used when generating automatic masquerade rules.
+    #[serde(default)]
+    pub wan_interfaces: Vec<String>,
+    /// User-defined NAT rules, sorted deterministically by `priority`.
+    #[serde(default)]
+    pub rules: Vec<NatRule>,
+    /// Enable NAT reflection (hairpin NAT) globally for all DNAT rules.
+    #[serde(default)]
+    pub nat_reflection: bool,
+}
+
+impl Default for NatConfig {
+    fn default() -> Self {
+        Self {
+            outbound_mode: OutboundMode::Automatic,
+            wan_interfaces: vec![],
+            rules: vec![],
+            nat_reflection: false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Validation helpers — NAT
+// ---------------------------------------------------------------------------
+
+/// Return `true` if `addr` is a valid IPv4 address (without prefix length).
+pub fn is_valid_ipv4_addr(addr: &str) -> bool {
+    addr.parse::<std::net::Ipv4Addr>().is_ok()
+}
+
+/// Return `true` if `value` is a valid IPv4 address or an IPv4 CIDR prefix.
+///
+/// Rejects IPv6 addresses and IPv6 CIDRs.
+pub fn is_valid_ipv4_cidr_or_addr(value: &str) -> bool {
+    if value.parse::<std::net::Ipv4Addr>().is_ok() {
+        return true;
+    }
+    if let Some((ip_str, prefix_str)) = value.split_once('/') {
+        if let (Ok(_), Ok(prefix)) = (
+            ip_str.parse::<std::net::Ipv4Addr>(),
+            prefix_str.parse::<u8>(),
+        ) {
+            return prefix <= 32;
+        }
+    }
+    false
+}
+
+/// Validate a single [`NatRule`].
+///
+/// Returns `Ok(())` on success or `Err` with a descriptive message.
+pub fn validate_nat_rule(rule: &NatRule) -> Result<(), String> {
+    // IPv4 boundary: reject IPv6 in source / destination.
+    if let Some(src) = &rule.source {
+        if !is_valid_ipv4_cidr_or_addr(src) {
+            return Err(format!(
+                "source {:?} is not a valid IPv4 address/CIDR (IPv6 not supported)",
+                src
+            ));
+        }
+    }
+    if let Some(dst) = &rule.destination {
+        if !is_valid_ipv4_cidr_or_addr(dst) {
+            return Err(format!(
+                "destination {:?} is not a valid IPv4 address/CIDR (IPv6 not supported)",
+                dst
+            ));
+        }
+    }
+    // Interface name validation.
+    if let Some(iface) = &rule.interface {
+        if !is_valid_interface_name(iface) {
+            return Err(format!(
+                "interface {:?} is not a valid interface name",
+                iface
+            ));
+        }
+    }
+    // Translation validation.
+    match rule.rule_type {
+        NatRuleType::Snat | NatRuleType::Dnat => {
+            let translation = rule.translation.as_ref().ok_or_else(|| {
+                format!(
+                    "{:?} rule must specify a translation",
+                    rule.rule_type
+                )
+            })?;
+            let addr = translation.address.as_deref().ok_or_else(|| {
+                format!("{:?} rule translation must specify an address", rule.rule_type)
+            })?;
+            if !is_valid_ipv4_addr(addr) {
+                return Err(format!(
+                    "translation address {:?} is not a valid IPv4 address",
+                    addr
+                ));
+            }
+            if let Some(port) = translation.port {
+                if port == 0 {
+                    return Err("translation port must be non-zero".into());
+                }
+            }
+            if let Some(port_end) = translation.port_end {
+                if port_end == 0 {
+                    return Err("translation port_end must be non-zero".into());
+                }
+                if let Some(port) = translation.port {
+                    if port_end < port {
+                        return Err(format!(
+                            "translation port_end {} must be ≥ port {}",
+                            port_end, port
+                        ));
+                    }
+                }
+            }
+        }
+        NatRuleType::Masquerade => {
+            // Masquerade rules do not use a translation target.
+        }
+    }
+    Ok(())
+}
+
+/// Return `Ok(())` if `config` is a valid [`NatConfig`], or `Err` with a
+/// descriptive message.
+pub fn validate_nat_config(config: &NatConfig) -> Result<(), String> {
+    for iface in &config.wan_interfaces {
+        if !is_valid_interface_name(iface) {
+            return Err(format!(
+                "NAT wan_interfaces contains invalid interface name {:?}",
+                iface
+            ));
+        }
+    }
+    for rule in &config.rules {
+        if let Err(msg) = validate_nat_rule(rule) {
+            return Err(format!("NAT rule {}: {}", rule.id, msg));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1242,7 +1475,9 @@ pub struct SystemConfig {
     pub domain: Option<String>,
     pub interfaces: Vec<Interface>,
     pub firewall_rules: Vec<FirewallRule>,
-    pub nat_rules: Vec<NatRule>,
+    /// NAT configuration (outbound mode, WAN interfaces, and user rules).
+    #[serde(default)]
+    pub nat: Option<NatConfig>,
     pub dns: Option<DnsConfig>,
     pub dhcp: Option<DhcpConfig>,
     pub vpn_tunnels: Vec<VpnTunnel>,

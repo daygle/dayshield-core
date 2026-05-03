@@ -1,0 +1,462 @@
+//! NAT REST API handlers.
+//!
+//! # Endpoints
+//!
+//! | Method   | Path                  | Description                               |
+//! |----------|-----------------------|-------------------------------------------|
+//! | `GET`    | `/nat/config`         | Return the current [`NatConfig`]          |
+//! | `PUT`    | `/nat/config`         | Replace the [`NatConfig`]                 |
+//! | `GET`    | `/nat/rules`          | Return the user-defined [`NatRule`] list  |
+//! | `POST`   | `/nat/rules`          | Append a new [`NatRule`]                  |
+//! | `DELETE` | `/nat/rules/{id}`     | Remove a rule by UUID                     |
+
+use std::sync::Arc;
+
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+};
+use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
+use uuid::Uuid;
+
+use crate::{
+    config::models::{
+        validate_nat_config, AddressFamily, NatConfig, NatProtocol, NatRule, NatRuleType,
+        NatTranslation, OutboundMode,
+    },
+    engine::nftables::{apply_rules, NftError},
+    state::AppState,
+};
+
+// ---------------------------------------------------------------------------
+// Error type
+// ---------------------------------------------------------------------------
+
+/// Structured error returned by NAT handlers.
+#[derive(Debug, thiserror::Error)]
+pub enum NatError {
+    /// A field failed validation.
+    #[error("validation error: {0}")]
+    ValidationFailed(String),
+
+    /// A persistent-storage operation failed.
+    #[error("storage error: {0:#}")]
+    StorageError(#[from] anyhow::Error),
+
+    /// The nftables engine failed to apply the updated ruleset.
+    #[error("engine error: {0}")]
+    EngineError(String),
+
+    /// The requested rule was not found.
+    #[error("rule not found: {0}")]
+    NotFound(Uuid),
+}
+
+/// Machine-readable validation error body.
+#[derive(Debug, Serialize)]
+pub struct NatErrorBody {
+    pub error: String,
+    pub field: Option<String>,
+}
+
+impl IntoResponse for NatError {
+    fn into_response(self) -> axum::response::Response {
+        let status = match &self {
+            NatError::ValidationFailed(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            NatError::NotFound(_) => StatusCode::NOT_FOUND,
+            NatError::StorageError(_) | NatError::EngineError(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        };
+        (
+            status,
+            Json(NatErrorBody {
+                error: self.to_string(),
+                field: None,
+            }),
+        )
+            .into_response()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Request / response types
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /nat/rules`.
+#[derive(Debug, Deserialize)]
+pub struct CreateNatRuleRequest {
+    pub description: Option<String>,
+    pub rule_type: NatRuleType,
+    pub interface: Option<String>,
+    pub source: Option<String>,
+    pub destination: Option<String>,
+    #[serde(default)]
+    pub protocol: NatProtocol,
+    pub source_port: Option<u16>,
+    pub destination_port: Option<u16>,
+    pub translation: Option<NatTranslation>,
+    #[serde(default)]
+    pub nat_reflection: bool,
+    #[serde(default)]
+    pub priority: i32,
+    #[serde(default)]
+    pub log: bool,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
+/// Handler: `GET /nat/config`
+///
+/// Returns the current [`NatConfig`] (or a default if none has been saved).
+pub async fn get_config(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, NatError> {
+    let cfg = state
+        .config_store
+        .load_nat_config()
+        .map_err(NatError::StorageError)?
+        .unwrap_or_default();
+
+    info!(
+        mode = ?cfg.outbound_mode,
+        wan_interfaces = cfg.wan_interfaces.len(),
+        rules = cfg.rules.len(),
+        "nat: loaded config"
+    );
+
+    Ok(Json(cfg))
+}
+
+/// Handler: `PUT /nat/config`
+///
+/// Replaces the entire [`NatConfig`].  The request body must be a valid JSON
+/// [`NatConfig`].  Validation errors are returned as structured JSON with
+/// `422 Unprocessable Entity`.
+pub async fn put_config(
+    State(state): State<Arc<AppState>>,
+    Json(cfg): Json<NatConfig>,
+) -> Result<impl IntoResponse, NatError> {
+    // Validate before persisting.
+    if let Err(msg) = validate_nat_config(&cfg) {
+        warn!(error = %msg, "nat: config validation failed");
+        return Err(NatError::ValidationFailed(msg));
+    }
+
+    state
+        .config_store
+        .save_nat_config(cfg.clone())
+        .map_err(NatError::StorageError)?;
+
+    info!(
+        mode = ?cfg.outbound_mode,
+        wan_interfaces = cfg.wan_interfaces.len(),
+        rules = cfg.rules.len(),
+        "nat: config saved"
+    );
+
+    // Re-apply the full ruleset.
+    let full_cfg = state
+        .config_store
+        .load()
+        .map_err(NatError::StorageError)?;
+    let fw_rules = full_cfg.firewall_rules.clone();
+    apply_rules(&fw_rules, full_cfg.nat.as_ref(), &full_cfg.firewall_aliases)
+        .await
+        .map_err(|e| NatError::EngineError(e.to_string()))?;
+
+    info!("nat: nftables engine apply complete");
+    Ok(Json(cfg))
+}
+
+/// Handler: `GET /nat/rules`
+///
+/// Returns the user-defined [`NatRule`] list from the current [`NatConfig`].
+pub async fn list_rules(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, NatError> {
+    let cfg = state
+        .config_store
+        .load_nat_config()
+        .map_err(NatError::StorageError)?
+        .unwrap_or_default();
+
+    info!(count = cfg.rules.len(), "nat: listed rules");
+    Ok(Json(cfg.rules))
+}
+
+/// Handler: `POST /nat/rules`
+///
+/// Appends a new [`NatRule`] to the current [`NatConfig`] and re-applies the
+/// nftables ruleset.  Returns `201 Created` with the new rule on success.
+pub async fn create_rule(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateNatRuleRequest>,
+) -> Result<impl IntoResponse, NatError> {
+    let rule = NatRule {
+        id: Uuid::new_v4(),
+        enabled: req.enabled,
+        description: req.description,
+        rule_type: req.rule_type,
+        interface: req.interface,
+        source: req.source,
+        destination: req.destination,
+        protocol: req.protocol,
+        source_port: req.source_port,
+        destination_port: req.destination_port,
+        translation: req.translation,
+        nat_reflection: req.nat_reflection,
+        address_family: AddressFamily::Ipv4,
+        priority: req.priority,
+        log: req.log,
+    };
+
+    // Validate the new rule.
+    if let Err(msg) = crate::config::models::validate_nat_rule(&rule) {
+        warn!(id = %rule.id, error = %msg, "nat: rule validation failed");
+        return Err(NatError::ValidationFailed(msg));
+    }
+
+    // Load current config, append, and save.
+    let mut cfg = state
+        .config_store
+        .load_nat_config()
+        .map_err(NatError::StorageError)?
+        .unwrap_or_default();
+
+    cfg.rules.push(rule.clone());
+
+    state
+        .config_store
+        .save_nat_config(cfg)
+        .map_err(NatError::StorageError)?;
+
+    info!(id = %rule.id, rule_type = ?rule.rule_type, "nat: rule created");
+
+    // Re-apply the full ruleset.
+    let full_cfg = state
+        .config_store
+        .load()
+        .map_err(NatError::StorageError)?;
+    let fw_rules = full_cfg.firewall_rules.clone();
+    apply_rules(&fw_rules, full_cfg.nat.as_ref(), &full_cfg.firewall_aliases)
+        .await
+        .map_err(|e| NatError::EngineError(e.to_string()))?;
+
+    info!(id = %rule.id, "nat: nftables engine apply complete");
+    Ok((StatusCode::CREATED, Json(rule)))
+}
+
+/// Handler: `DELETE /nat/rules/{id}`
+///
+/// Removes the rule with the given UUID.  Returns `204 No Content` on success
+/// or `404 Not Found` if no rule has that ID.
+pub async fn delete_rule(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, NatError> {
+    let mut cfg = state
+        .config_store
+        .load_nat_config()
+        .map_err(NatError::StorageError)?
+        .unwrap_or_default();
+
+    let original_len = cfg.rules.len();
+    cfg.rules.retain(|r| r.id != id);
+
+    if cfg.rules.len() == original_len {
+        warn!(%id, "nat: rule not found for deletion");
+        return Err(NatError::NotFound(id));
+    }
+
+    state
+        .config_store
+        .save_nat_config(cfg)
+        .map_err(NatError::StorageError)?;
+
+    info!(%id, "nat: rule deleted");
+
+    // Re-apply the full ruleset.
+    let full_cfg = state
+        .config_store
+        .load()
+        .map_err(NatError::StorageError)?;
+    let fw_rules = full_cfg.firewall_rules.clone();
+    apply_rules(&fw_rules, full_cfg.nat.as_ref(), &full_cfg.firewall_aliases)
+        .await
+        .map_err(|e| NatError::EngineError(e.to_string()))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Handler: PUT /nat/config outbound mode shortcut
+// ---------------------------------------------------------------------------
+
+/// Request body for the outbound mode portion of the config.
+#[derive(Debug, Deserialize)]
+pub struct SetOutboundModeRequest {
+    pub outbound_mode: OutboundMode,
+    pub wan_interfaces: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        routing::{delete, get, post, put},
+        Router,
+    };
+    use tower::ServiceExt;
+
+    use crate::state::AppState;
+
+    fn test_router() -> Router {
+        let tmp = tempfile::TempDir::new().unwrap().into_path();
+        let (state, _rx) = AppState::with_config_dir(tmp);
+        let state = std::sync::Arc::new(state);
+        Router::new()
+            .route("/nat/config", get(get_config).put(put_config))
+            .route("/nat/rules", get(list_rules).post(create_rule))
+            .route("/nat/rules/:id", delete(delete_rule))
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn get_config_returns_ok() {
+        let app = test_router();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/nat/config")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn put_config_rejects_invalid_interface_name() {
+        let app = test_router();
+        let payload = serde_json::json!({
+            "outbound_mode": "automatic",
+            "wan_interfaces": ["bad interface!"],
+            "rules": [],
+            "nat_reflection": false
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/nat/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn create_rule_rejects_ipv6_source() {
+        let app = test_router();
+        let payload = serde_json::json!({
+            "rule_type": "masquerade",
+            "source": "2001:db8::/32",
+            "interface": "eth0"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/nat/rules")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn list_rules_returns_ok() {
+        let app = test_router();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/nat/rules")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn delete_rule_returns_404_when_not_found() {
+        let app = test_router();
+        let id = Uuid::new_v4();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/nat/rules/{}", id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn put_config_rejects_ipv6_destination_in_rule() {
+        let app = test_router();
+        let payload = serde_json::json!({
+            "outbound_mode": "manual",
+            "wan_interfaces": [],
+            "rules": [{
+                "id": Uuid::new_v4().to_string(),
+                "enabled": true,
+                "rule_type": "dnat",
+                "destination": "2001:db8::1/128",
+                "translation": { "address": "10.0.0.1", "port": 80 }
+            }],
+            "nat_reflection": false
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/nat/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+}

@@ -9,21 +9,21 @@ the DayShield API/UI service on `0.0.0.0:3000`.
 
 ```
 dayshield-core/
-├── Cargo.toml                # workspace manifest
-├── rust-toolchain.toml       # pinned Rust toolchain
-└── dayshield-core/
-	├── Cargo.toml            # crate manifest
-	└── src/
-		├── main.rs           # app entrypoint + HTTP server bind
-		├── api/              # HTTP routes/handlers
-		├── auth/             # authentication/session storage
-		├── backup/           # backup + encryption subsystem
-		├── engine/           # service engine integration (acme, dns, etc.)
-		├── logs/             # firewall/suricata/system log APIs
-		├── nat/              # NAT model + nftables rendering
-		├── notify/           # SMTP notifications
-		├── ntp/              # NTP status/apply logic
-		└── state/            # shared app state
+|-- Cargo.toml                # workspace manifest
+|-- rust-toolchain.toml       # pinned Rust toolchain
+`-- dayshield-core/
+    |-- Cargo.toml            # crate manifest
+    `-- src/
+        |-- main.rs           # app entrypoint + HTTP server bind
+        |-- api/              # HTTP routes/handlers
+        |-- auth/             # authentication/session storage
+        |-- backup/           # backup + encryption subsystem
+        |-- engine/           # service engine integration (acme, dns, etc.)
+        |-- logs/             # firewall/suricata/system log APIs
+        |-- nat/              # NAT model + nftables rendering
+        |-- notify/           # SMTP notifications
+        |-- ntp/              # NTP status/apply logic
+        `-- state/            # shared app state
 ```
 
 ## Requirements

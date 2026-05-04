@@ -66,7 +66,7 @@ pub fn generate_config(config: &DnsConfig) -> String {
     out.push_str("    hide-version: yes\n");
     out.push_str("    harden-glue: yes\n");
     out.push_str("    harden-dnssec-stripped: yes\n");
-    out.push_str("    use-caps-for-id: no\n");
+    out.push_str("    use-caps-for-id: yes\n");
     out.push_str("    cache-min-ttl: 3600\n");
     out.push_str("    cache-max-ttl: 86400\n");
     out.push_str("    prefetch: yes\n");
@@ -74,7 +74,6 @@ pub fn generate_config(config: &DnsConfig) -> String {
     // DNSSEC.
     if config.dnssec {
         out.push_str("    auto-trust-anchor-file: \"/var/lib/unbound/root.key\"\n");
-        out.push_str("    val-clean-additional: yes\n");
     } else {
         out.push_str("    # DNSSEC disabled\n");
     }
@@ -316,7 +315,7 @@ mod tests {
         cfg.listen_addresses.clear();
         let out = generate_config(&cfg);
         assert!(out.contains("interface: 0.0.0.0"));
-        assert!(out.contains("interface: ::"));
+        assert!(!out.contains("interface: ::"));
     }
 }
 

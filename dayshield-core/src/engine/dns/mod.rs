@@ -49,7 +49,6 @@ pub fn generate_config(config: &DnsConfig) -> String {
     // Listen addresses.
     if config.listen_addresses.is_empty() {
         out.push_str("    interface: 0.0.0.0\n");
-        out.push_str("    interface: ::\n");
     } else {
         for addr in &config.listen_addresses {
             out.push_str(&format!("    interface: {addr}\n"));
@@ -58,7 +57,7 @@ pub fn generate_config(config: &DnsConfig) -> String {
 
     out.push_str(&format!("    port: {}\n", config.port));
     out.push_str("    do-ip4: yes\n");
-    out.push_str("    do-ip6: yes\n");
+    out.push_str("    do-ip6: no\n");
     out.push_str("    do-udp: yes\n");
     out.push_str("    do-tcp: yes\n");
 

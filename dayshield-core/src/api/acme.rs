@@ -191,7 +191,7 @@ pub async fn issue_certificates(
 
     if !cfg.enabled {
         return Err(AcmeApiError::ValidationFailed(
-            "ACME is disabled — enable it in the config first".into(),
+            "ACME is disabled - enable it in the config first".into(),
         ));
     }
 

@@ -782,7 +782,7 @@ impl ConfigStore {
     pub fn save_with_rollback(&self, config: &SystemConfig) -> Result<()> {
         let bak_path = PathBuf::from(format!("{}{}", self.config_path.display(), BAK_SUFFIX));
 
-        // Step 1 — backup.
+        // Step 1 - backup.
         if self.config_path.exists() {
             std::fs::copy(&self.config_path, &bak_path).with_context(|| {
                 format!(
@@ -793,14 +793,14 @@ impl ConfigStore {
             debug!(backup = %bak_path.display(), "Config backed up");
         }
 
-        // Step 2 — write.
+        // Step 2 - write.
         if let Err(e) = self.save(config) {
             // Restore backup if write itself failed.
             self.try_restore_backup(&bak_path);
             return Err(e);
         }
 
-        // Step 3 — re-validate from disk.
+        // Step 3 - re-validate from disk.
         match self.load().and_then(|c| self.validate(&c)) {
             Ok(_) => {
                 // Clean up the backup on success.
@@ -1099,7 +1099,7 @@ mod tests {
             .save_interfaces(vec![make_interface("eth0")])
             .unwrap();
 
-        // Now save firewall rules — interfaces must still be present.
+        // Now save firewall rules - interfaces must still be present.
         store
             .save_firewall_rules(vec![make_rule("rule-a")])
             .unwrap();

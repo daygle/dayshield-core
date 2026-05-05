@@ -33,10 +33,21 @@ use state::AppState;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialise structured logging.
+    // Initialise structured logging with environment-variable defaults.
+    // A second, more precise call below updates the filter once the
+    // on-disk config has been loaded.
     logging::init();
 
     info!("Starting DayShield Core orchestrator");
+
+    // Load config early so that the logging config can be applied before
+    // the rest of the subsystems start up.
+    let config_store = config::storage::ConfigStore::new();
+    if let Ok(system_cfg) = config_store.load() {
+        if let Some(log_cfg) = &system_cfg.logging {
+            logging::update_filter(log_cfg);
+        }
+    }
 
     // Build shared application state.
     let (app_state_inner, notify_rx) = AppState::new();

@@ -1562,4 +1562,7 @@ pub struct SystemConfig {
     /// Named upstream gateways.
     #[serde(default)]
     pub gateways: Vec<Gateway>,
+    /// Logging configuration (format, level, per-module overrides, syslog).
+    #[serde(default)]
+    pub logging: Option<crate::logging::LoggingConfig>,
 }

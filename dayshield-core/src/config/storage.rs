@@ -12,13 +12,18 @@
 //! - **Rollback on failure**: [`ConfigStore::save_with_rollback`] first backs
 //!   up the current on-disk file and restores it if the post-write validation
 //!   step fails.
-//!
-//! TODO: add schema versioning and migration helpers.
-//! TODO: support loading config fragments from multiple files in the directory.
-//! TODO: integrate with the engine layer to push config changes to live
-//!       services after a successful commit.
+//! - **Schema versioning**: on-disk files carry a `schema_version` integer.
+//!   [`ConfigStore::load`] automatically migrates older versions to the current
+//!   schema so new code can always assume the latest format.
+//! - **Config fragments**: [`ConfigStore::load_fragments`] merges all
+//!   `*.json` files found in the config directory into a single
+//!   [`SystemConfig`], enabling modular configuration management.
+//! - **Engine notifications**: register a post-save callback via
+//!   [`ConfigStore::set_on_save`] to push config changes to live engine
+//!   services immediately after a successful commit.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
@@ -38,9 +43,69 @@ const TMP_SUFFIX: &str = ".tmp";
 /// Backup file suffix used for rollback.
 const BAK_SUFFIX: &str = ".bak";
 
+// ── Schema versioning ─────────────────────────────────────────────────────────
+
+/// The current on-disk schema version.
+///
+/// Increment this constant whenever the [`SystemConfig`] format changes in a
+/// backwards-incompatible way, and add a corresponding arm to
+/// [`migrate_config`].
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
+/// On-disk envelope that carries a schema version alongside the config.
+///
+/// The `schema_version` field is optional (defaults to `0`) so that config
+/// files written before versioning was introduced can still be loaded and
+/// automatically migrated.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct VersionedConfig {
+    /// Schema version.  `0` means "pre-versioning" (treated as version 0).
+    #[serde(default)]
+    schema_version: u32,
+    /// The actual configuration payload.
+    #[serde(flatten)]
+    config: SystemConfig,
+}
+
+/// Migrate a [`SystemConfig`] from `from_version` to [`CURRENT_SCHEMA_VERSION`].
+///
+/// Each arm of the `match` applies one incremental migration step.  Future
+/// schema changes should add a new arm here and bump [`CURRENT_SCHEMA_VERSION`].
+fn migrate_config(config: SystemConfig, from_version: u32) -> Result<SystemConfig> {
+    let mut version = from_version;
+
+    while version < CURRENT_SCHEMA_VERSION {
+        match version {
+            0 => {
+                // Migration v0 → v1: no structural changes; the schema_version
+                // field was simply added to the on-disk envelope.
+                debug!("Migrating config from schema v0 to v1 (no-op)");
+                version = 1;
+            }
+            other => {
+                anyhow::bail!(
+                    "Unknown schema version {other}; cannot migrate to {CURRENT_SCHEMA_VERSION}"
+                );
+            }
+        }
+    }
+
+    Ok(config)
+}
+
+// ── Type alias for the post-save engine hook ──────────────────────────────────
+
+/// Callback type invoked after a successful [`ConfigStore::save_with_rollback`].
+///
+/// The callback receives a reference to the newly-committed [`SystemConfig`].
+/// Use [`ConfigStore::set_on_save`] to register a hook.
+pub type OnSaveFn = Arc<dyn Fn(&SystemConfig) + Send + Sync>;
+
 /// Manages loading and saving the [`SystemConfig`] to persistent storage.
 pub struct ConfigStore {
     config_path: PathBuf,
+    /// Optional hook called after every successful save.
+    on_save: Option<OnSaveFn>,
 }
 
 impl ConfigStore {
@@ -54,7 +119,21 @@ impl ConfigStore {
     pub fn with_dir(dir: impl AsRef<Path>) -> Self {
         Self {
             config_path: dir.as_ref().join(CONFIG_FILE),
+            on_save: None,
         }
+    }
+
+    /// Register a callback to be invoked after every successful
+    /// [`Self::save_with_rollback`] call.
+    ///
+    /// The callback receives an immutable reference to the committed
+    /// [`SystemConfig`].  Use this hook to push configuration changes to live
+    /// engine services (e.g. reload nftables, restart chrony).
+    ///
+    /// Only one callback can be registered at a time; calling this method a
+    /// second time replaces the previous hook.
+    pub fn set_on_save(&mut self, hook: OnSaveFn) {
+        self.on_save = Some(hook);
     }
 
     /// Return the path to the configuration file managed by this store.
@@ -64,7 +143,7 @@ impl ConfigStore {
         &self.config_path
     }
 
-    /// Load the [`SystemConfig`] from disk.
+    /// Load the [`SystemConfig`] from disk, migrating old schema versions.
     ///
     /// Returns a default (empty) config if the file does not exist yet.
     pub fn load(&self) -> Result<SystemConfig> {
@@ -80,9 +159,80 @@ impl ConfigStore {
         let raw = std::fs::read_to_string(&self.config_path)
             .with_context(|| format!("Failed to read {}", self.config_path.display()))?;
 
-        let config: SystemConfig = serde_json::from_str(&raw)
+        // Deserialise as a versioned envelope.  Files without a
+        // `schema_version` field will deserialise with version == 0.
+        let versioned: VersionedConfig = serde_json::from_str(&raw)
             .with_context(|| format!("Failed to parse {}", self.config_path.display()))?;
 
+        if versioned.schema_version < CURRENT_SCHEMA_VERSION {
+            info!(
+                from_version = versioned.schema_version,
+                to_version = CURRENT_SCHEMA_VERSION,
+                "Migrating config schema"
+            );
+        }
+
+        let config = migrate_config(versioned.config, versioned.schema_version)?;
+        Ok(config)
+    }
+
+    /// Load and merge all `*.json` fragment files found in the configuration
+    /// directory, then overlay them onto a base [`SystemConfig`].
+    ///
+    /// Fragment files are read in lexicographic order.  Each file is parsed as
+    /// a JSON object and shallow-merged (via [`serde_json::Value`]) into the
+    /// accumulated configuration.  This allows operators to split large
+    /// configurations across multiple files (e.g. `interfaces.json`,
+    /// `firewall.json`) without having to maintain a single monolithic file.
+    ///
+    /// The primary `config.json` is **excluded** from this scan; it is loaded
+    /// separately by [`Self::load`].
+    ///
+    /// Returns the merged [`SystemConfig`], or an error if any fragment cannot
+    /// be parsed.
+    pub fn load_fragments(&self) -> Result<SystemConfig> {
+        let dir = self
+            .config_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Config path has no parent directory"))?;
+
+        if !dir.exists() {
+            return Ok(SystemConfig::default());
+        }
+
+        // Collect all *.json files in the directory except the primary config.
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+            .with_context(|| format!("Failed to read config directory {}", dir.display()))?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension().and_then(|e| e.to_str()) == Some("json")
+                    && p.file_name() != self.config_path.file_name()
+            })
+            .collect();
+
+        entries.sort();
+
+        if entries.is_empty() {
+            return Ok(SystemConfig::default());
+        }
+
+        // Start from an empty JSON object and merge each fragment in order.
+        let mut merged = serde_json::Value::Object(serde_json::Map::new());
+
+        for path in &entries {
+            let raw = std::fs::read_to_string(path)
+                .with_context(|| format!("Failed to read fragment {}", path.display()))?;
+            let fragment: serde_json::Value = serde_json::from_str(&raw)
+                .with_context(|| format!("Failed to parse fragment {}", path.display()))?;
+            merge_json(&mut merged, fragment);
+            debug!(path = %path.display(), "Loaded config fragment");
+        }
+
+        let config: SystemConfig = serde_json::from_value(merged)
+            .context("Failed to deserialise merged config fragments")?;
+
+        info!(count = entries.len(), "Loaded config fragments from directory");
         Ok(config)
     }
 
@@ -740,7 +890,7 @@ impl ConfigStore {
     /// Validate and atomically write config to disk.
     ///
     /// The write is performed by:
-    /// 1. Serialising the config to JSON.
+    /// 1. Serialising the config to a versioned JSON envelope.
     /// 2. Writing to `<config_path>.tmp`.
     /// 3. Renaming the temp file to `<config_path>`.
     ///
@@ -754,7 +904,13 @@ impl ConfigStore {
                 .with_context(|| format!("Failed to create directory {}", parent.display()))?;
         }
 
-        let json = serde_json::to_string_pretty(config).context("Failed to serialise config")?;
+        // Wrap config in the versioned envelope before serialising.
+        let versioned = VersionedConfig {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            config: config.clone(),
+        };
+        let json =
+            serde_json::to_string_pretty(&versioned).context("Failed to serialise config")?;
 
         let tmp_path = PathBuf::from(format!("{}{}", self.config_path.display(), TMP_SUFFIX));
         std::fs::write(&tmp_path, &json)
@@ -779,6 +935,8 @@ impl ConfigStore {
     /// 2. Write the new config atomically via [`Self::save`].
     /// 3. Re-load and re-validate the written file.
     /// 4. If step 3 fails, restore the backup and return the error.
+    /// 5. On success, invoke the registered [`OnSaveFn`] hook (if any) so
+    ///    that live engine services receive the updated configuration.
     pub fn save_with_rollback(&self, config: &SystemConfig) -> Result<()> {
         let bak_path = PathBuf::from(format!("{}{}", self.config_path.display(), BAK_SUFFIX));
 
@@ -805,6 +963,12 @@ impl ConfigStore {
             Ok(_) => {
                 // Clean up the backup on success.
                 let _ = std::fs::remove_file(&bak_path);
+
+                // Step 5 - notify engine layer.
+                if let Some(hook) = &self.on_save {
+                    hook(config);
+                }
+
                 Ok(())
             }
             Err(e) => {
@@ -838,6 +1002,35 @@ impl ConfigStore {
 impl Default for ConfigStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ── JSON fragment merge ────────────────────────────────────────────────────────
+
+/// Recursively merge `src` into `dst`.
+///
+/// - Object fields in `src` are recursively merged into the corresponding
+///   object in `dst`.
+/// - Arrays and scalar values in `src` overwrite those in `dst`.
+fn merge_json(dst: &mut serde_json::Value, src: serde_json::Value) {
+    match (dst, src) {
+        (serde_json::Value::Object(dst_map), serde_json::Value::Object(src_map)) => {
+            for (key, src_val) in src_map {
+                // Only recurse when the destination already holds an object;
+                // otherwise overwrite directly to avoid inserting spurious nulls.
+                match dst_map.get_mut(&key) {
+                    Some(dst_val) if dst_val.is_object() && src_val.is_object() => {
+                        merge_json(dst_val, src_val);
+                    }
+                    _ => {
+                        dst_map.insert(key, src_val);
+                    }
+                }
+            }
+        }
+        (dst, src) => {
+            *dst = src;
+        }
     }
 }
 
@@ -1582,5 +1775,161 @@ mod tests {
         assert!(!validate_directory_url("not-a-url"));
         assert!(!validate_directory_url("ftp://acme.example.com"));
         assert!(!validate_directory_url(""));
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema versioning
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn save_writes_schema_version() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let cfg = SystemConfig::default();
+        store.save(&cfg).unwrap();
+
+        let raw = std::fs::read_to_string(store.config_path()).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            value["schema_version"].as_u64(),
+            Some(CURRENT_SCHEMA_VERSION as u64),
+            "saved file must contain schema_version"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_migrates_legacy_file_without_schema_version() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        // Write a "legacy" file that has no schema_version field.
+        let legacy_json = r#"{"hostname":"legacy-fw","interfaces":[],"firewall_rules":[],"vpn_tunnels":[],"wireguard_interfaces":[],"crowdsec_policies":[],"firewall_aliases":[],"dns_host_overrides":[],"dns_domain_overrides":[]}"#;
+        std::fs::write(store.config_path(), legacy_json).unwrap();
+
+        let cfg = store.load().unwrap();
+        assert_eq!(cfg.hostname, "legacy-fw");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrate_config_noop_for_v0_to_v1() {
+        let cfg = SystemConfig::default();
+        let migrated = migrate_config(cfg.clone(), 0).unwrap();
+        assert_eq!(migrated.hostname, cfg.hostname);
+    }
+
+    #[test]
+    fn migrate_config_errors_on_unknown_version() {
+        let cfg = SystemConfig::default();
+        assert!(migrate_config(cfg, 9999).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Fragment loading
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn load_fragments_returns_default_for_empty_dir() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+        let cfg = store.load_fragments().unwrap();
+        assert!(cfg.interfaces.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_fragments_merges_json_files() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        // Write two fragment files.
+        std::fs::write(
+            dir.join("hostname.json"),
+            r#"{"hostname":"fragment-fw"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("interfaces.json"),
+            r#"{"interfaces":[{"name":"eth0","addresses":["192.168.1.1/24"],"enabled":true,"dhcp4":false,"dhcp6":false}]}"#,
+        )
+        .unwrap();
+
+        let cfg = store.load_fragments().unwrap();
+        assert_eq!(cfg.hostname, "fragment-fw");
+        assert_eq!(cfg.interfaces.len(), 1);
+        assert_eq!(cfg.interfaces[0].name, "eth0");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_fragments_skips_primary_config_file() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        // Write the primary config with one hostname.
+        let mut cfg = SystemConfig::default();
+        cfg.hostname = "primary".into();
+        store.save(&cfg).unwrap();
+
+        // Write a fragment with a different hostname.
+        std::fs::write(dir.join("frag.json"), r#"{"hostname":"from-fragment"}"#).unwrap();
+
+        // load_fragments should include frag.json but NOT config.json.
+        let frags = store.load_fragments().unwrap();
+        assert_eq!(frags.hostname, "from-fragment");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Engine hook (on_save)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn on_save_hook_is_called_after_successful_save() {
+        use std::sync::{Arc, Mutex};
+
+        let dir = temp_dir();
+        let mut store = ConfigStore::with_dir(&dir);
+
+        let called = Arc::new(Mutex::new(false));
+        let called_clone = Arc::clone(&called);
+
+        store.set_on_save(Arc::new(move |_cfg| {
+            *called_clone.lock().unwrap() = true;
+        }));
+
+        let cfg = SystemConfig::default();
+        store.save_with_rollback(&cfg).unwrap();
+
+        assert!(*called.lock().unwrap(), "on_save hook must be called");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn on_save_hook_receives_committed_config() {
+        use std::sync::{Arc, Mutex};
+
+        let dir = temp_dir();
+        let mut store = ConfigStore::with_dir(&dir);
+
+        let hostname_seen = Arc::new(Mutex::new(String::new()));
+        let hostname_clone = Arc::clone(&hostname_seen);
+
+        store.set_on_save(Arc::new(move |cfg| {
+            *hostname_clone.lock().unwrap() = cfg.hostname.clone();
+        }));
+
+        let mut cfg = SystemConfig::default();
+        cfg.hostname = "hook-test".into();
+        store.save_with_rollback(&cfg).unwrap();
+
+        assert_eq!(*hostname_seen.lock().unwrap(), "hook-test");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

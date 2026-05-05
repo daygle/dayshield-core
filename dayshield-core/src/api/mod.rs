@@ -29,8 +29,13 @@ use axum::{
     Router,
 };
 
+use tower_http::services::{ServeDir, ServeFile};
+
 use crate::auth::middleware::auth_middleware;
 use crate::state::AppState;
+
+/// Filesystem path where the compiled Management UI static assets are installed.
+const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 
 /// Build and return the top-level Axum [`Router`] with all registered routes.
 ///
@@ -208,6 +213,16 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/nat/rules", get(nat::list_rules))
         .route("/nat/rules", post(nat::create_rule))
         .route("/nat/rules/{id}", delete(nat::delete_rule))
+        // Serve the compiled Management UI static files.
+        // The fallback_service is intentionally placed outside the auth middleware
+        // so that the UI assets are publicly accessible; the API routes they call
+        // are still JWT-protected via the layer() above.
+        // Note: in axum 0.8, fallback_service is NOT covered by layer(), so
+        // the auth middleware does not apply to these static assets regardless of ordering.
+        .fallback_service(
+            ServeDir::new(UI_STATIC_DIR)
+                .not_found_service(ServeFile::new(format!("{UI_STATIC_DIR}/index.html"))),
+        )
         // Apply authentication middleware to all routes.
         .layer(middleware::from_fn(auth_middleware))
         .with_state(state)

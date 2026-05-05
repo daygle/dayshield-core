@@ -14,7 +14,7 @@ axum = { version = "0.8", features = ["json", "ws"] }
 
 # HTTP middleware
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "fs"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

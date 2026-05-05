@@ -1,4 +1,4 @@
-//! DayShield Core — backend orchestrator entry point.
+//! DayShield Core - backend orchestrator entry point.
 //!
 //! Initialises logging, builds the shared application state, wires up the
 //! Axum router and starts the HTTP server on 0.0.0.0:3000.

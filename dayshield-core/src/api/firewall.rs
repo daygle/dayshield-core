@@ -1,4 +1,4 @@
-//! Firewall rule endpoints — `GET /firewall/rules` and `POST /firewall/rules`.
+//! Firewall rule endpoints - `GET /firewall/rules` and `POST /firewall/rules`.
 //!
 //! # GET /firewall/rules
 //!

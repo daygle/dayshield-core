@@ -37,7 +37,7 @@ pub enum WanMode {
     /// Obtain an IPv4 address via DHCP (default).
     #[default]
     Dhcp,
-    /// PPPoE (DSL / fibre) — requires `pppoe_username` and `pppoe_password`.
+    /// PPPoE (DSL / fibre) - requires `pppoe_username` and `pppoe_password`.
     Pppoe,
 }
 
@@ -317,7 +317,7 @@ pub struct FirewallRule {
 // NAT
 // ---------------------------------------------------------------------------
 
-/// Outbound NAT mode — controls whether automatic masquerade rules are emitted.
+/// Outbound NAT mode - controls whether automatic masquerade rules are emitted.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum OutboundMode {
@@ -334,11 +334,11 @@ pub enum OutboundMode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum NatRuleType {
-    /// Dynamic source NAT — rewrites the source IP to the outbound interface address.
+    /// Dynamic source NAT - rewrites the source IP to the outbound interface address.
     Masquerade,
-    /// Static source NAT — rewrites the source IP to a fixed address.
+    /// Static source NAT - rewrites the source IP to a fixed address.
     Snat,
-    /// Destination NAT / port forward — rewrites the destination IP and/or port.
+    /// Destination NAT / port forward - rewrites the destination IP and/or port.
     Dnat,
 }
 
@@ -418,10 +418,10 @@ pub struct NatRule {
     /// Enable NAT reflection (hairpin NAT) for this rule.
     #[serde(default)]
     pub nat_reflection: bool,
-    /// Address family — IPv4 only; IPv6 values are rejected by the validator.
+    /// Address family - IPv4 only; IPv6 values are rejected by the validator.
     #[serde(default)]
     pub address_family: AddressFamily,
-    /// Rule priority — lower values are evaluated first.
+    /// Rule priority - lower values are evaluated first.
     #[serde(default)]
     pub priority: i32,
     /// Emit a log statement before applying the NAT action.
@@ -458,7 +458,7 @@ impl Default for NatConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Validation helpers — NAT
+// Validation helpers - NAT
 // ---------------------------------------------------------------------------
 
 /// Return `true` if `addr` is a valid IPv4 address (without prefix length).
@@ -670,7 +670,7 @@ pub struct VpnTunnel {
     pub listen_port: u16,
     /// Server private key (base64).
     pub private_key: String,
-    /// Server public key (base64) — derived from the private key at runtime.
+    /// Server public key (base64) - derived from the private key at runtime.
     pub public_key: Option<String>,
     /// Tunnel address (CIDR).
     pub address: String,
@@ -761,7 +761,7 @@ pub struct AcmeConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Validation helpers — ACME
+// Validation helpers - ACME
 // ---------------------------------------------------------------------------
 
 /// Return `true` if `email` is a syntactically valid e-mail address.
@@ -870,17 +870,17 @@ pub struct CrowdSecDecision {
     pub id: i64,
     /// The IP address or CIDR range to act on.
     pub value: String,
-    /// Remediation type — `"ban"`, `"captcha"`, etc.
+    /// Remediation type - `"ban"`, `"captcha"`, etc.
     #[serde(rename = "type")]
     pub type_: String,
-    /// Scope of the decision — `"Ip"`, `"Range"`, etc.
+    /// Scope of the decision - `"Ip"`, `"Range"`, etc.
     pub scope: String,
     /// Human-readable duration string, e.g. `"4h"`, `"1d"`.
     pub duration: String,
 }
 
 // ---------------------------------------------------------------------------
-// Validation helpers — CrowdSec
+// Validation helpers - CrowdSec
 // ---------------------------------------------------------------------------
 
 /// Return `true` if `api_key` is a non-empty string.
@@ -938,7 +938,7 @@ pub struct SuricataConfig {
     pub stats_interval_seconds: u32,
 }
 
-/// A Suricata rule source — either a remote URL (fetched via suricata-update)
+/// A Suricata rule source - either a remote URL (fetched via suricata-update)
 /// or a local rule file path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuleSource {
@@ -1035,7 +1035,7 @@ pub struct DnsDomainOverride {
 }
 
 // ---------------------------------------------------------------------------
-// Validation helpers — aliases
+// Validation helpers - aliases
 // ---------------------------------------------------------------------------
 
 /// Return `true` if `name` is a valid firewall alias name.
@@ -1116,7 +1116,7 @@ pub fn validate_alias_values(alias: &FirewallAlias) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
-// Validation helpers — DNS overrides
+// Validation helpers - DNS overrides
 // ---------------------------------------------------------------------------
 
 /// Return `true` if `hostname` is a syntactically valid fully-qualified or
@@ -1175,7 +1175,7 @@ pub struct WireGuardPeer {
 }
 
 // ---------------------------------------------------------------------------
-// Validation helpers — WireGuard
+// Validation helpers - WireGuard
 // ---------------------------------------------------------------------------
 
 /// Return `true` if `name` is a valid WireGuard interface name.
@@ -1235,7 +1235,7 @@ pub fn validate_endpoint(endpoint: &str) -> bool {
         return false;
     }
 
-    // host:port — split on the LAST colon to allow IPv4 addresses.
+    // host:port - split on the LAST colon to allow IPv4 addresses.
     if let Some(colon) = endpoint.rfind(':') {
         let host = &endpoint[..colon];
         let port_str = &endpoint[colon + 1..];
@@ -1461,7 +1461,7 @@ impl Default for NtpConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Validation helpers — NTP
+// Validation helpers - NTP
 // ---------------------------------------------------------------------------
 
 /// Return `true` if `server` is a valid IPv4 address or a valid hostname.

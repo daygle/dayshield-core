@@ -1016,8 +1016,16 @@ fn merge_json(dst: &mut serde_json::Value, src: serde_json::Value) {
     match (dst, src) {
         (serde_json::Value::Object(dst_map), serde_json::Value::Object(src_map)) => {
             for (key, src_val) in src_map {
-                let dst_val = dst_map.entry(key).or_insert(serde_json::Value::Null);
-                merge_json(dst_val, src_val);
+                // Only recurse when the destination already holds an object;
+                // otherwise overwrite directly to avoid inserting spurious nulls.
+                match dst_map.get_mut(&key) {
+                    Some(dst_val) if dst_val.is_object() && src_val.is_object() => {
+                        merge_json(dst_val, src_val);
+                    }
+                    _ => {
+                        dst_map.insert(key, src_val);
+                    }
+                }
             }
         }
         (dst, src) => {

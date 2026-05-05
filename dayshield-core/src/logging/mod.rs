@@ -208,8 +208,8 @@ impl SyslogLayer {
                 // Try to connect; fall back to None on failure.
                 s.connect("/dev/log").ok().map(|_| s)
             });
-        let hostname = hostname::get_hostname();
-        Self { socket, hostname }
+        let host = hostname::get_hostname();
+        Self { socket, hostname: host }
     }
 
     /// Send a formatted RFC 3164 syslog message.
@@ -279,9 +279,11 @@ impl tracing::field::Visit for MessageVisitor {
 mod hostname {
     pub fn get_hostname() -> String {
         std::fs::read_to_string("/etc/hostname")
-            .unwrap_or_default()
-            .trim()
-            .to_string()
+            .map(|s| {
+                let trimmed = s.trim().to_string();
+                if trimmed.is_empty() { "localhost".to_string() } else { trimmed }
+            })
+            .unwrap_or_else(|_| "localhost".to_string())
     }
 }
 

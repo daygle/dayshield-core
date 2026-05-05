@@ -165,10 +165,7 @@ pub mod fs {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create directory {}", parent.display()))?;
         }
-        let tmp = path.with_extension(format!(
-            "{}.tmp",
-            path.extension().and_then(|e| e.to_str()).unwrap_or("")
-        ));
+        let tmp = PathBuf::from(format!("{}.tmp", path.display()));
         std::fs::write(&tmp, contents)
             .with_context(|| format!("Failed to write temp file {}", tmp.display()))?;
         std::fs::rename(&tmp, path).with_context(|| {
@@ -253,10 +250,20 @@ pub mod process {
 
     /// Return `true` if a process with the given `pid` is currently running.
     ///
-    /// Uses `/proc/<pid>` on Linux; always returns `false` on non-Linux
-    /// platforms where `/proc` is not available.
+    /// On Linux this checks for the existence of `/proc/<pid>`.
+    /// On non-Linux platforms the function always returns `false`.
+    #[cfg(target_os = "linux")]
     pub fn is_running(pid: u32) -> bool {
         std::path::Path::new(&format!("/proc/{pid}")).exists()
+    }
+
+    /// Return `true` if a process with the given `pid` is currently running.
+    ///
+    /// On Linux this checks for the existence of `/proc/<pid>`.
+    /// On non-Linux platforms the function always returns `false`.
+    #[cfg(not(target_os = "linux"))]
+    pub fn is_running(_pid: u32) -> bool {
+        false
     }
 
     /// Wait for the process identified by `pid` to exit, polling every

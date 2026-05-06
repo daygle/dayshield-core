@@ -10,10 +10,11 @@
 #![allow(unused_imports)]
 
 use std::sync::Arc;
+use std::env;
 
 use axum::Router;
 use tokio::net::TcpListener;
-use tracing::info;
+use tracing::{info, warn};
 
 mod api;
 mod auth;
@@ -66,11 +67,30 @@ async fn main() -> anyhow::Result<()> {
     let app: Router = api::router(app_state);
 
     // Bind and serve.
-    let addr = "0.0.0.0:3000";
-    let listener = TcpListener::bind(addr).await?;
+    let addr = resolve_bind_addr();
+    let listener = TcpListener::bind(&addr).await?;
     info!("Listening on http://{}", addr);
 
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+fn default_bind_addr() -> &'static str {
+    "0.0.0.0:3000"
+}
+
+fn resolve_bind_addr() -> String {
+    if let Ok(addr) = env::var("DAYSHIELD_BIND_ADDR") {
+        return addr;
+    }
+
+    if let Ok(port) = env::var("DAYSHIELD_PORT") {
+        match port.parse::<u16>() {
+            Ok(port) => return format!("0.0.0.0:{}", port),
+            Err(_) => warn!("DAYSHIELD_PORT={} is not a valid port; using {}", port, default_bind_addr()),
+        }
+    }
+
+    default_bind_addr().to_string()
 }

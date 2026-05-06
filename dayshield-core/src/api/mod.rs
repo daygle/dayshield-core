@@ -223,7 +223,9 @@ pub fn router(state: Arc<AppState>) -> Router {
             ServeDir::new(UI_STATIC_DIR)
                 .not_found_service(ServeFile::new(format!("{UI_STATIC_DIR}/index.html"))),
         )
-        // Apply authentication middleware to all routes.
-        .layer(middleware::from_fn(auth_middleware))
+        // Apply authentication middleware to all registered API routes.
+        // The static UI fallback service is intentionally left outside this
+        // route layer so public UI assets can be loaded without a token.
+        .route_layer(middleware::from_fn(auth_middleware))
         .with_state(state)
 }

@@ -58,7 +58,11 @@ On startup the server binds to:
 
 - `http://0.0.0.0:3000`
 
-The UI is assumed to run separately and defaults to `8443`.
+The UI is assumed to run separately and defaults to `8443` when using the
+frontend dev server.
+
+When building the installed rootfs, the default `dayshield-core` service unit
+is configured to expose the management UI on port `8443`.
 
 You can override the bind address with environment variables:
 

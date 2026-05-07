@@ -152,7 +152,7 @@ async fn scheduler_loop(state: Arc<AppState>) {
         };
 
         match result {
-            Ok(path) => {
+            Ok((path, _meta)) => {
                 info!(path = %path.display(), "backup scheduler: backup created");
                 last_backup_at = now;
 

@@ -194,7 +194,7 @@ pub fn create_backup(
         "backup created"
     );
 
-    Ok(filepath)
+    Ok((filepath, metadata))
 }
 
 // ---------------------------------------------------------------------------
@@ -265,7 +265,7 @@ mod tests {
         let backup_dir = TempDir::new().unwrap();
         let (_cfg_dir, store) = temp_store();
 
-        let path = create_backup(&store, None, false, None, backup_dir.path()).unwrap();
+        let (path, _meta) = create_backup(&store, None, false, None, backup_dir.path()).unwrap();
         assert!(path.exists());
         assert!(path.extension().map(|e| e == "tar").unwrap_or(false));
     }
@@ -284,7 +284,8 @@ mod tests {
         let backup_dir = TempDir::new().unwrap();
         let (_cfg_dir, store) = temp_store();
 
-        let path = create_backup(&store, None, true, Some("s3cr3t"), backup_dir.path()).unwrap();
+        let (path, _meta) =
+            create_backup(&store, None, true, Some("s3cr3t"), backup_dir.path()).unwrap();
         assert!(path.exists());
         assert!(path.to_str().unwrap().ends_with(".tar.enc"));
     }
@@ -294,7 +295,7 @@ mod tests {
         let backup_dir = TempDir::new().unwrap();
         let (_cfg_dir, store) = temp_store();
 
-        let path = create_backup(
+        let (path, _meta) = create_backup(
             &store,
             Some(vec![Subsystem::Dns]),
             false,

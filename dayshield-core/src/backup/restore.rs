@@ -285,7 +285,7 @@ mod tests {
     fn roundtrip_plain() {
         let (_cfg, backup_dir, store) = setup();
 
-        let path =
+        let (path, _meta) =
             create_backup(&store, None, false, None, backup_dir.path()).unwrap();
         let bytes = std::fs::read(&path).unwrap();
 
@@ -297,7 +297,7 @@ mod tests {
     fn roundtrip_encrypted() {
         let (_cfg, backup_dir, store) = setup();
 
-        let path =
+        let (path, _meta) =
             create_backup(&store, None, true, Some("hunter2"), backup_dir.path()).unwrap();
         let bytes = std::fs::read(&path).unwrap();
 
@@ -309,7 +309,7 @@ mod tests {
     fn wrong_passphrase_fails() {
         let (_cfg, backup_dir, store) = setup();
 
-        let path =
+        let (path, _meta) =
             create_backup(&store, None, true, Some("correct"), backup_dir.path()).unwrap();
         let bytes = std::fs::read(&path).unwrap();
 
@@ -320,7 +320,7 @@ mod tests {
     fn tampered_archive_fails_sha256() {
         let (_cfg, backup_dir, store) = setup();
 
-        let path =
+        let (path, _meta) =
             create_backup(&store, None, false, None, backup_dir.path()).unwrap();
         let mut bytes = std::fs::read(&path).unwrap();
 
@@ -337,7 +337,7 @@ mod tests {
         let (_cfg, backup_dir, store) = setup();
 
         // Backup only DNS.
-        let path = create_backup(
+        let (path, _meta) = create_backup(
             &store,
             Some(vec![Subsystem::Dns]),
             false,

@@ -32,6 +32,9 @@ use crate::backup::{
     scheduler::{load_schedule, prune_backups, save_schedule},
 };
 
+/// Maximum accepted request size for `POST /backup/restore` (64 MiB).
+pub const MAX_BACKUP_RESTORE_BYTES: usize = 64 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -134,7 +137,7 @@ pub async fn create_handler(
     let backup_dir = PathBuf::from(DEFAULT_BACKUP_DIR);
     let passphrase = req.passphrase.as_deref().map(String::from);
 
-    let path = create_backup(
+    let (path, meta) = create_backup(
         &state.config_store,
         req.subsystems,
         req.encrypt,
@@ -142,9 +145,6 @@ pub async fn create_handler(
         &backup_dir,
     )
     .map_err(BackupApiError::StorageError)?;
-
-    // Read the metadata back from the archive.
-    let meta = read_archive_metadata(&path).map_err(BackupApiError::StorageError)?;
 
     let filename = path
         .file_name()
@@ -276,6 +276,12 @@ pub async fn restore_handler(
             "request body must contain the backup file bytes".into(),
         ));
     }
+    if body.len() > MAX_BACKUP_RESTORE_BYTES {
+        return Err(BackupApiError::ValidationFailed(format!(
+            "backup file too large: max {} bytes",
+            MAX_BACKUP_RESTORE_BYTES
+        )));
+    }
 
     let subsystems_filter: Option<Vec<Subsystem>> = query
         .subsystems
@@ -392,24 +398,6 @@ fn parse_subsystem_list(s: &str) -> Result<Vec<Subsystem>, String> {
                 .map_err(|_| format!("unknown subsystem: {item}"))
         })
         .collect()
-}
-
-/// Read `metadata.json` from a (plain) backup archive without fully extracting
-/// it.
-fn read_archive_metadata(path: &Path) -> anyhow::Result<BackupMetadata> {
-    use std::io::Read;
-
-    let data = std::fs::read(path)?;
-    let mut archive = tar::Archive::new(std::io::Cursor::new(data.as_slice()));
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        if entry.path()?.to_string_lossy() == "metadata.json" {
-            let mut buf = Vec::new();
-            entry.read_to_end(&mut buf)?;
-            return Ok(serde_json::from_slice(&buf)?);
-        }
-    }
-    anyhow::bail!("metadata.json not found in backup archive")
 }
 
 // ---------------------------------------------------------------------------

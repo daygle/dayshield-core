@@ -69,7 +69,13 @@ pub async fn list_interfaces(
 
     info!(count = kernel.len(), "interfaces: discovered kernel interfaces");
 
-    Ok(Json(ListInterfacesResponse { configured, kernel }))
+    // Redact pppoe_password from all configured interfaces before returning.
+    let configured_redacted: Vec<Interface> = configured
+        .into_iter()
+        .map(|mut i| { i.pppoe_password = None; i })
+        .collect();
+
+    Ok(Json(ListInterfacesResponse { configured: configured_redacted, kernel }))
 }
 
 /// Handler: create or update a network interface.

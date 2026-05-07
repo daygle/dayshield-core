@@ -87,14 +87,14 @@ pub struct DnsBackup {
 ///
 /// # Returns
 ///
-/// The path to the newly created backup file.
+/// A tuple of (path to the newly created backup file, backup metadata).
 pub fn create_backup(
     store: &ConfigStore,
     subsystems: Option<Vec<Subsystem>>,
     encrypt_backup: bool,
     passphrase: Option<&str>,
     backup_dir: &Path,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, BackupMetadata)> {
     if encrypt_backup && passphrase.map(|p| p.is_empty()).unwrap_or(true) {
         anyhow::bail!("a non-empty passphrase is required when encryption is enabled");
     }

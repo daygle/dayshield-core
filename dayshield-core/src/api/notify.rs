@@ -76,15 +76,17 @@ impl IntoResponse for NotifyApiError {
 /// Return the current notification configuration.
 ///
 /// Returns the stored config, or a default (disabled) config when none has
-/// been saved yet.
+/// been saved yet.  The `smtp_password` field is always redacted in the
+/// response to avoid leaking the credential over the API.
 pub async fn get_config(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, NotifyApiError> {
-    let cfg = state
+    let mut cfg = state
         .config_store
         .load_notify_config()
         .map_err(NotifyApiError::StorageError)?
         .unwrap_or_default();
+    cfg.smtp_password = String::new();
     Ok(Json(cfg))
 }
 
@@ -94,7 +96,8 @@ pub async fn get_config(
 
 /// Replace the notification configuration.
 ///
-/// Validates the submitted config before persisting it.
+/// Validates the submitted config before persisting it.  The `smtp_password`
+/// field is redacted in the response.
 pub async fn update_config(
     State(state): State<Arc<AppState>>,
     Json(req): Json<NotifyConfig>,
@@ -114,7 +117,9 @@ pub async fn update_config(
         "Notification config updated via API"
     );
 
-    Ok(Json(req))
+    let mut resp = req;
+    resp.smtp_password = String::new();
+    Ok(Json(resp))
 }
 
 // ---------------------------------------------------------------------------

@@ -304,10 +304,12 @@ pub async fn restore_handler(
 /// `GET /backup/scheduler`
 ///
 /// Returns the current automatic backup scheduler configuration.
+/// The `passphrase` field is always redacted in the response.
 pub async fn get_scheduler_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, BackupApiError> {
-    let cfg = load_schedule(&state).map_err(BackupApiError::StorageError)?;
+    let mut cfg = load_schedule(&state).map_err(BackupApiError::StorageError)?;
+    cfg.passphrase = None;
     Ok(Json(cfg))
 }
 
@@ -352,7 +354,9 @@ pub async fn update_scheduler_handler(
         }
     }
 
-    Ok(Json(req))
+    let mut resp = req;
+    resp.passphrase = None;
+    Ok(Json(resp))
 }
 
 // ---------------------------------------------------------------------------

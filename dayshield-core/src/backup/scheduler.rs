@@ -152,8 +152,13 @@ async fn scheduler_loop(state: Arc<AppState>) {
         };
 
         match result {
-            Ok((path, _meta)) => {
-                info!(path = %path.display(), "backup scheduler: backup created");
+            Ok((path, meta)) => {
+                info!(
+                    path = %path.display(),
+                    encrypted = meta.encrypted,
+                    subsystems = ?meta.subsystems,
+                    "backup scheduler: backup created"
+                );
                 last_backup_at = now;
 
                 // Prune old backups.

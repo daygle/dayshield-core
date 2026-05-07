@@ -105,6 +105,9 @@ pub struct GenerateKeysResponse {
 // ---------------------------------------------------------------------------
 
 /// Handler: list all persisted WireGuard interfaces.
+///
+/// The `private_key` of each interface and the `preshared_key` of each peer
+/// are redacted in the response.
 pub async fn list_interfaces(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, WireGuardError> {
@@ -115,7 +118,8 @@ pub async fn list_interfaces(
 
     info!(count = ifaces.len(), "wireguard: loaded interfaces from storage");
 
-    Ok(Json(ifaces))
+    let redacted: Vec<WireGuardInterface> = ifaces.into_iter().map(redact_interface).collect();
+    Ok(Json(redacted))
 }
 
 /// Handler: create or update a WireGuard interface.
@@ -250,7 +254,7 @@ pub async fn create_interface(
 
     info!(name = %iface.name, "wireguard: engine apply complete");
 
-    Ok((StatusCode::CREATED, Json(iface)))
+    Ok((StatusCode::CREATED, Json(redact_interface(iface))))
 }
 
 /// Handler: remove a WireGuard interface by name.
@@ -308,4 +312,18 @@ pub async fn generate_keys(
         private_key,
         public_key,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Return a copy of `iface` with `private_key` cleared and every peer's
+/// `preshared_key` cleared so that secrets are never sent over the API.
+fn redact_interface(mut iface: WireGuardInterface) -> WireGuardInterface {
+    iface.private_key = String::new();
+    for peer in &mut iface.peers {
+        peer.preshared_key = None;
+    }
+    iface
 }

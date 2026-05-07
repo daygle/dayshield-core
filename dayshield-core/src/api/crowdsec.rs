@@ -87,11 +87,12 @@ pub struct UpdateCrowdSecConfigRequest {
 /// Handler: return the current CrowdSec configuration.
 ///
 /// Loads the CrowdSec config from persistent storage.  Returns a sensible
-/// default (disabled) when no configuration has been saved yet.
+/// default (disabled) when no configuration has been saved yet.  The
+/// `api_key` field is always redacted in the response.
 pub async fn get_config(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, CrowdSecError> {
-    let cfg = state
+    let mut cfg = state
         .config_store
         .load_crowdsec_config()
         .map_err(CrowdSecError::StorageError)?
@@ -104,6 +105,7 @@ pub async fn get_config(
         });
 
     info!(enabled = cfg.enabled, "crowdsec: loaded config");
+    cfg.api_key = String::new();
     Ok(Json(cfg))
 }
 
@@ -181,7 +183,9 @@ pub async fn update_config(
         }
     }
 
-    Ok(Json(cfg))
+    let mut resp = cfg;
+    resp.api_key = String::new();
+    Ok(Json(resp))
 }
 
 /// Handler: return the cached CrowdSec decision list.

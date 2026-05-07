@@ -18,6 +18,33 @@ use super::create::{create_backup, DEFAULT_BACKUP_DIR};
 use super::model::BackupScheduleConfig;
 
 // ---------------------------------------------------------------------------
+// Permission-aware write helper
+// ---------------------------------------------------------------------------
+
+/// Write `data` to `path` with mode 0o600 (owner read/write only).
+#[cfg(unix)]
+fn write_restricted_sched(path: &Path, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("failed to create {}", path.display()))?;
+    f.write_all(data)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_restricted_sched(path: &Path, data: &[u8]) -> Result<()> {
+    std::fs::write(path, data)
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+// ---------------------------------------------------------------------------
 // Schedule config persistence
 // ---------------------------------------------------------------------------
 
@@ -43,7 +70,8 @@ pub fn load_schedule(state: &AppState) -> Result<BackupScheduleConfig> {
         .with_context(|| format!("failed to parse {}", path.display()))
 }
 
-/// Atomically persist a [`BackupScheduleConfig`] into the config directory.
+/// Atomically persist a [`BackupScheduleConfig`] into the config directory
+/// with mode 0o600 (owner read/write only).
 pub fn save_schedule(state: &AppState, cfg: &BackupScheduleConfig) -> Result<()> {
     let path = schedule_path(state);
 
@@ -54,7 +82,7 @@ pub fn save_schedule(state: &AppState, cfg: &BackupScheduleConfig) -> Result<()>
 
     let json = serde_json::to_string_pretty(cfg).context("failed to serialise schedule config")?;
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, &json)
+    write_restricted_sched(&tmp, json.as_bytes())
         .with_context(|| format!("failed to write {}", tmp.display()))?;
     std::fs::rename(&tmp, &path)
         .with_context(|| format!("failed to rename to {}", path.display()))?;
@@ -124,8 +152,13 @@ async fn scheduler_loop(state: Arc<AppState>) {
         };
 
         match result {
-            Ok(path) => {
-                info!(path = %path.display(), "backup scheduler: backup created");
+            Ok((path, meta)) => {
+                info!(
+                    path = %path.display(),
+                    encrypted = meta.encrypted,
+                    subsystems = ?meta.subsystems,
+                    "backup scheduler: backup created"
+                );
                 last_backup_at = now;
 
                 // Prune old backups.

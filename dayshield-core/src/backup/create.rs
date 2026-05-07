@@ -87,14 +87,14 @@ pub struct DnsBackup {
 ///
 /// # Returns
 ///
-/// The path to the newly created backup file.
+/// A tuple of (path to the newly created backup file, backup metadata).
 pub fn create_backup(
     store: &ConfigStore,
     subsystems: Option<Vec<Subsystem>>,
     encrypt_backup: bool,
     passphrase: Option<&str>,
     backup_dir: &Path,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, BackupMetadata)> {
     if encrypt_backup && passphrase.map(|p| p.is_empty()).unwrap_or(true) {
         anyhow::bail!("a non-empty passphrase is required when encryption is enabled");
     }
@@ -194,7 +194,7 @@ pub fn create_backup(
         "backup created"
     );
 
-    Ok(filepath)
+    Ok((filepath, metadata))
 }
 
 // ---------------------------------------------------------------------------
@@ -265,7 +265,7 @@ mod tests {
         let backup_dir = TempDir::new().unwrap();
         let (_cfg_dir, store) = temp_store();
 
-        let path = create_backup(&store, None, false, None, backup_dir.path()).unwrap();
+        let (path, _meta) = create_backup(&store, None, false, None, backup_dir.path()).unwrap();
         assert!(path.exists());
         assert!(path.extension().map(|e| e == "tar").unwrap_or(false));
     }
@@ -284,7 +284,8 @@ mod tests {
         let backup_dir = TempDir::new().unwrap();
         let (_cfg_dir, store) = temp_store();
 
-        let path = create_backup(&store, None, true, Some("s3cr3t"), backup_dir.path()).unwrap();
+        let (path, _meta) =
+            create_backup(&store, None, true, Some("s3cr3t"), backup_dir.path()).unwrap();
         assert!(path.exists());
         assert!(path.to_str().unwrap().ends_with(".tar.enc"));
     }
@@ -294,7 +295,7 @@ mod tests {
         let backup_dir = TempDir::new().unwrap();
         let (_cfg_dir, store) = temp_store();
 
-        let path = create_backup(
+        let (path, _meta) = create_backup(
             &store,
             Some(vec![Subsystem::Dns]),
             false,

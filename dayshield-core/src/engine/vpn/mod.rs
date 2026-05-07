@@ -290,7 +290,7 @@ async fn bring_down(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Write `content` to `path` using an atomic rename.
+/// Write `content` to `path` using an atomic rename with mode 0o600.
 fn write_config_atomic(path: &str, content: &str) -> Result<()> {
     let tmp = format!("{path}.tmp");
 
@@ -299,6 +299,22 @@ fn write_config_atomic(path: &str, content: &str) -> Result<()> {
             .with_context(|| format!("failed to create directory {}", parent.display()))?;
     }
 
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .with_context(|| format!("failed to open temporary file {tmp}"))?;
+        f.write_all(content.as_bytes())
+            .with_context(|| format!("failed to write temporary file {tmp}"))?;
+    }
+
+    #[cfg(not(unix))]
     std::fs::write(&tmp, content)
         .with_context(|| format!("failed to write temporary file {tmp}"))?;
 

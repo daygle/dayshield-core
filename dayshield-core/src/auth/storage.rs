@@ -24,6 +24,31 @@ use std::path::{Path, PathBuf};
 use crate::auth::model::{AuthError, User};
 
 // ---------------------------------------------------------------------------
+// Permission-aware write helper
+// ---------------------------------------------------------------------------
+
+/// Write `data` to `path` with mode 0o600 (owner read/write only).
+#[cfg(unix)]
+fn write_restricted_auth(path: &Path, data: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(data)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_restricted_auth(path: &Path, data: &[u8]) -> anyhow::Result<()> {
+    std::fs::write(path, data)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
@@ -86,7 +111,7 @@ pub fn load_user(path: &Path) -> Result<Option<User>, AuthError> {
     Ok(Some(user))
 }
 
-/// Persist `user` to `path` using an atomic write.
+/// Persist `user` to `path` using an atomic write with mode 0o600.
 ///
 /// The directory is created if it does not exist.
 pub fn save_user(path: &Path, user: &User) -> Result<(), AuthError> {
@@ -99,7 +124,8 @@ pub fn save_user(path: &Path, user: &User) -> Result<(), AuthError> {
     let json = serde_json::to_string_pretty(user)
         .map_err(|e| AuthError::StorageError(format!("serialise user: {e}")))?;
 
-    // Write to a temporary sibling file then rename for atomicity.
+    // Write to a temporary sibling file with restricted permissions, then
+    // rename atomically so the admin credentials file is owner-read/write only.
     let tmp_path = {
         let mut name = path
             .file_name()
@@ -109,7 +135,7 @@ pub fn save_user(path: &Path, user: &User) -> Result<(), AuthError> {
         path.with_file_name(name)
     };
 
-    std::fs::write(&tmp_path, json)
+    write_restricted_auth(&tmp_path, json.as_bytes())
         .map_err(|e| AuthError::StorageError(format!("write tmp file: {e}")))?;
 
     std::fs::rename(&tmp_path, path)

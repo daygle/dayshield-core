@@ -24,6 +24,7 @@ mod wireguard;
 use std::sync::Arc;
 
 use axum::{
+    extract::DefaultBodyLimit,
     middleware,
     routing::{delete, get, post, put},
     Router,
@@ -194,7 +195,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/backup/list", get(backup::list_handler))
         .route("/backup/download/{filename}", get(backup::download_handler))
         .route("/backup/{filename}", delete(backup::delete_handler))
-        .route("/backup/restore", post(backup::restore_handler))
+        .route(
+            "/backup/restore",
+            post(backup::restore_handler)
+                .layer(DefaultBodyLimit::max(backup::MAX_BACKUP_RESTORE_BYTES)),
+        )
         .route("/backup/scheduler", get(backup::get_scheduler_handler))
         .route("/backup/scheduler", post(backup::update_scheduler_handler))
         // Notifications

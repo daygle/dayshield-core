@@ -43,6 +43,51 @@ const TMP_SUFFIX: &str = ".tmp";
 /// Backup file suffix used for rollback.
 const BAK_SUFFIX: &str = ".bak";
 
+// ── Permission-aware write helper ─────────────────────────────────────────────
+
+/// Write `data` to `path` with mode `0o600` (owner read/write only).
+///
+/// Uses a write-then-rename pattern for atomicity.  The temp file is created
+/// at `<path>.tmp`, written with restricted permissions, and then renamed to
+/// `path`.
+#[cfg(unix)]
+fn write_restricted(path: &Path, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let tmp = PathBuf::from(format!("{}{}", path.display(), TMP_SUFFIX));
+
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .with_context(|| format!("Failed to open temp file {}", tmp.display()))?;
+        f.write_all(data)
+            .with_context(|| format!("Failed to write temp file {}", tmp.display()))?;
+    }
+
+    std::fs::rename(&tmp, path).with_context(|| {
+        format!("Failed to rename {} to {}", tmp.display(), path.display())
+    })?;
+
+    Ok(())
+}
+
+/// Fallback for non-Unix platforms (uses standard write).
+#[cfg(not(unix))]
+fn write_restricted(path: &Path, data: &[u8]) -> Result<()> {
+    let tmp = PathBuf::from(format!("{}{}", path.display(), TMP_SUFFIX));
+    std::fs::write(&tmp, data)
+        .with_context(|| format!("Failed to write temp file {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| {
+        format!("Failed to rename {} to {}", tmp.display(), path.display())
+    })?;
+    Ok(())
+}
+
 // ── Schema versioning ─────────────────────────────────────────────────────────
 
 /// The current on-disk schema version.
@@ -912,17 +957,7 @@ impl ConfigStore {
         let json =
             serde_json::to_string_pretty(&versioned).context("Failed to serialise config")?;
 
-        let tmp_path = PathBuf::from(format!("{}{}", self.config_path.display(), TMP_SUFFIX));
-        std::fs::write(&tmp_path, &json)
-            .with_context(|| format!("Failed to write temp file {}", tmp_path.display()))?;
-
-        std::fs::rename(&tmp_path, &self.config_path).with_context(|| {
-            format!(
-                "Failed to rename {} to {}",
-                tmp_path.display(),
-                self.config_path.display()
-            )
-        })?;
+        write_restricted(&self.config_path, json.as_bytes())?;
 
         info!(path = %self.config_path.display(), "Config saved");
         Ok(())

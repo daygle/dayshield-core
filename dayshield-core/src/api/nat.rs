@@ -107,6 +107,8 @@ pub struct CreateNatRuleRequest {
     pub log: bool,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
+    pub auto_firewall_rule: bool,
 }
 
 fn default_true() -> bool {

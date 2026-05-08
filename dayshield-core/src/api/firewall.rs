@@ -13,8 +13,9 @@
 
 use std::sync::Arc;
 
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{extract::{Path, State}, http::StatusCode, response::IntoResponse, Json};
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use crate::{
     config::models::{
@@ -179,4 +180,43 @@ pub async fn create_rule(
     info!(id = %rule.id, "firewall: nftables engine apply complete");
 
     Ok((StatusCode::CREATED, Json(rule)))
+}
+
+/// Handler: delete a firewall rule by UUID.
+///
+/// Removes the rule from the in-memory cache, persists the updated list, and
+/// re-applies the full ruleset via the nftables engine.  Returns `204 No
+/// Content` on success or `404 Not Found` if no rule with that id exists.
+pub async fn delete_rule(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, NftError> {
+    {
+        let mut rules = state.firewall_rules.write().await;
+        let before = rules.len();
+        rules.retain(|r| r.id != id);
+        if rules.len() == before {
+            return Err(NftError::NotFound(id.to_string()));
+        }
+        state
+            .config_store
+            .save_firewall_rules(rules.clone())
+            .map_err(NftError::StorageError)?;
+    }
+
+    info!(id = %id, "firewall: rule deleted");
+
+    let full_cfg = state
+        .config_store
+        .load()
+        .map_err(NftError::StorageError)?;
+
+    {
+        let rules = state.firewall_rules.read().await;
+        apply_rules(&rules, full_cfg.nat.as_ref(), &full_cfg.firewall_aliases).await?;
+    }
+
+    info!(id = %id, "firewall: nftables engine apply complete after delete");
+
+    Ok(StatusCode::NO_CONTENT)
 }

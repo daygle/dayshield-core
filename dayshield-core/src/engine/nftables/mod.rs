@@ -39,6 +39,10 @@ pub enum NftError {
     #[error("validation error: {0}")]
     ValidationFailed(String),
 
+    /// The requested resource was not found.
+    #[error("not found: {0}")]
+    NotFound(String),
+
     /// A persistent-storage operation failed.
     #[error("storage error: {0:#}")]
     StorageError(#[from] anyhow::Error),
@@ -51,6 +55,7 @@ impl axum::response::IntoResponse for NftError {
 
         let status = match &self {
             NftError::ValidationFailed(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            NftError::NotFound(_) => StatusCode::NOT_FOUND,
             NftError::GenerateFailed(_)
             | NftError::ApplyFailed(_)
             | NftError::FlushFailed(_)

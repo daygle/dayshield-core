@@ -129,6 +129,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Firewall rules
         .route("/firewall/rules", get(firewall::list_rules))
         .route("/firewall/rules", post(firewall::create_rule))
+        .route("/firewall/rules/{id}", delete(firewall::delete_rule))
         // Firewall aliases
         .route("/firewall/aliases", get(aliases::list_aliases))
         .route("/firewall/aliases", post(aliases::create_alias))

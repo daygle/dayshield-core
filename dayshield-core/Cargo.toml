@@ -49,7 +49,6 @@ rand = "0.10"
 # Authentication subsystem
 argon2 = "0.5"
 jsonwebtoken = "10"
-hmac = "0.13"
 
 # Email / SMTP notifications
 lettre = { version = "0.11", features = ["smtp-transport", "rustls-tls", "hostname", "builder"], default-features = false }

@@ -21,7 +21,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
-use rand::RngExt;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::model::AuthError;

@@ -101,7 +101,7 @@ pub async fn get_config(
 
     info!(enabled = cfg.enabled, "dns: loaded config");
 
-    Ok(Json(cfg))
+    Ok(Json(serde_json::json!({ "success": true, "data": cfg })))
 }
 
 /// Handler: update the DNS configuration.
@@ -238,5 +238,5 @@ pub async fn update_config(
 
     info!("dns: engine apply complete");
 
-    Ok(Json(cfg))
+    Ok(Json(serde_json::json!({ "success": true, "data": cfg })))
 }

@@ -121,10 +121,10 @@ pub async fn list_overrides(
         "dns_overrides: loaded from storage"
     );
 
-    Ok(Json(DnsOverridesResponse {
-        host_overrides,
-        domain_overrides,
-    }))
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": DnsOverridesResponse { host_overrides, domain_overrides }
+    })))
 }
 
 /// Handler: create a new DNS override (host or domain).

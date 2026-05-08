@@ -57,7 +57,6 @@ cargo run -p dayshield-core
 
 On startup the server binds to:
 
-- `http://0.0.0.0:3000` (development default)
 - `http://0.0.0.0:8443` (production — set via `DAYSHIELD_PORT=8443` in the service unit)
 
 The UI is assumed to run separately and defaults to `8443` when using the

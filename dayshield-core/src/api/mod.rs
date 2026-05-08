@@ -1,6 +1,7 @@
 //! API module — assembles the Axum router and registers all route handlers.
 
 mod acme;
+mod admin;
 mod aliases;
 mod auth;
 mod backup;
@@ -224,6 +225,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/nat/rules", post(nat::create_rule))
         .route("/nat/rules/{id}", put(nat::update_rule))
         .route("/nat/rules/{id}", delete(nat::delete_rule))
+        // Admin security settings
+        .route("/admin/security", get(admin::get_security))
+        .route("/admin/security", put(admin::update_security))
         // Serve the compiled Management UI static files.
         // The fallback_service is intentionally placed outside the auth middleware
         // so that the UI assets are publicly accessible; the API routes they call

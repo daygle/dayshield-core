@@ -105,12 +105,23 @@ pub fn load_or_create_key(path: &Path) -> Result<Vec<u8>, AuthError> {
 
 /// Create a signed JWT for `username` using `key`.
 ///
-/// The token is valid for [`SESSION_DURATION_SECS`] seconds from `now_secs`.
+/// The token is valid for `lifetime_secs` seconds from `now_secs`.
+/// Pass [`SESSION_DURATION_SECS`] for the default lifetime.
 pub fn create_token(username: &str, key: &[u8], now_secs: u64) -> Result<String, AuthError> {
+    create_token_with_lifetime(username, key, now_secs, SESSION_DURATION_SECS)
+}
+
+/// Create a signed JWT with an explicit lifetime in seconds.
+pub fn create_token_with_lifetime(
+    username: &str,
+    key: &[u8],
+    now_secs: u64,
+    lifetime_secs: u64,
+) -> Result<String, AuthError> {
     let claims = SessionClaims {
         sub: username.to_string(),
         iat: now_secs,
-        exp: now_secs + SESSION_DURATION_SECS,
+        exp: now_secs + lifetime_secs,
     };
 
     encode(

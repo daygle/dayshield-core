@@ -1608,6 +1608,46 @@ pub fn validate_ntp_config(config: &NtpConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// Administrator account security policy.
+///
+/// Controls session lifetime, login lockout behaviour, and password complexity
+/// requirements.  All fields have sensible defaults; an omitted field in the
+/// stored JSON falls back to the `Default` implementation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AdminSecuritySettings {
+    /// How long an issued JWT remains valid, in minutes.  Default: 480 (8 h).
+    pub session_timeout_minutes: u32,
+    /// Maximum consecutive failed login attempts before the account is
+    /// temporarily locked.  Set to `0` to disable lockout.  Default: 5.
+    pub max_login_attempts: u32,
+    /// How long the account stays locked after exceeding
+    /// `max_login_attempts`, in minutes.  Default: 15.
+    pub lockout_duration_minutes: u32,
+    /// Minimum number of characters required for a new password.  Default: 8.
+    pub min_password_length: u8,
+    /// Require at least one uppercase letter in new passwords.  Default: false.
+    pub require_uppercase: bool,
+    /// Require at least one numeric digit in new passwords.  Default: false.
+    pub require_number: bool,
+    /// Require at least one special character in new passwords.  Default: false.
+    pub require_special: bool,
+}
+
+impl Default for AdminSecuritySettings {
+    fn default() -> Self {
+        Self {
+            session_timeout_minutes: 480,
+            max_login_attempts: 5,
+            lockout_duration_minutes: 15,
+            min_password_length: 8,
+            require_uppercase: false,
+            require_number: false,
+            require_special: false,
+        }
+    }
+}
+
 /// Root configuration object that is persisted to disk and loaded on startup.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SystemConfig {
@@ -1657,4 +1697,7 @@ pub struct SystemConfig {
     /// Logging configuration (format, level, per-module overrides, syslog).
     #[serde(default)]
     pub logging: Option<crate::logging::LoggingConfig>,
+    /// Administrator account security policy.
+    #[serde(default)]
+    pub admin_security: Option<AdminSecuritySettings>,
 }

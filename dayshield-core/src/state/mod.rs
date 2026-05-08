@@ -45,6 +45,11 @@ pub struct AppState {
     pub metrics_buffer: RwLock<MetricsBuffer>,
     /// Sender side of the notification queue.
     pub notify_queue: NotifyQueue,
+    /// Login attempt tracker: username → (consecutive_failures, lockout_until_unix_secs).
+    ///
+    /// Reset to zero on successful login.  The inner `Option<u64>` holds the
+    /// Unix timestamp at which the lockout expires; `None` means not locked.
+    pub login_attempts: RwLock<HashMap<String, (u32, Option<u64>)>>,
 }
 
 impl AppState {
@@ -79,6 +84,7 @@ impl AppState {
             config_store: ConfigStore::new(),
             metrics_buffer: RwLock::new(MetricsBuffer::default()),
             notify_queue,
+            login_attempts: RwLock::new(HashMap::new()),
         };
         (state, notify_rx)
     }

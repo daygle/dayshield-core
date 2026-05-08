@@ -29,9 +29,9 @@ use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
 use super::models::{
-    AcmeConfig, CrowdSecConfig, DhcpConfig, DnsConfig, DnsDomainOverride, DnsHostOverride,
-    FirewallAlias, FirewallRule, FirewallSettings, Gateway, Interface, NatConfig, NotifyConfig,
-    NtpConfig, SuricataConfig, SystemConfig, WireGuardInterface,
+    AcmeConfig, AdminSecuritySettings, CrowdSecConfig, DhcpConfig, DnsConfig, DnsDomainOverride,
+    DnsHostOverride, FirewallAlias, FirewallRule, FirewallSettings, Gateway, Interface, NatConfig,
+    NotifyConfig, NtpConfig, SuricataConfig, SystemConfig, WireGuardInterface,
 };
 
 /// Default path to the configuration directory.
@@ -980,6 +980,23 @@ impl ConfigStore {
     pub fn save_gateways(&self, gateways: Vec<Gateway>) -> Result<()> {
         let mut config = self.load()?;
         config.gateways = gateways;
+        self.save_with_rollback(&config)
+    }
+
+    /// Return the admin security settings from the persisted config.
+    ///
+    /// Returns defaults when no settings have been saved yet.
+    pub fn load_admin_security_settings(&self) -> Result<super::models::AdminSecuritySettings> {
+        Ok(self.load()?.admin_security.unwrap_or_default())
+    }
+
+    /// Atomically replace the admin security settings in the persisted config.
+    pub fn save_admin_security_settings(
+        &self,
+        settings: super::models::AdminSecuritySettings,
+    ) -> Result<()> {
+        let mut config = self.load()?;
+        config.admin_security = Some(settings);
         self.save_with_rollback(&config)
     }
 

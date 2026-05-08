@@ -22,7 +22,7 @@ use tracing::info;
 use crate::auth::{
     model::{AuthenticatedUser, AuthError},
     password::{hash_password, verify_password},
-    session::{create_token, load_or_create_key, DEFAULT_KEY_PATH},
+    session::{create_token_with_lifetime, load_or_create_key, DEFAULT_KEY_PATH},
     storage::{load_user, update_password, DEFAULT_ADMIN_PATH},
 };
 use crate::state::AppState;
@@ -110,19 +110,47 @@ pub struct LoginResponse {
 
 /// Authenticate with username + password and receive a JWT.
 pub async fn login(
+    State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
 ) -> Result<impl IntoResponse, AuthApiError> {
-    login_with_paths(req, Path::new(DEFAULT_ADMIN_PATH), Path::new(DEFAULT_KEY_PATH)).await
+    login_with_paths(state, req, Path::new(DEFAULT_ADMIN_PATH), Path::new(DEFAULT_KEY_PATH)).await
 }
 
 /// Testable variant that accepts explicit file paths.
 pub async fn login_with_paths(
+    state: Arc<AppState>,
     req: LoginRequest,
     admin_path: &Path,
     key_path: &Path,
 ) -> Result<impl IntoResponse, AuthApiError> {
     if req.username.is_empty() || req.password.is_empty() {
         return Err(AuthApiError::BadRequest("username and password are required".into()));
+    }
+
+    // Load admin security settings.
+    let sec = state
+        .config_store
+        .load_admin_security_settings()
+        .unwrap_or_default();
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // Check lockout before attempting authentication.
+    if sec.max_login_attempts > 0 {
+        let attempts = state.login_attempts.read().await;
+        if let Some((_, Some(locked_until))) = attempts.get(&req.username) {
+            if now_secs < *locked_until {
+                let remaining = locked_until - now_secs;
+                return Err(AuthApiError::BadRequest(format!(
+                    "Account locked. Try again in {} second(s).",
+                    remaining
+                )));
+            }
+        }
+        drop(attempts);
     }
 
     // Load user record.
@@ -132,31 +160,60 @@ pub async fn login_with_paths(
 
     // Username must match.
     if user.username != req.username {
+        // Record failed attempt.
+        if sec.max_login_attempts > 0 {
+            let mut attempts = state.login_attempts.write().await;
+            let entry = attempts.entry(req.username.clone()).or_default();
+            entry.0 += 1;
+            if entry.0 >= sec.max_login_attempts {
+                let lockout_until = now_secs + (sec.lockout_duration_minutes as u64) * 60;
+                entry.1 = Some(lockout_until);
+                info!(username = %req.username, until = lockout_until, "login: account locked");
+            }
+        }
         return Err(AuthApiError::InvalidCredentials);
     }
 
-    // Verify password — argon2id is CPU + memory intensive; run on a blocking
-    // thread so the Tokio async executor is not stalled.
+    // Verify password — argon2id is CPU + memory intensive; run on a blocking thread.
     let password = req.password.clone();
     let hash = user.password_hash.clone();
-    tokio::task::spawn_blocking(move || verify_password(&password, &hash))
+    let verify_result = tokio::task::spawn_blocking(move || verify_password(&password, &hash))
         .await
-        .map_err(|_| AuthApiError::StorageError("password verification task panicked".into()))?
-        .map_err(|_| AuthApiError::InvalidCredentials)?;
+        .map_err(|_| AuthApiError::StorageError("password verification task panicked".into()))?;
+
+    if verify_result.is_err() {
+        // Record failed attempt and potentially lock the account.
+        if sec.max_login_attempts > 0 {
+            let mut attempts = state.login_attempts.write().await;
+            let entry = attempts.entry(req.username.clone()).or_default();
+            entry.0 += 1;
+            if entry.0 >= sec.max_login_attempts {
+                let lockout_until = now_secs + (sec.lockout_duration_minutes as u64) * 60;
+                entry.1 = Some(lockout_until);
+                info!(username = %req.username, until = lockout_until, "login: account locked after too many failures");
+            }
+        }
+        return Err(AuthApiError::InvalidCredentials);
+    }
+
+    // Successful auth — clear any accumulated failure counter.
+    {
+        let mut attempts = state.login_attempts.write().await;
+        attempts.remove(&req.username);
+    }
 
     // Load (or create) the signing key.
     let key = load_or_create_key(key_path).map_err(AuthApiError::from)?;
 
-    // Issue JWT — HMAC-SHA256 signing is CPU-intensive; run on a blocking thread.
+    // Issue JWT with the configured lifetime.
     let username = user.username.clone();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let token = tokio::task::spawn_blocking(move || create_token(&username, &key, now))
-        .await
-        .map_err(|_| AuthApiError::StorageError("token creation task panicked".into()))?
-        .map_err(AuthApiError::from)?;
+    let lifetime_secs = (sec.session_timeout_minutes as u64) * 60;
+    let token = tokio::task::spawn_blocking(move || {
+        create_token_with_lifetime(&username, &key, now_secs, lifetime_secs)
+    })
+    .await
+    .map_err(|_| AuthApiError::StorageError("token creation task panicked".into()))?
+    .map_err(AuthApiError::from)?;
 
     info!(username = %user.username, "login successful");
 
@@ -206,23 +263,50 @@ pub struct ChangePasswordRequest {
 
 /// Change the admin account password.
 pub async fn change_password(
+    State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthenticatedUser>,
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<impl IntoResponse, AuthApiError> {
-    change_password_with_path(user, req, Path::new(DEFAULT_ADMIN_PATH)).await
+    let sec = state
+        .config_store
+        .load_admin_security_settings()
+        .unwrap_or_default();
+    change_password_with_path(user, req, &sec, Path::new(DEFAULT_ADMIN_PATH)).await
 }
 
 /// Testable variant that accepts an explicit admin-file path.
 pub async fn change_password_with_path(
     user: AuthenticatedUser,
     req: ChangePasswordRequest,
+    sec: &crate::config::models::AdminSecuritySettings,
     admin_path: &Path,
 ) -> Result<impl IntoResponse, AuthApiError> {
     if req.new_password.is_empty() {
         return Err(AuthApiError::BadRequest("new_password must not be empty".into()));
     }
-    if req.new_password.len() < 8 {
-        return Err(AuthApiError::BadRequest("new_password must be at least 8 characters".into()));
+    let min_len = sec.min_password_length as usize;
+    if req.new_password.len() < min_len {
+        return Err(AuthApiError::BadRequest(format!(
+            "new_password must be at least {} characters",
+            min_len
+        )));
+    }
+    if sec.require_uppercase && !req.new_password.chars().any(|c| c.is_uppercase()) {
+        return Err(AuthApiError::BadRequest(
+            "new_password must contain at least one uppercase letter".into(),
+        ));
+    }
+    if sec.require_number && !req.new_password.chars().any(|c| c.is_ascii_digit()) {
+        return Err(AuthApiError::BadRequest(
+            "new_password must contain at least one number".into(),
+        ));
+    }
+    if sec.require_special
+        && !req.new_password.chars().any(|c| !c.is_alphanumeric())
+    {
+        return Err(AuthApiError::BadRequest(
+            "new_password must contain at least one special character".into(),
+        ));
     }
 
     // Load existing record and verify old password.

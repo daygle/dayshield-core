@@ -11,13 +11,28 @@
 
 use std::collections::HashMap;
 
+use chrono::{Datelike, Local, NaiveDate, NaiveTime, Timelike};
+use serde::Serialize;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use crate::config::models::{
-    Action, AliasType, FirewallAlias, FirewallChainPolicy, FirewallRule, FirewallSettings,
-    NatConfig, NatProtocol, NatRuleType, OutboundMode, Protocol,
+    Action, AliasType, FirewallAlias, FirewallChainPolicy, FirewallRule, FirewallSchedule,
+    FirewallSettings, NatConfig, NatProtocol, NatRuleType, OutboundMode, Protocol,
 };
+
+// ---------------------------------------------------------------------------
+// Stats
+// ---------------------------------------------------------------------------
+
+/// Packet and byte counters for a single firewall rule, read back from nftables.
+#[derive(Debug, Clone, Serialize)]
+pub struct RuleStats {
+    pub id: Uuid,
+    pub packets: u64,
+    pub bytes: u64,
+}
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -96,7 +111,11 @@ pub fn generate_ruleset(
     resolved_url_tables: &HashMap<String, Vec<String>>,
 ) -> String {
     let settings = firewall_settings.cloned().unwrap_or_default();
-    let mut sorted: Vec<&FirewallRule> = rules.iter().collect();
+    // Only emit rules that are enabled and whose schedule (if any) is currently active.
+    let mut sorted: Vec<&FirewallRule> = rules
+        .iter()
+        .filter(|r| r.enabled && is_schedule_active(r.schedule.as_ref()))
+        .collect();
     sorted.sort_by_key(|r| r.priority);
 
     debug!(
@@ -114,6 +133,17 @@ pub fn generate_ruleset(
     // inet filter table
     // ------------------------------------------------------------------
     out.push_str("table inet filter {\n");
+
+    // Emit a named counter for each active rule so we can read hit statistics.
+    for rule in &sorted {
+        out.push_str(&format!(
+            "    counter {} {{}}\n",
+            counter_name(&rule.id)
+        ));
+    }
+    if !sorted.is_empty() {
+        out.push('\n');
+    }
 
     // Emit named sets for each enabled alias.
     for alias in aliases.iter().filter(|a| a.enabled) {
@@ -563,6 +593,9 @@ fn format_rule(rule: &FirewallRule) -> String {
         parts.push(format!("log prefix \"dayshield[{}]: \"", rule.id));
     }
 
+    // Named counter so hit statistics can be read back via `nft list counters`.
+    parts.push(format!("counter name \"{}\"", counter_name(&rule.id)));
+
     // Verdict.
     let action = match rule.action {
         Action::Accept => "accept",
@@ -577,6 +610,86 @@ fn format_rule(rule: &FirewallRule) -> String {
     parts.push(action.to_string());
 
     parts.join(" ")
+}
+
+// ---------------------------------------------------------------------------
+// Private: counter name helper
+// ---------------------------------------------------------------------------
+
+/// Build the nftables counter name for a rule UUID.
+///
+/// nftables identifiers may not contain hyphens, so we replace them with
+/// underscores and add the `ds_` prefix to avoid collisions.
+fn counter_name(id: &Uuid) -> String {
+    format!("ds_{}", id.to_string().replace('-', "_"))
+}
+
+// ---------------------------------------------------------------------------
+// Private: schedule helper
+// ---------------------------------------------------------------------------
+
+/// Returns `true` when the optional `schedule` is currently active.
+///
+/// If `schedule` is `None` or all schedule fields are empty/`None`, the rule
+/// is considered always active.  Otherwise every populated dimension must
+/// match the current local wall-clock time.
+fn is_schedule_active(schedule: Option<&FirewallSchedule>) -> bool {
+    let Some(sched) = schedule else { return true };
+
+    let now = Local::now();
+    let today = now.date_naive();
+    let time_now = NaiveTime::from_hms_opt(now.hour(), now.minute(), 0).unwrap_or_default();
+
+    // Date range check.
+    if let Some(ds) = &sched.date_start {
+        if let Ok(d) = NaiveDate::parse_from_str(ds, "%Y-%m-%d") {
+            if today < d {
+                return false;
+            }
+        }
+    }
+    if let Some(de) = &sched.date_end {
+        if let Ok(d) = NaiveDate::parse_from_str(de, "%Y-%m-%d") {
+            if today > d {
+                return false;
+            }
+        }
+    }
+
+    // Day-of-week check (0 = Sunday … 6 = Saturday).
+    if !sched.days.is_empty() {
+        let dow = today.weekday().num_days_from_sunday() as u8;
+        if !sched.days.contains(&dow) {
+            return false;
+        }
+    }
+
+    // Time-of-day window check.
+    let has_time = sched.time_start.is_some() || sched.time_end.is_some();
+    if has_time {
+        let t_start = sched
+            .time_start
+            .as_deref()
+            .and_then(|s| NaiveTime::parse_from_str(s, "%H:%M").ok())
+            .unwrap_or(NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+        let t_end = sched
+            .time_end
+            .as_deref()
+            .and_then(|s| NaiveTime::parse_from_str(s, "%H:%M").ok())
+            .unwrap_or(NaiveTime::from_hms_opt(23, 59, 59).unwrap());
+        if t_start <= t_end {
+            if time_now < t_start || time_now > t_end {
+                return false;
+            }
+        } else {
+            // Wraps midnight (e.g. 22:00 – 06:00).
+            if time_now < t_start && time_now > t_end {
+                return false;
+            }
+        }
+    }
+
+    true
 }
 
 /// Build the companion `forward` chain accept rule for a DNAT entry.
@@ -830,6 +943,73 @@ fn generate_nat_table(config: &NatConfig) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Public: counter / stats API
+// ---------------------------------------------------------------------------
+
+/// Query nftables for per-rule hit counters and return them as a flat list.
+///
+/// Runs `nft -j list table inet filter` and parses the JSON output for all
+/// counter objects whose name starts with the `ds_` prefix emitted by
+/// [`generate_ruleset`].  Returns an empty vec if `nft` is unavailable or
+/// the table does not exist yet.
+pub async fn get_rule_stats() -> Vec<RuleStats> {
+    let output = match Command::new("nft")
+        .args(["-j", "list", "table", "inet", "filter"])
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            warn!("nftables: failed to spawn nft for stats: {e}");
+            return vec![];
+        }
+    };
+
+    if !output.status.success() {
+        // Table may not exist yet (first boot before rules are applied).
+        debug!("nftables: stats query returned non-zero; table may not exist yet");
+        return vec![];
+    }
+
+    let text = match std::str::from_utf8(&output.stdout) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("nftables: stats output is not valid UTF-8: {e}");
+            return vec![];
+        }
+    };
+
+    let root: serde_json::Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("nftables: failed to parse stats JSON: {e}");
+            return vec![];
+        }
+    };
+
+    let mut stats = Vec::new();
+
+    if let Some(items) = root["nftables"].as_array() {
+        for item in items {
+            if let Some(counter) = item.get("counter") {
+                let name = counter["name"].as_str().unwrap_or("");
+                if let Some(stripped) = name.strip_prefix("ds_") {
+                    // Convert underscores back to dashes to reconstruct the UUID.
+                    let uuid_str = stripped.replacen('_', "-", 4);
+                    if let Ok(id) = Uuid::parse_str(&uuid_str) {
+                        let packets = counter["packets"].as_u64().unwrap_or(0);
+                        let bytes = counter["bytes"].as_u64().unwrap_or(0);
+                        stats.push(RuleStats { id, packets, bytes });
+                    }
+                }
+            }
+        }
+    }
+
+    stats
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -856,6 +1036,8 @@ mod tests {
             action,
             interface: None,
             log: false,
+            enabled: true,
+            schedule: None,
         }
     }
 

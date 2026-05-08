@@ -341,6 +341,26 @@ impl Default for FirewallSettings {
     }
 }
 
+/// Time-based schedule that gates when a firewall rule is active.
+///
+/// All fields are optional — omitting them means "no restriction on that dimension".
+/// Days use JavaScript / cron convention: 0 = Sunday, 1 = Monday, …, 6 = Saturday.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FirewallSchedule {
+    /// Days of the week on which the rule is active (0=Sun … 6=Sat).
+    /// An empty vec means "all days".
+    #[serde(default)]
+    pub days: Vec<u8>,
+    /// Start of the active time window, e.g. `"08:00"`.  `None` = midnight.
+    pub time_start: Option<String>,
+    /// End of the active time window, e.g. `"17:00"`.  `None` = midnight (next day).
+    pub time_end: Option<String>,
+    /// First date the rule is active, formatted `"YYYY-MM-DD"`.  `None` = no lower bound.
+    pub date_start: Option<String>,
+    /// Last date the rule is active, formatted `"YYYY-MM-DD"`.  `None` = no upper bound.
+    pub date_end: Option<String>,
+}
+
 /// A single stateless firewall rule that will be compiled into nftables.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FirewallRule {
@@ -366,6 +386,12 @@ pub struct FirewallRule {
     pub interface: Option<String>,
     /// Whether to emit a log statement before applying the action.
     pub log: bool,
+    /// When `false` the rule is stored but not compiled into the nftables ruleset.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Optional time-based schedule; `None` means always active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<FirewallSchedule>,
 }
 
 // ---------------------------------------------------------------------------

@@ -133,6 +133,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/firewall/rules/{id}", delete(firewall::delete_rule))
         .route("/firewall/settings", get(firewall::get_settings))
         .route("/firewall/settings", put(firewall::update_settings))
+        .route("/firewall/stats", get(firewall::get_stats))
         // Firewall aliases
         .route("/firewall/aliases", get(aliases::list_aliases))
         .route("/firewall/aliases", post(aliases::create_alias))

@@ -20,9 +20,9 @@ use uuid::Uuid;
 use crate::{
     config::models::{
         is_valid_cidr, is_valid_interface_name, is_valid_port, Action, FirewallRule,
-        FirewallSettings, Protocol,
+        FirewallSchedule, FirewallSettings, Protocol,
     },
-    engine::nftables::{apply_rules, NftError},
+    engine::nftables::{apply_rules, get_rule_stats, NftError},
     state::AppState,
 };
 
@@ -148,7 +148,12 @@ pub struct CreateRuleRequest {
     pub action: Action,
     pub interface: Option<String>,
     pub log: bool,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub schedule: Option<FirewallSchedule>,
 }
+
+fn default_true() -> bool { true }
 
 /// Handler: create a new firewall rule.
 ///
@@ -220,6 +225,8 @@ pub async fn create_rule(
         action: req.action,
         interface: req.interface,
         log: req.log,
+        enabled: req.enabled,
+        schedule: req.schedule,
     };
 
     info!(
@@ -332,6 +339,8 @@ pub async fn update_rule(
         action: req.action,
         interface: req.interface,
         log: req.log,
+        enabled: req.enabled,
+        schedule: req.schedule,
     };
 
     info!(
@@ -379,6 +388,14 @@ pub async fn update_rule(
     info!(id = %id, "firewall: nftables engine apply complete after update");
 
     Ok(Json(updated))
+}
+
+/// Handler: return per-rule hit counters read from nftables.
+pub async fn get_stats(
+    State(_state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let stats = get_rule_stats().await;
+    Json(stats)
 }
 
 /// Handler: delete a firewall rule by UUID.

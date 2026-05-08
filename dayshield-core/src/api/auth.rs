@@ -147,14 +147,18 @@ pub async fn login_with_paths(
     // Load (or create) the signing key.
     let key = load_or_create_key(key_path).map_err(AuthApiError::from)?;
 
-    // Issue JWT.
+    // Issue JWT — HMAC-SHA256 signing is CPU-intensive; run on a blocking thread.
+    let username = user.username.clone();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let token = create_token(&user.username, &key, now).map_err(AuthApiError::from)?;
+    let token = tokio::task::spawn_blocking(move || create_token(&username, &key, now))
+        .await
+        .map_err(|_| AuthApiError::StorageError("token creation task panicked".into()))?
+        .map_err(AuthApiError::from)?;
 
-    info!(username = %req.username, "login successful");
+    info!(username = %user.username, "login successful");
 
     Ok((
         StatusCode::OK,

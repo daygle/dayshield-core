@@ -207,13 +207,9 @@ pub async fn login_with_paths(
 
     // Issue JWT with the configured lifetime.
     let username = user.username.clone();
-    let lifetime_secs = (sec.session_timeout_minutes as u64) * 60;
-    let token = tokio::task::spawn_blocking(move || {
-        create_token_with_lifetime(&username, &key, now_secs, lifetime_secs)
-    })
-    .await
-    .map_err(|_| AuthApiError::StorageError("token creation task panicked".into()))?
-    .map_err(AuthApiError::from)?;
+    let lifetime_secs = u64::from(sec.session_timeout_minutes).saturating_mul(60);
+    let token = create_token_with_lifetime(&username, &key, now_secs, lifetime_secs)
+        .map_err(AuthApiError::from)?;
 
     info!(username = %user.username, "login successful");
 

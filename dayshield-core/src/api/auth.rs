@@ -135,8 +135,13 @@ pub async fn login_with_paths(
         return Err(AuthApiError::InvalidCredentials);
     }
 
-    // Verify password.
-    verify_password(&req.password, &user.password_hash)
+    // Verify password — argon2id is CPU + memory intensive; run on a blocking
+    // thread so the Tokio async executor is not stalled.
+    let password = req.password.clone();
+    let hash = user.password_hash.clone();
+    tokio::task::spawn_blocking(move || verify_password(&password, &hash))
+        .await
+        .map_err(|_| AuthApiError::StorageError("password verification task panicked".into()))?
         .map_err(|_| AuthApiError::InvalidCredentials)?;
 
     // Load (or create) the signing key.
@@ -225,11 +230,19 @@ pub async fn change_password_with_path(
         return Err(AuthApiError::Unauthorized);
     }
 
-    verify_password(&req.old_password, &existing.password_hash)
+    let old_password = req.old_password.clone();
+    let existing_hash = existing.password_hash.clone();
+    tokio::task::spawn_blocking(move || verify_password(&old_password, &existing_hash))
+        .await
+        .map_err(|_| AuthApiError::StorageError("password verification task panicked".into()))?
         .map_err(|_| AuthApiError::InvalidCredentials)?;
 
-    // Hash and persist new password.
-    let new_hash = hash_password(&req.new_password).map_err(AuthApiError::from)?;
+    // Hash and persist new password — also CPU intensive.
+    let new_password = req.new_password.clone();
+    let new_hash = tokio::task::spawn_blocking(move || hash_password(&new_password))
+        .await
+        .map_err(|_| AuthApiError::StorageError("password hashing task panicked".into()))?
+        .map_err(AuthApiError::from)?;
     update_password(admin_path, &new_hash).map_err(AuthApiError::from)?;
 
     info!(username = %user.username, "password changed");

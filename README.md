@@ -3,7 +3,8 @@
 Backend orchestrator for DayShield Firewall OS.
 
 This workspace contains a single Rust crate at `dayshield-core/` and exposes
-the DayShield API/UI service on `0.0.0.0:3000`.
+the DayShield API/UI service. In production the service unit sets `DAYSHIELD_PORT=8443`
+so it binds to `0.0.0.0:8443`. The development default is `0.0.0.0:3000`.
 
 ## Workspace layout
 
@@ -56,7 +57,8 @@ cargo run -p dayshield-core
 
 On startup the server binds to:
 
-- `http://0.0.0.0:3000`
+- `http://0.0.0.0:3000` (development default)
+- `http://0.0.0.0:8443` (production — set via `DAYSHIELD_PORT=8443` in the service unit)
 
 The UI is assumed to run separately and defaults to `8443` when using the
 frontend dev server.

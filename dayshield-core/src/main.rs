@@ -1,7 +1,8 @@
 //! DayShield Core - backend orchestrator entry point.
 //!
 //! Initialises logging, builds the shared application state, wires up the
-//! Axum router and starts the HTTP server on 0.0.0.0:3000.
+//! Axum router and starts the HTTP server on 0.0.0.0:3000 by default
+//! (overridden to 0.0.0.0:8443 in production via DAYSHIELD_PORT=8443 in the service unit).
 //
 // Suppress dead-code warnings for the many placeholder engine functions and
 // config types that are defined here as stubs and will be wired up in future
@@ -34,6 +35,27 @@ use state::AppState;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Handle one-shot subcommands before starting the server.
+    let args: Vec<String> = env::args().collect();
+    if args.get(1).map(String::as_str) == Some("init-admin") {
+        let password = args.get(2).ok_or_else(|| {
+            anyhow::anyhow!("usage: dayshield-core init-admin <password>")
+        })?;
+        let hash = auth::password::hash_password(password)
+            .map_err(|e| anyhow::anyhow!("failed to hash password: {e}"))?;
+        let user = auth::model::User::new("admin", hash);
+        auth::storage::save_user(
+            std::path::Path::new(auth::storage::DEFAULT_ADMIN_PATH),
+            &user,
+        )
+        .map_err(|e| anyhow::anyhow!("failed to write admin.json: {e}"))?;
+        println!(
+            "Admin credentials initialised at {}",
+            auth::storage::DEFAULT_ADMIN_PATH
+        );
+        return Ok(());
+    }
+
     // Initialise structured logging with environment-variable defaults.
     // A second, more precise call below updates the filter once the
     // on-disk config has been loaded.

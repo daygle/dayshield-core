@@ -125,6 +125,13 @@ pub fn generate_ruleset(
     out.push_str("        type filter hook input priority 0; policy drop;\n");
     out.push_str("        ct state established,related accept\n");
     out.push_str("        iif lo accept\n");
+    // ICMP is required for basic network operation regardless of user rules:
+    //   echo-request        — inbound ping (diagonstics)
+    //   destination-unreachable — PMTU discovery, port-unreachable replies
+    //   time-exceeded       — traceroute TTL expiry
+    // Rate-limiting prevents ICMP flood abuse.
+    out.push_str("        icmp type { echo-request, destination-unreachable, time-exceeded } limit rate 20/second accept\n");
+    out.push_str("        icmpv6 type { echo-request, destination-unreachable, time-exceeded, nd-neighbor-solicit, nd-neighbor-advert, mld-listener-query } accept\n");
     for rule in &sorted {
         out.push_str(&format!("        {}\n", format_rule(rule)));
     }
@@ -134,6 +141,20 @@ pub fn generate_ruleset(
     out.push_str("    chain forward {\n");
     out.push_str("        type filter hook forward priority 0; policy drop;\n");
     out.push_str("        ct state established,related accept\n");
+    // Auto-companion accept rules for DNAT (port-forward) entries.
+    // Without these, forwarded packets would be dropped by the policy above
+    // even after a successful DNAT rewrite in prerouting.
+    if let Some(nat) = nat_config {
+        for rule in nat
+            .rules
+            .iter()
+            .filter(|r| r.enabled && r.auto_firewall_rule && matches!(r.rule_type, NatRuleType::Dnat))
+        {
+            if let Some(line) = format_dnat_forward_accept(rule) {
+                out.push_str(&format!("        {}\n", line));
+            }
+        }
+    }
     for rule in &sorted {
         out.push_str(&format!("        {}\n", format_rule(rule)));
     }
@@ -421,9 +442,9 @@ fn alias_set_body(
 fn format_rule(rule: &FirewallRule) -> String {
     let mut parts: Vec<String> = Vec::new();
 
-    // Interface ingress match.
+    // Interface ingress match (name-based so it survives reboots).
     if let Some(iif) = &rule.interface {
-        parts.push(format!("iif \"{}\"", iif));
+        parts.push(format!("iifname \"{}\"", iif));
     }
 
     // Resolve the l4 protocol string (None for "any").
@@ -482,12 +503,63 @@ fn format_rule(rule: &FirewallRule) -> String {
         Action::Accept => "accept",
         Action::Drop => "drop",
         Action::Reject => "reject",
-        Action::Jump => "jump",
-        Action::Log => "log",
+        // Jump without a target chain is invalid nftables syntax; treat as drop
+        // until a target-chain field is added to FirewallRule.
+        Action::Jump => "drop",
+        // Log-only: emit a log statement and then accept (continue).
+        Action::Log => "accept",
     };
     parts.push(action.to_string());
 
     parts.join(" ")
+}
+
+/// Build the companion `forward` chain accept rule for a DNAT entry.
+///
+/// When a DNAT rule rewrites the destination in prerouting, the packet then
+/// enters the forward chain with the *translated* destination address and port.
+/// Because the forward chain has `policy drop`, we must emit an explicit accept
+/// rule that matches the translated destination so the packet is not silently
+/// dropped.
+fn format_dnat_forward_accept(nat: &crate::config::models::NatRule) -> Option<String> {
+    use crate::config::models::NatProtocol;
+    let translation = nat.translation.as_ref()?;
+    let addr = translation.address.as_deref()?;
+
+    let mut parts: Vec<String> = Vec::new();
+
+    // Inbound WAN interface.
+    if let Some(iface) = &nat.interface {
+        parts.push(format!("iifname \"{}\"", iface));
+    }
+
+    // Match the *translated* (internal) destination address.
+    parts.push(format!("ip daddr {}", addr));
+
+    // Match the translated port (falls back to the original destination port
+    // when no port translation is configured).
+    let effective_port = translation.port.or(nat.destination_port);
+    match nat.protocol {
+        NatProtocol::Tcp => {
+            if let Some(p) = effective_port {
+                parts.push(format!("tcp dport {}", p));
+            }
+        }
+        NatProtocol::Udp => {
+            if let Some(p) = effective_port {
+                parts.push(format!("udp dport {}", p));
+            }
+        }
+        NatProtocol::TcpUdp => {
+            if let Some(p) = effective_port {
+                parts.push(format!("{{ tcp, udp }} dport {}", p));
+            }
+        }
+        NatProtocol::Any => {}
+    }
+
+    parts.push("accept".to_string());
+    Some(parts.join(" "))
 }
 
 /// Translate a [`NatRule`] into a prerouting statement (DNAT only).

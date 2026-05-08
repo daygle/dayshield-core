@@ -427,6 +427,11 @@ pub struct NatRule {
     /// Emit a log statement before applying the NAT action.
     #[serde(default)]
     pub log: bool,
+    /// When `true` (the default), a companion `accept` rule is automatically
+    /// injected into the nftables `forward` chain for DNAT rules so that
+    /// forwarded packets are not dropped by the default-drop forward policy.
+    #[serde(default = "default_true")]
+    pub auto_firewall_rule: bool,
 }
 
 /// Top-level NAT configuration.

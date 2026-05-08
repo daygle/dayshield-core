@@ -129,6 +129,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Firewall rules
         .route("/firewall/rules", get(firewall::list_rules))
         .route("/firewall/rules", post(firewall::create_rule))
+        .route("/firewall/rules/{id}", put(firewall::update_rule))
         .route("/firewall/rules/{id}", delete(firewall::delete_rule))
         // Firewall aliases
         .route("/firewall/aliases", get(aliases::list_aliases))
@@ -218,6 +219,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/nat/config", put(nat::put_config))
         .route("/nat/rules", get(nat::list_rules))
         .route("/nat/rules", post(nat::create_rule))
+        .route("/nat/rules/{id}", put(nat::update_rule))
         .route("/nat/rules/{id}", delete(nat::delete_rule))
         // Serve the compiled Management UI static files.
         // The fallback_service is intentionally placed outside the auth middleware

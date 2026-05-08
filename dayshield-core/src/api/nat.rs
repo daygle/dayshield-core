@@ -220,6 +220,7 @@ pub async fn create_rule(
         address_family: AddressFamily::Ipv4,
         priority: req.priority,
         log: req.log,
+        auto_firewall_rule: req.auto_firewall_rule,
     };
 
     // Validate the new rule.
@@ -298,6 +299,74 @@ pub async fn delete_rule(
         .map_err(|e| NatError::EngineError(e.to_string()))?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Handler: `PUT /nat/rules/{id}`
+///
+/// Replaces the rule with the given UUID and re-applies the nftables ruleset.
+/// Returns the updated rule on success or `404 Not Found` if no rule has
+/// that ID.
+pub async fn update_rule(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<CreateNatRuleRequest>,
+) -> Result<impl IntoResponse, NatError> {
+    let rule = NatRule {
+        id,
+        enabled: req.enabled,
+        description: req.description,
+        rule_type: req.rule_type,
+        interface: req.interface,
+        source: req.source,
+        destination: req.destination,
+        protocol: req.protocol,
+        source_port: req.source_port,
+        destination_port: req.destination_port,
+        translation: req.translation,
+        nat_reflection: req.nat_reflection,
+        address_family: AddressFamily::Ipv4,
+        priority: req.priority,
+        log: req.log,
+        auto_firewall_rule: req.auto_firewall_rule,
+    };
+
+    if let Err(msg) = crate::config::models::validate_nat_rule(&rule) {
+        warn!(id = %id, error = %msg, "nat: rule validation failed");
+        return Err(NatError::ValidationFailed(msg));
+    }
+
+    let mut cfg = state
+        .config_store
+        .load_nat_config()
+        .map_err(NatError::StorageError)?
+        .unwrap_or_default();
+
+    let pos = cfg
+        .rules
+        .iter()
+        .position(|r| r.id == id)
+        .ok_or(NatError::NotFound(id))?;
+
+    cfg.rules[pos] = rule.clone();
+
+    state
+        .config_store
+        .save_nat_config(cfg)
+        .map_err(NatError::StorageError)?;
+
+    info!(%id, rule_type = ?rule.rule_type, "nat: rule updated");
+
+    let full_cfg = state
+        .config_store
+        .load()
+        .map_err(NatError::StorageError)?;
+    let fw_rules = full_cfg.firewall_rules.clone();
+    apply_rules(&fw_rules, full_cfg.nat.as_ref(), &full_cfg.firewall_aliases)
+        .await
+        .map_err(|e| NatError::EngineError(e.to_string()))?;
+
+    info!(%id, "nat: nftables engine apply complete");
+    Ok(Json(rule))
 }
 
 // ---------------------------------------------------------------------------

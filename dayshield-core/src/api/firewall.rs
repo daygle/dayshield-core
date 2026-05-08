@@ -182,6 +182,110 @@ pub async fn create_rule(
     Ok((StatusCode::CREATED, Json(rule)))
 }
 
+/// Handler: update an existing firewall rule by UUID.
+///
+/// Replaces all mutable fields of the rule identified by `id` with the values
+/// supplied in the request body.  Returns the updated rule with `200 OK`, or
+/// `404 Not Found` if no rule with that id exists.
+pub async fn update_rule(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<CreateRuleRequest>,
+) -> Result<impl IntoResponse, NftError> {
+    // --- Validation --------------------------------------------------------
+
+    if let Some(src) = &req.source {
+        if !is_valid_cidr(src) {
+            warn!(src = %src, "firewall: invalid source CIDR");
+            return Err(NftError::ValidationFailed(format!("invalid source CIDR: {src}")));
+        }
+    }
+    if let Some(dst) = &req.destination {
+        if !is_valid_cidr(dst) {
+            warn!(dst = %dst, "firewall: invalid destination CIDR");
+            return Err(NftError::ValidationFailed(format!("invalid destination CIDR: {dst}")));
+        }
+    }
+    if let Some(sport) = req.source_port {
+        if !is_valid_port(sport) {
+            warn!(port = sport, "firewall: invalid source port");
+            return Err(NftError::ValidationFailed(format!(
+                "invalid source port: {sport} (must be 1\u{2013}65535)"
+            )));
+        }
+    }
+    if let Some(dport) = req.destination_port {
+        if !is_valid_port(dport) {
+            warn!(port = dport, "firewall: invalid destination port");
+            return Err(NftError::ValidationFailed(format!(
+                "invalid destination port: {dport} (must be 1\u{2013}65535)"
+            )));
+        }
+    }
+    if let Some(iface) = &req.interface {
+        if !is_valid_interface_name(iface) {
+            warn!(iface = %iface, "firewall: invalid interface name");
+            return Err(NftError::ValidationFailed(format!("invalid interface name: {iface}")));
+        }
+    }
+
+    // --- Build updated rule ------------------------------------------------
+
+    let updated = FirewallRule {
+        id,
+        description: req.description,
+        priority: req.priority,
+        source: req.source,
+        destination: req.destination,
+        protocol: req.protocol,
+        source_port: req.source_port,
+        destination_port: req.destination_port,
+        action: req.action,
+        interface: req.interface,
+        log: req.log,
+    };
+
+    info!(
+        id = %id,
+        priority = updated.priority,
+        action = ?updated.action,
+        "firewall: received update rule request"
+    );
+
+    // --- Persist -----------------------------------------------------------
+
+    {
+        let mut rules = state.firewall_rules.write().await;
+        let pos = rules
+            .iter()
+            .position(|r| r.id == id)
+            .ok_or_else(|| NftError::NotFound(id.to_string()))?;
+        rules[pos] = updated.clone();
+        state
+            .config_store
+            .save_firewall_rules(rules.clone())
+            .map_err(NftError::StorageError)?;
+    }
+
+    info!(id = %id, "firewall: rule updated");
+
+    // --- Apply -------------------------------------------------------------
+
+    let full_cfg = state
+        .config_store
+        .load()
+        .map_err(NftError::StorageError)?;
+
+    {
+        let rules = state.firewall_rules.read().await;
+        apply_rules(&rules, full_cfg.nat.as_ref(), &full_cfg.firewall_aliases).await?;
+    }
+
+    info!(id = %id, "firewall: nftables engine apply complete after update");
+
+    Ok(Json(updated))
+}
+
 /// Handler: delete a firewall rule by UUID.
 ///
 /// Removes the rule from the in-memory cache, persists the updated list, and

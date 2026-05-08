@@ -53,6 +53,12 @@ pub fn generate_config(config: &DhcpConfig) -> String {
                 "data": scope.dns_servers.join(", ")
             }));
         }
+        if let Some(dn) = &scope.domain_name {
+            if !dn.is_empty() {
+                option_data.push(json!({ "name": "domain-name", "data": dn }));
+                option_data.push(json!({ "name": "domain-search", "data": dn }));
+            }
+        }
 
         let reservations: Vec<_> = scope
             .reservations

@@ -77,6 +77,8 @@ impl IntoResponse for DhcpError {
 pub struct DhcpFlatConfigResponse {
     pub enabled: bool,
     pub interface: String,
+    /// Subnet in CIDR notation (e.g. `192.168.1.0/24`).
+    pub subnet: String,
     pub range_start: String,
     pub range_end: String,
     pub subnet_mask: String,
@@ -92,6 +94,9 @@ pub struct DhcpFlatConfigResponse {
 pub struct UpdateDhcpFlatRequest {
     pub enabled: Option<bool>,
     pub interface: Option<String>,
+    /// Subnet in CIDR notation (e.g. `192.168.1.0/24`).  Must be provided
+    /// when creating the first scope; ignored if left empty.
+    pub subnet: Option<String>,
     pub range_start: Option<String>,
     pub range_end: Option<String>,
     pub gateway: Option<String>,
@@ -162,18 +167,20 @@ fn to_flat_response(cfg: &DhcpConfig) -> DhcpFlatConfigResponse {
         DhcpFlatConfigResponse {
             enabled: cfg.enabled,
             interface: cfg.interface.clone(),
+            subnet: scope.subnet.clone(),
             range_start: scope.pool_start.clone(),
             range_end: scope.pool_end.clone(),
             subnet_mask: cidr_to_mask(&scope.subnet),
             gateway: scope.gateway.clone().unwrap_or_default(),
             dns_servers: scope.dns_servers.clone(),
             lease_time: scope.lease_seconds,
-            domain_name: String::new(),
+            domain_name: scope.domain_name.clone().unwrap_or_default(),
         }
     } else {
         DhcpFlatConfigResponse {
             enabled: cfg.enabled,
             interface: cfg.interface.clone(),
+            subnet: String::new(),
             range_start: String::new(),
             range_end: String::new(),
             subnet_mask: String::new(),
@@ -185,7 +192,18 @@ fn to_flat_response(cfg: &DhcpConfig) -> DhcpFlatConfigResponse {
     }
 }
 
-/// Derive a dotted-decimal subnet mask from a CIDR prefix, e.g. `192.168.1.0/24` → `255.255.255.0`.
+/// Derive a /24 subnet CIDR from a host address (e.g. `192.168.1.100` → `192.168.1.0/24`).
+/// Used as a fallback when the subnet cannot be determined any other way.
+fn derive_subnet_from_addr(addr: &str) -> String {
+    let parts: Vec<&str> = addr.split('.').collect();
+    if parts.len() == 4 {
+        format!("{}.{}.{}.0/24", parts[0], parts[1], parts[2])
+    } else {
+        "192.168.1.0/24".to_string()
+    }
+}
+
+/// Derive a /24 subnet mask from a CIDR prefix, e.g. `192.168.1.0/24` → `255.255.255.0`.
 fn cidr_to_mask(cidr: &str) -> String {
     let prefix: u8 = cidr
         .split('/')
@@ -252,25 +270,51 @@ pub async fn update_config(
 
     // Ensure at least one scope exists to hold the pool settings.
     if cfg.scopes.is_empty() {
+        // Determine the best subnet we can for the new scope:
+        // 1. Use the explicitly provided subnet from the request.
+        // 2. Derive a /24 from the pool start address if provided.
+        // 3. Fall back to a /24 based on the gateway if provided.
+        // 4. Last resort: use the gateway/range to derive, or 192.168.1.0/24.
+        let subnet = req.subnet
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .or_else(|| {
+                req.range_start
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(derive_subnet_from_addr)
+            })
+            .or_else(|| {
+                req.gateway
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(derive_subnet_from_addr)
+            })
+            .unwrap_or_else(|| "192.168.1.0/24".to_string());
+
         cfg.scopes.push(DhcpScope {
             id: Uuid::new_v4(),
-            subnet: "192.168.1.0/24".to_string(),
+            subnet,
             pool_start: String::new(),
             pool_end: String::new(),
             gateway: None,
             dns_servers: vec![],
             lease_seconds: 86400,
+            domain_name: None,
             reservations: vec![],
         });
     }
 
     let scope = &mut cfg.scopes[0];
-    if let Some(v) = req.range_start { scope.pool_start    = v; }
-    if let Some(v) = req.range_end   { scope.pool_end      = v; }
-    if let Some(v) = req.gateway     { scope.gateway       = if v.is_empty() { None } else { Some(v) }; }
-    if let Some(v) = req.dns_servers { scope.dns_servers   = v; }
-    if let Some(v) = req.lease_time  { scope.lease_seconds = v; }
-    // domain_name is not stored in the scope model; silently accept it.
+    // Subnet can be updated explicitly; otherwise preserve the existing value.
+    if let Some(v) = req.subnet.filter(|s| !s.is_empty()) { scope.subnet = v; }
+    if let Some(v) = req.range_start  { scope.pool_start    = v; }
+    if let Some(v) = req.range_end    { scope.pool_end      = v; }
+    if let Some(v) = req.gateway      { scope.gateway       = if v.is_empty() { None } else { Some(v) }; }
+    if let Some(v) = req.dns_servers  { scope.dns_servers   = v; }
+    if let Some(v) = req.lease_time   { scope.lease_seconds = v; }
+    if let Some(v) = req.domain_name  { scope.domain_name   = if v.is_empty() { None } else { Some(v) }; }
 
     // --- Validation --------------------------------------------------------
 
@@ -404,12 +448,14 @@ pub async fn create_static_lease(
     if cfg.scopes.is_empty() {
         cfg.scopes.push(DhcpScope {
             id: Uuid::new_v4(),
-            subnet: "192.168.1.0/24".to_string(),
+            // Derive subnet from the reservation IP as best-effort fallback.
+            subnet: derive_subnet_from_addr(&req.ip_address),
             pool_start: String::new(),
             pool_end: String::new(),
             gateway: None,
             dns_servers: vec![],
             lease_seconds: 86400,
+            domain_name: None,
             reservations: vec![],
         });
     }

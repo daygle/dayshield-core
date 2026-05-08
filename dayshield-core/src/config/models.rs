@@ -643,6 +643,9 @@ pub struct DhcpScope {
     pub dns_servers: Vec<String>,
     /// Lease duration in seconds.
     pub lease_seconds: u32,
+    /// DNS search domain to advertise (optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain_name: Option<String>,
     /// Static host reservations within this scope.
     pub reservations: Vec<DhcpReservation>,
 }

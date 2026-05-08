@@ -14,7 +14,10 @@ use std::collections::HashMap;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
-use crate::config::models::{Action, AliasType, FirewallAlias, FirewallRule, NatConfig, NatProtocol, NatRuleType, OutboundMode, Protocol};
+use crate::config::models::{
+    Action, AliasType, FirewallAlias, FirewallChainPolicy, FirewallRule, FirewallSettings,
+    NatConfig, NatProtocol, NatRuleType, OutboundMode, Protocol,
+};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -89,8 +92,10 @@ pub fn generate_ruleset(
     rules: &[FirewallRule],
     nat_config: Option<&NatConfig>,
     aliases: &[FirewallAlias],
+    firewall_settings: Option<&FirewallSettings>,
     resolved_url_tables: &HashMap<String, Vec<String>>,
 ) -> String {
+    let settings = firewall_settings.cloned().unwrap_or_default();
     let mut sorted: Vec<&FirewallRule> = rules.iter().collect();
     sorted.sort_by_key(|r| r.priority);
 
@@ -122,9 +127,46 @@ pub fn generate_ruleset(
 
     // input chain
     out.push_str("    chain input {\n");
-    out.push_str("        type filter hook input priority 0; policy drop;\n");
+    out.push_str(&format!(
+        "        type filter hook input priority 0; policy {};\n",
+        chain_policy_str(&settings.input_policy)
+    ));
     out.push_str("        ct state established,related accept\n");
+    if settings.drop_invalid_state {
+        out.push_str("        ct state invalid drop\n");
+    }
     out.push_str("        iif lo accept\n");
+    if settings.syn_flood_protection {
+        out.push_str(&format!(
+            "        tcp flags syn ct state new limit rate over {}/second burst {} packets drop\n",
+            settings.syn_flood_rate, settings.syn_flood_burst
+        ));
+    }
+    if settings.management_anti_lockout && !settings.management_ports.is_empty() {
+        let mut mgmt_parts: Vec<String> = Vec::new();
+        if let Some(iface) = &settings.management_interface {
+            if !iface.is_empty() {
+                mgmt_parts.push(format!("iifname \"{}\"", iface));
+            }
+        }
+        if !settings.management_allowed_sources.is_empty() {
+            mgmt_parts.push(format!(
+                "ip saddr {{ {} }}",
+                settings.management_allowed_sources.join(", ")
+            ));
+        }
+        mgmt_parts.push(format!(
+            "tcp dport {{ {} }}",
+            settings
+                .management_ports
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<String>>()
+                .join(", ")
+        ));
+        mgmt_parts.push("accept".to_string());
+        out.push_str(&format!("        {}\n", mgmt_parts.join(" ")));
+    }
     // ICMP is required for basic network operation regardless of user rules:
     //   echo-request        — inbound ping (diagonstics)
     //   destination-unreachable — PMTU discovery, port-unreachable replies
@@ -139,8 +181,14 @@ pub fn generate_ruleset(
 
     // forward chain
     out.push_str("    chain forward {\n");
-    out.push_str("        type filter hook forward priority 0; policy drop;\n");
+    out.push_str(&format!(
+        "        type filter hook forward priority 0; policy {};\n",
+        chain_policy_str(&settings.forward_policy)
+    ));
     out.push_str("        ct state established,related accept\n");
+    if settings.drop_invalid_state {
+        out.push_str("        ct state invalid drop\n");
+    }
     // Auto-companion accept rules for DNAT (port-forward) entries.
     // Without these, forwarded packets would be dropped by the policy above
     // even after a successful DNAT rewrite in prerouting.
@@ -162,7 +210,10 @@ pub fn generate_ruleset(
 
     // output chain
     out.push_str("    chain output {\n");
-    out.push_str("        type filter hook output priority 0; policy accept;\n");
+    out.push_str(&format!(
+        "        type filter hook output priority 0; policy {};\n",
+        chain_policy_str(&settings.output_policy)
+    ));
     out.push_str("    }\n");
 
     out.push_str("}\n");
@@ -200,11 +251,18 @@ pub async fn apply_rules(
     rules: &[FirewallRule],
     nat_config: Option<&NatConfig>,
     aliases: &[FirewallAlias],
+    firewall_settings: Option<&FirewallSettings>,
 ) -> Result<(), NftError> {
     // Resolve URL-table aliases (fetch + cache).
     let resolved_url_tables = resolve_url_tables(aliases).await;
 
-    let ruleset = generate_ruleset(rules, nat_config, aliases, &resolved_url_tables);
+    let ruleset = generate_ruleset(
+        rules,
+        nat_config,
+        aliases,
+        firewall_settings,
+        &resolved_url_tables,
+    );
 
     // Unique temp file name based on milliseconds since UNIX epoch.
     let ts = std::time::SystemTime::now()
@@ -437,6 +495,13 @@ fn alias_set_body(
 // ---------------------------------------------------------------------------
 // Private: rule formatting helpers
 // ---------------------------------------------------------------------------
+
+fn chain_policy_str(policy: &FirewallChainPolicy) -> &'static str {
+    match policy {
+        FirewallChainPolicy::Drop => "drop",
+        FirewallChainPolicy::Accept => "accept",
+    }
+}
 
 /// Translate a single [`FirewallRule`] into an nftables rule statement.
 fn format_rule(rule: &FirewallRule) -> String {
@@ -846,7 +911,7 @@ mod tests {
 
     #[test]
     fn empty_ruleset_has_base_structure() {
-        let rs = generate_ruleset(&[], None, &[], &HashMap::new());
+        let rs = generate_ruleset(&[], None, &[], None, &HashMap::new());
         assert!(rs.contains("flush ruleset"), "must flush existing rules");
         assert!(rs.contains("table inet filter"), "filter table missing");
         assert!(rs.contains("chain input"), "input chain missing");
@@ -869,7 +934,7 @@ mod tests {
             destination: Some("10.0.0.1/32".into()),
             ..base_rule(0, Action::Accept)
         };
-        let rs = generate_ruleset(&[rule], None, &[], &HashMap::new());
+        let rs = generate_ruleset(&[rule], None, &[], None, &HashMap::new());
         assert!(rs.contains("ip saddr 192.168.1.0/24"));
         assert!(rs.contains("ip daddr 10.0.0.1/32"));
         assert!(rs.contains("accept"));
@@ -882,7 +947,7 @@ mod tests {
             destination_port: Some(443),
             ..base_rule(10, Action::Accept)
         };
-        let rs = generate_ruleset(&[rule], None, &[], &HashMap::new());
+        let rs = generate_ruleset(&[rule], None, &[], None, &HashMap::new());
         assert!(rs.contains("tcp dport 443"), "tcp dport must appear");
         assert!(rs.contains("accept"));
     }
@@ -895,7 +960,7 @@ mod tests {
             action: Action::Drop,
             ..base_rule(20, Action::Drop)
         };
-        let rs = generate_ruleset(&[rule], None, &[], &HashMap::new());
+        let rs = generate_ruleset(&[rule], None, &[], None, &HashMap::new());
         assert!(rs.contains("udp sport 53"));
         assert!(rs.contains("drop"));
     }
@@ -906,21 +971,21 @@ mod tests {
             protocol: Some(Protocol::Tcp),
             ..base_rule(0, Action::Accept)
         };
-        let rs = generate_ruleset(&[rule], None, &[], &HashMap::new());
+        let rs = generate_ruleset(&[rule], None, &[], None, &HashMap::new());
         assert!(rs.contains("meta l4proto tcp"));
     }
 
     #[test]
     fn drop_rule() {
         let rule = base_rule(0, Action::Drop);
-        let rs = generate_ruleset(&[rule], None, &[], &HashMap::new());
+        let rs = generate_ruleset(&[rule], None, &[], None, &HashMap::new());
         assert!(rs.contains("drop"));
     }
 
     #[test]
     fn reject_rule() {
         let rule = base_rule(0, Action::Reject);
-        let rs = generate_ruleset(&[rule], None, &[], &HashMap::new());
+        let rs = generate_ruleset(&[rule], None, &[], None, &HashMap::new());
         assert!(rs.contains("reject"));
     }
 
@@ -930,7 +995,7 @@ mod tests {
             log: true,
             ..base_rule(0, Action::Accept)
         };
-        let rs = generate_ruleset(&[rule], None, &[], &HashMap::new());
+        let rs = generate_ruleset(&[rule], None, &[], None, &HashMap::new());
         assert!(rs.contains("log prefix"), "log prefix must appear");
     }
 
@@ -940,7 +1005,7 @@ mod tests {
             interface: Some("eth0".into()),
             ..base_rule(0, Action::Accept)
         };
-        let rs = generate_ruleset(&[rule], None, &[], &HashMap::new());
+        let rs = generate_ruleset(&[rule], None, &[], None, &HashMap::new());
         assert!(rs.contains("iif \"eth0\""));
     }
 
@@ -950,7 +1015,7 @@ mod tests {
             source: Some("2001:db8::/32".into()),
             ..base_rule(0, Action::Accept)
         };
-        let rs = generate_ruleset(&[rule], None, &[], &HashMap::new());
+        let rs = generate_ruleset(&[rule], None, &[], None, &HashMap::new());
         assert!(rs.contains("ip6 saddr 2001:db8::/32"));
     }
 
@@ -965,7 +1030,7 @@ mod tests {
             ..base_rule(5, Action::Drop)
         };
         // Pass higher-priority rule first; expect lower priority (5) to appear earlier.
-        let rs = generate_ruleset(&[r_high, r_low], None, &[], &HashMap::new());
+        let rs = generate_ruleset(&[r_high, r_low], None, &[], None, &HashMap::new());
         let pos_high_prio = rs.find("2.2.2.2").expect("2.2.2.2 not found");
         let pos_low_prio = rs.find("1.1.1.1").expect("1.1.1.1 not found");
         assert!(
@@ -980,7 +1045,7 @@ mod tests {
 
     #[test]
     fn no_nat_config_omits_nat_table() {
-        let rs = generate_ruleset(&[], None, &[], &HashMap::new());
+        let rs = generate_ruleset(&[], None, &[], None, &HashMap::new());
         assert!(!rs.contains("table ip nat"), "nat table must not appear without config");
     }
 
@@ -992,7 +1057,7 @@ mod tests {
             rules: vec![],
             nat_reflection: false,
         };
-        let rs = generate_ruleset(&[], Some(&nat), &[], &HashMap::new());
+        let rs = generate_ruleset(&[], Some(&nat), &[], None, &HashMap::new());
         assert!(rs.contains("table ip nat"), "nat table must appear");
         assert!(rs.contains("chain postrouting"), "postrouting chain missing");
         assert!(rs.contains("oifname \"eth0\" masquerade"), "auto masquerade missing");
@@ -1006,7 +1071,7 @@ mod tests {
             rules: vec![],
             nat_reflection: false,
         };
-        let rs = generate_ruleset(&[], Some(&nat), &[], &HashMap::new());
+        let rs = generate_ruleset(&[], Some(&nat), &[], None, &HashMap::new());
         assert!(!rs.contains("table ip nat"), "nat table must not appear without WAN interfaces");
     }
 
@@ -1018,7 +1083,7 @@ mod tests {
             rules: vec![masquerade_rule("eth0", Some("192.168.0.0/24"))],
             nat_reflection: false,
         };
-        let rs = generate_ruleset(&[], Some(&nat), &[], &HashMap::new());
+        let rs = generate_ruleset(&[], Some(&nat), &[], None, &HashMap::new());
         assert!(rs.contains("table ip nat"), "nat table must appear");
         assert!(rs.contains("chain postrouting"), "postrouting chain missing");
         assert!(rs.contains("ip saddr 192.168.0.0/24"), "source address missing");
@@ -1041,7 +1106,7 @@ mod tests {
             rules: vec![masquerade_rule("eth1", Some("10.0.0.0/8"))],
             nat_reflection: false,
         };
-        let rs = generate_ruleset(&[], Some(&nat), &[], &HashMap::new());
+        let rs = generate_ruleset(&[], Some(&nat), &[], None, &HashMap::new());
         assert!(rs.contains("oifname \"eth0\" masquerade"), "auto masquerade missing");
         assert!(rs.contains("ip saddr 10.0.0.0/8"), "user rule src missing");
         assert!(rs.contains("oifname \"eth1\" masquerade"), "user rule iface missing");
@@ -1055,7 +1120,7 @@ mod tests {
             rules: vec![dnat_rule("203.0.113.1/32", "10.0.0.1", Some(8080))],
             nat_reflection: false,
         };
-        let rs = generate_ruleset(&[], Some(&nat), &[], &HashMap::new());
+        let rs = generate_ruleset(&[], Some(&nat), &[], None, &HashMap::new());
         assert!(rs.contains("chain prerouting"), "prerouting chain missing");
         assert!(rs.contains("ip daddr 203.0.113.1/32"), "dst addr missing");
         assert!(rs.contains("dnat to 10.0.0.1:8080"), "dnat target missing");
@@ -1090,7 +1155,7 @@ mod tests {
             rules: vec![snat],
             nat_reflection: false,
         };
-        let rs = generate_ruleset(&[], Some(&nat), &[], &HashMap::new());
+        let rs = generate_ruleset(&[], Some(&nat), &[], None, &HashMap::new());
         assert!(rs.contains("chain postrouting"), "postrouting missing");
         assert!(rs.contains("snat to 203.0.113.5"), "snat target missing");
     }
@@ -1105,7 +1170,7 @@ mod tests {
             rules: vec![rule],
             nat_reflection: false,
         };
-        let rs = generate_ruleset(&[], Some(&nat), &[], &HashMap::new());
+        let rs = generate_ruleset(&[], Some(&nat), &[], None, &HashMap::new());
         // Count occurrences of "chain output" — only the nat output chain should appear.
         assert!(rs.contains("hook output"), "reflection output chain missing");
     }
@@ -1279,7 +1344,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_rules_does_not_panic_without_nft() {
-        let result = apply_rules(&[], None, &[]).await;
+        let result = apply_rules(&[], None, &[], None).await;
         match result {
             Ok(()) => {}
             Err(NftError::ApplyFailed(_)) => {}

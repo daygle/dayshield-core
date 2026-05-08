@@ -19,7 +19,8 @@ use uuid::Uuid;
 
 use crate::{
     config::models::{
-        is_valid_cidr, is_valid_interface_name, is_valid_port, Action, FirewallRule, Protocol,
+        is_valid_cidr, is_valid_interface_name, is_valid_port, Action, FirewallRule,
+        FirewallSettings, Protocol,
     },
     engine::nftables::{apply_rules, NftError},
     state::AppState,
@@ -50,6 +51,88 @@ pub async fn list_rules(
     }
 
     Ok(Json(rules))
+}
+
+/// Handler: return current global firewall settings.
+pub async fn get_settings(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, NftError> {
+    let settings = state
+        .config_store
+        .load_firewall_settings()
+        .map_err(NftError::StorageError)?;
+    Ok(Json(settings))
+}
+
+/// Handler: replace global firewall settings and re-apply nftables.
+pub async fn update_settings(
+    State(state): State<Arc<AppState>>,
+    Json(mut settings): Json<FirewallSettings>,
+) -> Result<impl IntoResponse, NftError> {
+    if settings.management_ports.is_empty() {
+        return Err(NftError::ValidationFailed(
+            "management_ports must contain at least one port".into(),
+        ));
+    }
+    for p in &settings.management_ports {
+        if !is_valid_port(*p) {
+            return Err(NftError::ValidationFailed(format!(
+                "invalid management port: {} (must be 1-65535)",
+                p
+            )));
+        }
+    }
+    for src in &settings.management_allowed_sources {
+        if !is_valid_cidr(src) {
+            return Err(NftError::ValidationFailed(format!(
+                "invalid management source CIDR: {}",
+                src
+            )));
+        }
+    }
+    if let Some(iface) = settings.management_interface.as_ref() {
+        if iface.is_empty() {
+            settings.management_interface = None;
+        } else if !is_valid_interface_name(iface) {
+            return Err(NftError::ValidationFailed(format!(
+                "invalid management interface name: {}",
+                iface
+            )));
+        }
+    }
+    if settings.syn_flood_rate == 0 {
+        return Err(NftError::ValidationFailed(
+            "syn_flood_rate must be greater than 0".into(),
+        ));
+    }
+    if settings.syn_flood_burst == 0 {
+        return Err(NftError::ValidationFailed(
+            "syn_flood_burst must be greater than 0".into(),
+        ));
+    }
+
+    state
+        .config_store
+        .save_firewall_settings(settings.clone())
+        .map_err(NftError::StorageError)?;
+
+    let full_cfg = state
+        .config_store
+        .load()
+        .map_err(NftError::StorageError)?;
+
+    {
+        let rules = state.firewall_rules.read().await;
+        apply_rules(
+            &rules,
+            full_cfg.nat.as_ref(),
+            &full_cfg.firewall_aliases,
+            full_cfg.firewall_settings.as_ref(),
+        )
+        .await?;
+    }
+
+    Ok(Json(settings))
 }
 
 /// Request body for `POST /firewall/rules`.
@@ -174,7 +257,13 @@ pub async fn create_rule(
 
     {
         let rules = state.firewall_rules.read().await;
-        apply_rules(&rules, full_cfg.nat.as_ref(), &full_cfg.firewall_aliases).await?;
+        apply_rules(
+            &rules,
+            full_cfg.nat.as_ref(),
+            &full_cfg.firewall_aliases,
+            full_cfg.firewall_settings.as_ref(),
+        )
+        .await?;
     }
 
     info!(id = %rule.id, "firewall: nftables engine apply complete");
@@ -278,7 +367,13 @@ pub async fn update_rule(
 
     {
         let rules = state.firewall_rules.read().await;
-        apply_rules(&rules, full_cfg.nat.as_ref(), &full_cfg.firewall_aliases).await?;
+        apply_rules(
+            &rules,
+            full_cfg.nat.as_ref(),
+            &full_cfg.firewall_aliases,
+            full_cfg.firewall_settings.as_ref(),
+        )
+        .await?;
     }
 
     info!(id = %id, "firewall: nftables engine apply complete after update");
@@ -317,7 +412,13 @@ pub async fn delete_rule(
 
     {
         let rules = state.firewall_rules.read().await;
-        apply_rules(&rules, full_cfg.nat.as_ref(), &full_cfg.firewall_aliases).await?;
+        apply_rules(
+            &rules,
+            full_cfg.nat.as_ref(),
+            &full_cfg.firewall_aliases,
+            full_cfg.firewall_settings.as_ref(),
+        )
+        .await?;
     }
 
     info!(id = %id, "firewall: nftables engine apply complete after delete");

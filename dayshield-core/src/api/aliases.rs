@@ -162,7 +162,12 @@ pub async fn create_alias(
         .map_err(AliasError::StorageError)?;
     let fw_rules = full_cfg.firewall_rules.clone();
 
-    apply_rules(&fw_rules, full_cfg.nat.as_ref(), &full_cfg.firewall_aliases)
+    apply_rules(
+        &fw_rules,
+        full_cfg.nat.as_ref(),
+        &full_cfg.firewall_aliases,
+        full_cfg.firewall_settings.as_ref(),
+    )
         .await
         .map_err(|e| AliasError::EngineError(e.to_string()))?;
 
@@ -205,7 +210,12 @@ pub async fn delete_alias(
         .map_err(AliasError::StorageError)?;
     let fw_rules = full_cfg.firewall_rules.clone();
 
-    apply_rules(&fw_rules, full_cfg.nat.as_ref(), &full_cfg.firewall_aliases)
+    apply_rules(
+        &fw_rules,
+        full_cfg.nat.as_ref(),
+        &full_cfg.firewall_aliases,
+        full_cfg.firewall_settings.as_ref(),
+    )
         .await
         .map_err(|e| AliasError::EngineError(e.to_string()))?;
 

@@ -286,6 +286,61 @@ pub enum Action {
     Log,
 }
 
+/// Global chain policy for nftables filter chains.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FirewallChainPolicy {
+    #[default]
+    Drop,
+    Accept,
+}
+
+/// Global firewall behavior that is not tied to individual allow/deny rules.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FirewallSettings {
+    /// Default policy for the input chain.
+    pub input_policy: FirewallChainPolicy,
+    /// Default policy for the forward chain.
+    pub forward_policy: FirewallChainPolicy,
+    /// Default policy for the output chain.
+    pub output_policy: FirewallChainPolicy,
+    /// Drop packets with invalid conntrack state.
+    pub drop_invalid_state: bool,
+    /// Enable global SYN flood protection on inbound traffic.
+    pub syn_flood_protection: bool,
+    /// SYN packets per second allowed before dropping excess.
+    pub syn_flood_rate: u32,
+    /// Burst allowance for SYN flood limiter.
+    pub syn_flood_burst: u32,
+    /// Emit a built-in rule that keeps management ports reachable.
+    pub management_anti_lockout: bool,
+    /// Optional management interface restriction.
+    pub management_interface: Option<String>,
+    /// Optional list of source CIDRs allowed for management.
+    pub management_allowed_sources: Vec<String>,
+    /// TCP ports covered by the management anti-lockout rule.
+    pub management_ports: Vec<u16>,
+}
+
+impl Default for FirewallSettings {
+    fn default() -> Self {
+        Self {
+            input_policy: FirewallChainPolicy::Drop,
+            forward_policy: FirewallChainPolicy::Drop,
+            output_policy: FirewallChainPolicy::Accept,
+            drop_invalid_state: true,
+            syn_flood_protection: true,
+            syn_flood_rate: 120,
+            syn_flood_burst: 240,
+            management_anti_lockout: true,
+            management_interface: None,
+            management_allowed_sources: vec![],
+            management_ports: vec![22, 443, 8443],
+        }
+    }
+}
+
 /// A single stateless firewall rule that will be compiled into nftables.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FirewallRule {
@@ -1534,6 +1589,9 @@ pub struct SystemConfig {
     pub domain: Option<String>,
     pub interfaces: Vec<Interface>,
     pub firewall_rules: Vec<FirewallRule>,
+    /// Global firewall defaults and management/stateful protections.
+    #[serde(default)]
+    pub firewall_settings: Option<FirewallSettings>,
     /// NAT configuration (outbound mode, WAN interfaces, and user rules).
     #[serde(default)]
     pub nat: Option<NatConfig>,

@@ -172,7 +172,12 @@ pub async fn put_config(
         .load()
         .map_err(NatError::StorageError)?;
     let fw_rules = full_cfg.firewall_rules.clone();
-    apply_rules(&fw_rules, full_cfg.nat.as_ref(), &full_cfg.firewall_aliases)
+    apply_rules(
+        &fw_rules,
+        full_cfg.nat.as_ref(),
+        &full_cfg.firewall_aliases,
+        full_cfg.firewall_settings.as_ref(),
+    )
         .await
         .map_err(|e| NatError::EngineError(e.to_string()))?;
 
@@ -251,7 +256,12 @@ pub async fn create_rule(
         .load()
         .map_err(NatError::StorageError)?;
     let fw_rules = full_cfg.firewall_rules.clone();
-    apply_rules(&fw_rules, full_cfg.nat.as_ref(), &full_cfg.firewall_aliases)
+    apply_rules(
+        &fw_rules,
+        full_cfg.nat.as_ref(),
+        &full_cfg.firewall_aliases,
+        full_cfg.firewall_settings.as_ref(),
+    )
         .await
         .map_err(|e| NatError::EngineError(e.to_string()))?;
 
@@ -294,7 +304,12 @@ pub async fn delete_rule(
         .load()
         .map_err(NatError::StorageError)?;
     let fw_rules = full_cfg.firewall_rules.clone();
-    apply_rules(&fw_rules, full_cfg.nat.as_ref(), &full_cfg.firewall_aliases)
+    apply_rules(
+        &fw_rules,
+        full_cfg.nat.as_ref(),
+        &full_cfg.firewall_aliases,
+        full_cfg.firewall_settings.as_ref(),
+    )
         .await
         .map_err(|e| NatError::EngineError(e.to_string()))?;
 
@@ -361,7 +376,12 @@ pub async fn update_rule(
         .load()
         .map_err(NatError::StorageError)?;
     let fw_rules = full_cfg.firewall_rules.clone();
-    apply_rules(&fw_rules, full_cfg.nat.as_ref(), &full_cfg.firewall_aliases)
+    apply_rules(
+        &fw_rules,
+        full_cfg.nat.as_ref(),
+        &full_cfg.firewall_aliases,
+        full_cfg.firewall_settings.as_ref(),
+    )
         .await
         .map_err(|e| NatError::EngineError(e.to_string()))?;
 

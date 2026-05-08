@@ -30,8 +30,8 @@ use tracing::{debug, info, warn};
 
 use super::models::{
     AcmeConfig, CrowdSecConfig, DhcpConfig, DnsConfig, DnsDomainOverride, DnsHostOverride,
-    FirewallAlias, FirewallRule, Gateway, Interface, NatConfig, NotifyConfig, NtpConfig,
-    SuricataConfig, SystemConfig, WireGuardInterface,
+    FirewallAlias, FirewallRule, FirewallSettings, Gateway, Interface, NatConfig, NotifyConfig,
+    NtpConfig, SuricataConfig, SystemConfig, WireGuardInterface,
 };
 
 /// Default path to the configuration directory.
@@ -288,7 +288,7 @@ impl ConfigStore {
     pub fn validate(&self, config: &SystemConfig) -> Result<()> {
         use crate::config::models::{
             is_valid_cidr, is_valid_domain, is_valid_interface_name, is_valid_ip,
-            is_valid_ipv4_range, is_valid_mac, is_valid_mtu,
+            is_valid_ipv4_range, is_valid_mac, is_valid_mtu, is_valid_port,
         };
 
         for iface in &config.interfaces {
@@ -326,6 +326,43 @@ impl ConfigStore {
                     rule.id,
                     rule.priority
                 );
+            }
+        }
+
+        // Firewall global settings validation.
+        if let Some(settings) = &config.firewall_settings {
+            if settings.syn_flood_rate == 0 {
+                anyhow::bail!("Firewall syn_flood_rate must be greater than 0");
+            }
+            if settings.syn_flood_burst == 0 {
+                anyhow::bail!("Firewall syn_flood_burst must be greater than 0");
+            }
+            if settings.management_ports.is_empty() {
+                anyhow::bail!("Firewall management_ports must contain at least one port");
+            }
+            for port in &settings.management_ports {
+                if !is_valid_port(*port) {
+                    anyhow::bail!(
+                        "Firewall management_ports contains invalid port {} (must be 1–65535)",
+                        port
+                    );
+                }
+            }
+            for src in &settings.management_allowed_sources {
+                if !is_valid_cidr(src) {
+                    anyhow::bail!(
+                        "Firewall management_allowed_sources contains invalid CIDR {:?}",
+                        src
+                    );
+                }
+            }
+            if let Some(iface) = &settings.management_interface {
+                if !iface.is_empty() && !is_valid_interface_name(iface) {
+                    anyhow::bail!(
+                        "Firewall management_interface {:?} is not a valid interface name",
+                        iface
+                    );
+                }
             }
         }
 
@@ -751,6 +788,20 @@ impl ConfigStore {
     pub fn save_firewall_rules(&self, rules: Vec<FirewallRule>) -> Result<()> {
         let mut config = self.load()?;
         config.firewall_rules = rules;
+        self.save_with_rollback(&config)
+    }
+
+    /// Return firewall global settings from persisted config.
+    ///
+    /// Returns defaults when no settings have been saved yet.
+    pub fn load_firewall_settings(&self) -> Result<FirewallSettings> {
+        Ok(self.load()?.firewall_settings.unwrap_or_default())
+    }
+
+    /// Atomically replace firewall global settings in persisted config.
+    pub fn save_firewall_settings(&self, settings: FirewallSettings) -> Result<()> {
+        let mut config = self.load()?;
+        config.firewall_settings = Some(settings);
         self.save_with_rollback(&config)
     }
 

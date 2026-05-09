@@ -51,6 +51,13 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `PUT  /system/config`                                 — update host-level settings
 /// - `POST /system/reboot`                                 — trigger immediate system reboot
 /// - `POST /system/shutdown`                               — trigger immediate system shutdown
+/// - `GET  /system/updates/status`                         — get core/ui update status
+/// - `GET  /system/updates/settings`                       — get update settings
+/// - `PUT  /system/updates/settings`                       — update check interval / reboot policy / repo config
+/// - `POST /system/updates/check`                          — force update check against GitHub
+/// - `POST /system/updates/apply`                          — apply updates from GitHub repos
+/// - `POST /system/updates/rollback`                       — rollback to prior commit
+/// - `POST /system/updates/validate`                       — validate current commit matches applied state
 /// - `GET  /interfaces`                                    — list all network interfaces
 /// - `POST /interfaces`                                    — create / update a network interface/// - `GET  /gateways`                                       — list gateways with live routing and health state
 /// - `POST /gateways`                                       — create or update a gateway
@@ -114,6 +121,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/system/config", put(system::update_config))
         .route("/system/reboot", post(system::reboot))
         .route("/system/shutdown", post(system::shutdown))
+        .route("/system/updates/status", get(system::get_updates_status))
+        .route("/system/updates/settings", get(system::get_update_settings))
+        .route("/system/updates/settings", put(system::update_update_settings))
+        .route("/system/updates/check", post(system::check_updates))
+        .route("/system/updates/apply", post(system::apply_updates))
+        .route("/system/updates/rollback", post(system::rollback_updates))
+        .route("/system/updates/validate", post(system::validate_updates))
         // Dashboard
         .route("/dashboard/system", get(dashboard::get_system_status))
         .route("/dashboard/network", get(dashboard::get_network_status))

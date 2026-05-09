@@ -28,6 +28,7 @@ mod nat;
 mod notify;
 mod ntp;
 mod state;
+mod update;
 mod utils;
 
 use state::AppState;
@@ -88,6 +89,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Start the automatic backup scheduler.
     backup::scheduler::start_backup_scheduler(Arc::clone(&app_state)).await;
+
+    // Start the periodic software update checker.
+    update::start_update_checker(Arc::clone(&app_state)).await;
 
     // Start the background notification worker.
     notify::worker::start_notify_worker(Arc::clone(&app_state), notify_rx).await;

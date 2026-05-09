@@ -5,17 +5,25 @@
 //! - `PUT  /system/config`   — update host-level settings
 //! - `POST /system/reboot`   — schedule an immediate systemctl reboot
 //! - `POST /system/shutdown` — schedule an immediate systemctl poweroff
+//! - `GET  /system/updates/status`   — get update status for core/ui repos
+//! - `GET  /system/updates/settings` — get update settings
+//! - `PUT  /system/updates/settings` — update settings (interval/reboot policy/repos)
+//! - `POST /system/updates/check`    — force immediate update check
+//! - `POST /system/updates/apply`    — apply updates from configured GitHub repos
+//! - `POST /system/updates/rollback` — rollback to last known commit
+//! - `POST /system/updates/validate` — validate applied updates
 
 use std::sync::Arc;
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::{
     config::models::SystemSettings,
     state::AppState,
+    update::{self, UpdateComponent, UpdateSettings},
 };
 
 // ---------------------------------------------------------------------------
@@ -148,4 +156,85 @@ pub async fn shutdown(
         .map_err(|e| SystemApiError::CommandError(format!("systemctl poweroff failed: {e}")))?
         ;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Software updates
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateActionRequest {
+    #[serde(default = "default_update_component")]
+    pub component: UpdateComponent,
+}
+
+fn default_update_component() -> UpdateComponent {
+    UpdateComponent::Both
+}
+
+/// Handler: return software-update status for core and UI repositories.
+pub async fn get_updates_status(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, SystemApiError> {
+    Ok(Json(update::get_status(&state).await))
+}
+
+/// Handler: return persisted software-update settings.
+pub async fn get_update_settings(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, SystemApiError> {
+    Ok(Json(update::load_settings(&state)))
+}
+
+/// Handler: update software-update settings.
+pub async fn update_update_settings(
+    State(state): State<Arc<AppState>>,
+    Json(settings): Json<UpdateSettings>,
+) -> Result<impl IntoResponse, SystemApiError> {
+    update::save_settings(&state, &settings).map_err(SystemApiError::StorageError)?;
+    Ok(Json(update::load_settings(&state)))
+}
+
+/// Handler: run an immediate check against configured GitHub repos.
+pub async fn check_updates(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, SystemApiError> {
+    let status = update::check_for_updates(&state)
+        .await
+        .map_err(SystemApiError::StorageError)?;
+    Ok(Json(status))
+}
+
+/// Handler: apply updates for selected component(s).
+pub async fn apply_updates(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateActionRequest>,
+) -> Result<impl IntoResponse, SystemApiError> {
+    let result = update::apply_updates(&state, req.component)
+        .await
+        .map_err(SystemApiError::StorageError)?;
+    Ok(Json(result))
+}
+
+/// Handler: rollback selected component(s) to previous commit.
+pub async fn rollback_updates(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateActionRequest>,
+) -> Result<impl IntoResponse, SystemApiError> {
+    let result = update::rollback_updates(&state, req.component)
+        .await
+        .map_err(SystemApiError::StorageError)?;
+    Ok(Json(result))
+}
+
+/// Handler: validate selected component(s) are at expected commit.
+pub async fn validate_updates(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateActionRequest>,
+) -> Result<impl IntoResponse, SystemApiError> {
+    let result = update::validate_updates(&state, req.component)
+        .await
+        .map_err(SystemApiError::StorageError)?;
+    Ok(Json(result))
 }

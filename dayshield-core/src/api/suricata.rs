@@ -1,12 +1,14 @@
 //! Suricata IPS/IDS endpoints.
 //!
-//! | Method | Path                        | Description                               |
-//! |--------|-----------------------------|-------------------------------------------|
-//! | GET    | `/suricata/config`          | Get the current Suricata configuration    |
-//! | POST   | `/suricata/config`          | Update + apply the Suricata configuration |
-//! | GET    | `/suricata/rulesets`        | List configured rule sources              |
-//! | PUT    | `/suricata/rulesets/{id}`   | Enable / disable a rule source by index  |
-//! | GET    | `/suricata/alerts`          | Recent alerts from the EVE JSON log       |
+//! | Method | Path                              | Description                               |
+//! |--------|-----------------------------------|-------------------------------------------|
+//! | GET    | `/suricata/config`                | Get the current Suricata configuration    |
+//! | POST   | `/suricata/config`                | Update + apply the Suricata configuration |
+//! | GET    | `/suricata/rulesets`              | List configured rule sources              |
+//! | PUT    | `/suricata/rulesets/{id}`         | Enable / disable a rule source by index  |
+//! | GET    | `/suricata/alerts`                | Recent alerts from the EVE JSON log       |
+//! | GET    | `/interfaces/{name}/suricata`     | Get Suricata config scoped to interface   |
+//! | POST   | `/interfaces/{name}/suricata`     | Update Suricata config for interface      |
 
 use std::sync::Arc;
 
@@ -72,7 +74,7 @@ impl IntoResponse for SuricataError {
 #[serde(rename_all = "camelCase")]
 pub struct SuricataApiConfig {
     pub enabled: bool,
-    pub interface: String,
+    pub interfaces: Vec<String>,
     pub mode: String,
     /// Maps from storage `home_nets` → JSON key `homeNet`.
     pub home_net: Vec<String>,
@@ -87,7 +89,7 @@ pub struct SuricataApiConfig {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateSuricataApiRequest {
     pub enabled: Option<bool>,
-    pub interface: Option<String>,
+    pub interfaces: Option<Vec<String>>,
     pub mode: Option<String>,
     pub home_net: Option<Vec<String>>,
     pub external_net: Option<Vec<String>>,
@@ -134,7 +136,7 @@ pub struct SuricataAlertResponse {
 fn default_suricata_cfg() -> SuricataConfig {
     SuricataConfig {
         enabled: false,
-        interface: String::new(),
+        interfaces: vec![],
         mode: "ids".to_string(),
         home_nets: vec![],
         external_nets: vec![],
@@ -150,7 +152,7 @@ fn default_suricata_cfg() -> SuricataConfig {
 fn to_api_config(cfg: &SuricataConfig) -> SuricataApiConfig {
     SuricataApiConfig {
         enabled: cfg.enabled,
-        interface: cfg.interface.clone(),
+        interfaces: cfg.interfaces.clone(),
         mode: cfg.mode.clone(),
         home_net: cfg.home_nets.clone(),
         external_net: cfg.external_nets.clone(),
@@ -207,7 +209,7 @@ pub async fn update_config(
 
     // Apply only the fields that were supplied.
     if let Some(v) = req.enabled    { cfg.enabled  = v; }
-    if let Some(v) = req.interface  { cfg.interface = v; }
+    if let Some(v) = req.interfaces { cfg.interfaces = v; }
     if let Some(v) = req.mode       { cfg.mode      = v; }
     if let Some(v) = req.home_net   { cfg.home_nets = v; }
     if let Some(v) = req.external_net { cfg.external_nets = v; }
@@ -225,7 +227,7 @@ pub async fn update_config(
 
     info!(
         enabled = cfg.enabled,
-        interface = %cfg.interface,
+        interfaces = ?cfg.interfaces,
         mode = %cfg.mode,
         home_nets = cfg.home_nets.len(),
         "suricata: received update config request"
@@ -440,5 +442,97 @@ pub async fn list_alerts(
     Ok(Json(serde_json::json!({
         "success": true,
         "data": result
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// GET /interfaces/{name}/suricata
+// ---------------------------------------------------------------------------
+
+/// Get Suricata configuration with interface focus.
+///
+/// Shows whether the interface is being monitored by Suricata.
+pub async fn get_interface_suricata_config(
+    State(state): State<Arc<AppState>>,
+    Path(interface_name): Path<String>,
+) -> Result<impl IntoResponse, SuricataError> {
+    let cfg = state
+        .config_store
+        .load_suricata_config()
+        .map_err(SuricataError::StorageError)?
+        .unwrap_or_else(default_suricata_cfg);
+
+    let is_monitored = cfg.interfaces.contains(&interface_name);
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "interface": interface_name,
+            "monitored": is_monitored,
+            "enabled": cfg.enabled,
+            "mode": cfg.mode,
+            "interfaces": cfg.interfaces,
+        }
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// POST /interfaces/{name}/suricata
+// ---------------------------------------------------------------------------
+
+/// Enable or disable Suricata monitoring for a specific interface.
+///
+/// This adds or removes the interface from the list of interfaces being monitored
+/// by Suricata, then applies the configuration.
+#[derive(Deserialize)]
+pub struct UpdateInterfaceSuricataRequest {
+    /// Whether to enable monitoring on this interface
+    pub monitored: bool,
+}
+
+pub async fn update_interface_suricata_config(
+    State(state): State<Arc<AppState>>,
+    Path(interface_name): Path<String>,
+    Json(req): Json<UpdateInterfaceSuricataRequest>,
+) -> Result<impl IntoResponse, SuricataError> {
+    let mut cfg = state
+        .config_store
+        .load_suricata_config()
+        .map_err(SuricataError::StorageError)?
+        .unwrap_or_else(default_suricata_cfg);
+
+    let currently_monitored = cfg.interfaces.contains(&interface_name);
+
+    // Add or remove the interface from the monitoring list
+    if req.monitored && !currently_monitored {
+        // Add interface
+        cfg.interfaces.push(interface_name.clone());
+        info!(interface = %interface_name, "suricata: added interface to monitoring list");
+    } else if !req.monitored && currently_monitored {
+        // Remove interface
+        cfg.interfaces.retain(|i| i != &interface_name);
+        info!(interface = %interface_name, "suricata: removed interface from monitoring list");
+    }
+
+    state
+        .config_store
+        .save_suricata_config(cfg.clone())
+        .map_err(SuricataError::StorageError)?;
+
+    apply_config(&cfg)
+        .await
+        .map_err(|e| SuricataError::EngineError(e.to_string()))?;
+
+    let is_monitored = cfg.interfaces.contains(&interface_name);
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "interface": interface_name,
+            "monitored": is_monitored,
+            "enabled": cfg.enabled,
+            "mode": cfg.mode,
+            "interfaces": cfg.interfaces,
+        }
     })))
 }

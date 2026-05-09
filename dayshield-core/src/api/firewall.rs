@@ -1,4 +1,4 @@
-//! Firewall rule endpoints - `GET /firewall/rules` and `POST /firewall/rules`.
+//! Firewall rule endpoints - `GET /firewall/rules`, `POST /firewall/rules`, and per-interface endpoints.
 //!
 //! # GET /firewall/rules
 //!
@@ -10,6 +10,12 @@
 //! Accepts a new firewall rule, validates all fields, appends it to the
 //! persisted list, and triggers the nftables engine to regenerate and apply
 //! the full ruleset.
+//!
+//! # Per-interface endpoints
+//!
+//! - `GET /interfaces/{name}/firewall/rules` — get rules for a specific interface
+//! - `POST /interfaces/{name}/firewall/rules` — create a rule for a specific interface
+//! - `DELETE /interfaces/{name}/firewall/rules/{id}` — delete a rule from an interface
 
 use std::sync::Arc;
 
@@ -396,6 +402,224 @@ pub async fn get_stats(
 ) -> impl IntoResponse {
     let stats = get_rule_stats().await;
     Json(stats)
+}
+
+// ---------------------------------------------------------------------------
+// Per-interface firewall rules
+// ---------------------------------------------------------------------------
+
+/// Handler: list firewall rules for a specific interface.
+///
+/// Returns only rules that apply to the given interface (interface field matches
+/// or is empty/None for global rules).
+pub async fn list_interface_rules(
+    State(state): State<Arc<AppState>>,
+    Path(interface_name): Path<String>,
+) -> Result<impl IntoResponse, NftError> {
+    let rules = state
+        .config_store
+        .load_firewall_rules()
+        .map_err(NftError::StorageError)?;
+
+    info!(
+        interface = %interface_name,
+        total_count = rules.len(),
+        "firewall: loaded rules for interface"
+    );
+
+    // Filter rules by interface: include rules with no interface (global) or matching interface
+    let interface_rules: Vec<FirewallRule> = rules
+        .into_iter()
+        .filter(|r| r.interface.is_none() || r.interface.as_deref() == Some(&interface_name))
+        .collect();
+
+    Ok(Json(interface_rules))
+}
+
+/// Handler: create a new firewall rule for a specific interface.
+///
+/// Automatically sets the interface field to the specified interface name,
+/// validates all fields, appends the rule to persistent storage, and
+/// re-applies the full ruleset via the nftables engine.
+pub async fn create_interface_rule(
+    State(state): State<Arc<AppState>>,
+    Path(interface_name): Path<String>,
+    Json(mut req): Json<CreateRuleRequest>,
+) -> Result<impl IntoResponse, NftError> {
+    // Force the interface to be the URL parameter
+    req.interface = Some(interface_name.clone());
+
+    // --- Validation --------------------------------------------------------
+
+    if let Some(src) = &req.source {
+        if !is_valid_cidr(src) {
+            warn!(src = %src, interface = %interface_name, "firewall: invalid source CIDR");
+            return Err(NftError::ValidationFailed(format!(
+                "invalid source CIDR: {src}"
+            )));
+        }
+    }
+
+    if let Some(dst) = &req.destination {
+        if !is_valid_cidr(dst) {
+            warn!(dst = %dst, interface = %interface_name, "firewall: invalid destination CIDR");
+            return Err(NftError::ValidationFailed(format!(
+                "invalid destination CIDR: {dst}"
+            )));
+        }
+    }
+
+    if let Some(sport) = req.source_port {
+        if !is_valid_port(sport) {
+            warn!(port = sport, interface = %interface_name, "firewall: invalid source port");
+            return Err(NftError::ValidationFailed(format!(
+                "invalid source port: {sport} (must be 1–65535)"
+            )));
+        }
+    }
+
+    if let Some(dport) = req.destination_port {
+        if !is_valid_port(dport) {
+            warn!(port = dport, interface = %interface_name, "firewall: invalid destination port");
+            return Err(NftError::ValidationFailed(format!(
+                "invalid destination port: {dport} (must be 1–65535)"
+            )));
+        }
+    }
+
+    // Interface is already validated (set from URL), but double-check anyway
+    if let Some(iface) = &req.interface {
+        if !is_valid_interface_name(iface) {
+            warn!(iface = %iface, "firewall: invalid interface name");
+            return Err(NftError::ValidationFailed(format!(
+                "invalid interface name: {iface}"
+            )));
+        }
+    }
+
+    // --- Build rule --------------------------------------------------------
+
+    let rule = FirewallRule {
+        id: Uuid::new_v4(),
+        description: req.description,
+        priority: req.priority,
+        source: req.source,
+        destination: req.destination,
+        protocol: req.protocol,
+        source_port: req.source_port,
+        destination_port: req.destination_port,
+        action: req.action,
+        interface: Some(interface_name.clone()),
+        log: req.log,
+        enabled: req.enabled,
+        schedule: req.schedule,
+    };
+
+    info!(
+        id = %rule.id,
+        interface = %interface_name,
+        priority = rule.priority,
+        action = ?rule.action,
+        "firewall: received create rule request for interface"
+    );
+
+    // --- Persist -----------------------------------------------------------
+
+    {
+        let mut rules = state.firewall_rules.write().await;
+        rules.push(rule.clone());
+
+        if let Err(e) = state.config_store.save_firewall_rules(rules.clone()) {
+            rules.pop();
+            return Err(NftError::StorageError(e));
+        }
+    }
+
+    info!(id = %rule.id, interface = %interface_name, "firewall: rule persisted");
+
+    // --- Apply -------------------------------------------------------------
+
+    let full_cfg = state
+        .config_store
+        .load()
+        .map_err(NftError::StorageError)?;
+
+    {
+        let rules = state.firewall_rules.read().await;
+        apply_rules(
+            &rules,
+            full_cfg.nat.as_ref(),
+            &full_cfg.firewall_aliases,
+            full_cfg.firewall_settings.as_ref(),
+        )
+        .await?;
+    }
+
+    info!(
+        id = %rule.id,
+        interface = %interface_name,
+        "firewall: nftables engine apply complete for interface"
+    );
+
+    Ok((StatusCode::CREATED, Json(rule)))
+}
+
+/// Handler: delete a firewall rule for a specific interface.
+///
+/// Removes the rule from the in-memory cache, verifies it belongs to the interface,
+/// persists the updated list, and re-applies the full ruleset via the nftables engine.
+/// Returns `204 No Content` on success or `404 Not Found` if no rule with that id
+/// exists for the specified interface.
+pub async fn delete_interface_rule(
+    State(state): State<Arc<AppState>>,
+    Path((interface_name, rule_id)): Path<(String, Uuid)>,
+) -> Result<impl IntoResponse, NftError> {
+    {
+        let mut rules = state.firewall_rules.write().await;
+        let pos = rules
+            .iter()
+            .position(|r| {
+                r.id == rule_id
+                    && (r.interface.is_none() || r.interface.as_deref() == Some(&interface_name))
+            })
+            .ok_or_else(|| NftError::NotFound(rule_id.to_string()))?;
+
+        rules.remove(pos);
+        state
+            .config_store
+            .save_firewall_rules(rules.clone())
+            .map_err(NftError::StorageError)?;
+    }
+
+    info!(
+        id = %rule_id,
+        interface = %interface_name,
+        "firewall: rule deleted"
+    );
+
+    let full_cfg = state
+        .config_store
+        .load()
+        .map_err(NftError::StorageError)?;
+
+    {
+        let rules = state.firewall_rules.read().await;
+        apply_rules(
+            &rules,
+            full_cfg.nat.as_ref(),
+            &full_cfg.firewall_aliases,
+            full_cfg.firewall_settings.as_ref(),
+        )
+        .await?;
+    }
+
+    info!(
+        id = %rule_id,
+        interface = %interface_name,
+        "firewall: nftables engine apply complete after delete"
+    );
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Handler: delete a firewall rule by UUID.

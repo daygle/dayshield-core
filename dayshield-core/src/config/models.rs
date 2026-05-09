@@ -1002,9 +1002,10 @@ fn default_suricata_mode() -> String {
 pub struct SuricataConfig {
     /// Whether the Suricata service should be running.
     pub enabled: bool,
-    /// Network interface Suricata listens on (e.g. `"eth0"`).
+    /// Network interfaces Suricata listens on (e.g. `["eth0", "eth1"]`).
+    /// Multiple interfaces are supported for monitoring multiple network segments.
     #[serde(default)]
-    pub interface: String,
+    pub interfaces: Vec<String>,
     /// Operating mode: `"ids"` (alert-only) or `"ips"` (inline drop).
     #[serde(default = "default_suricata_mode")]
     pub mode: String,

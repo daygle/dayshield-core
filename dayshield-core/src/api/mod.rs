@@ -135,6 +135,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/firewall/settings", get(firewall::get_settings))
         .route("/firewall/settings", put(firewall::update_settings))
         .route("/firewall/stats", get(firewall::get_stats))
+        // Per-interface firewall rules
+        .route("/interfaces/{name}/firewall/rules", get(firewall::list_interface_rules))
+        .route("/interfaces/{name}/firewall/rules", post(firewall::create_interface_rule))
+        .route("/interfaces/{name}/firewall/rules/{id}", delete(firewall::delete_interface_rule))
         // Firewall aliases
         .route("/firewall/aliases", get(aliases::list_aliases))
         .route("/firewall/aliases", post(aliases::create_alias))
@@ -157,12 +161,20 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/dhcp/static-leases/{id}", delete(dhcp::delete_static_lease))
         .route("/dhcp/leases", get(dhcp::list_active_leases))
         .route("/dhcp/pools", get(dhcp::list_pools))
+        // Per-interface DHCP
+        .route("/interfaces/{name}/dhcp/config", get(dhcp::get_interface_dhcp_config))
+        .route("/interfaces/{name}/dhcp/config", post(dhcp::update_interface_dhcp_config))
+        .route("/interfaces/{name}/dhcp/static-leases", get(dhcp::list_interface_static_leases))
+        .route("/interfaces/{name}/dhcp/static-leases", post(dhcp::create_interface_static_lease))
+        .route("/interfaces/{name}/dhcp/static-leases/{id}", delete(dhcp::delete_interface_static_lease))
         // Suricata IPS/IDS
         .route("/suricata/config", get(suricata::get_config))
         .route("/suricata/config", post(suricata::update_config))
         .route("/suricata/rulesets", get(suricata::list_rulesets))
         .route("/suricata/rulesets/{id}", put(suricata::update_ruleset))
         .route("/suricata/alerts", get(suricata::list_alerts))
+        .route("/interfaces/{name}/suricata", get(suricata::get_interface_suricata_config))
+        .route("/interfaces/{name}/suricata", post(suricata::update_interface_suricata_config))
         // CrowdSec
         .route("/crowdsec/config", get(crowdsec::get_config))
         .route("/crowdsec/config", post(crowdsec::update_config))

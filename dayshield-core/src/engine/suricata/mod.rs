@@ -101,6 +101,29 @@ pub fn generate_config(config: &SuricataConfig) -> String {
     out.push('\n');
 
     // ---------------------------------------------------------------------------
+    // inputs (af-packet capture interfaces)
+    // ---------------------------------------------------------------------------
+    out.push_str("inputs:\n");
+    if config.interfaces.is_empty() {
+        // Default: monitor eth0 if no interfaces specified
+        out.push_str("  - interface: eth0\n");
+        out.push_str("    af-packet:\n");
+        out.push_str("      use-mmap: yes\n");
+        out.push_str("      tpacket-v3: yes\n");
+    } else {
+        // Generate af-packet entries for each configured interface
+        for iface in &config.interfaces {
+            out.push_str("  - interface: ");
+            out.push_str(iface);
+            out.push('\n');
+            out.push_str("    af-packet:\n");
+            out.push_str("      use-mmap: yes\n");
+            out.push_str("      tpacket-v3: yes\n");
+        }
+    }
+    out.push('\n');
+
+    // ---------------------------------------------------------------------------
     // outputs
     // ---------------------------------------------------------------------------
     out.push_str("outputs:\n");

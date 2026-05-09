@@ -1,14 +1,19 @@
 //! DHCP endpoints.
 //!
-//! | Method | Path                          | Description                          |
-//! |--------|-------------------------------|--------------------------------------|
-//! | GET    | `/dhcp/config`                | Get flat DHCP configuration          |
-//! | POST   | `/dhcp/config`                | Update flat DHCP configuration       |
-//! | GET    | `/dhcp/static-leases`         | List all static MAC → IP bindings    |
-//! | POST   | `/dhcp/static-leases`         | Add a static lease                   |
-//! | DELETE | `/dhcp/static-leases/{id}`    | Remove a static lease by UUID        |
-//! | GET    | `/dhcp/leases`                | List active leases from dnsmasq      |
-//! | GET    | `/dhcp/pools`                 | List DHCP scopes as pool view        |
+//! | Method | Path                                      | Description                          |
+//! |--------|-------------------------------------------|--------------------------------------|
+//! | GET    | `/dhcp/config`                            | Get flat DHCP configuration          |
+//! | POST   | `/dhcp/config`                            | Update flat DHCP configuration       |
+//! | GET    | `/interfaces/{name}/dhcp/config`          | Get DHCP config for interface        |
+//! | POST   | `/interfaces/{name}/dhcp/config`          | Update DHCP config for interface     |
+//! | GET    | `/interfaces/{name}/dhcp/static-leases`   | List static leases for interface     |
+//! | POST   | `/interfaces/{name}/dhcp/static-leases`   | Add static lease for interface       |
+//! | DELETE | `/interfaces/{name}/dhcp/static-leases/{id}` | Delete static lease from interface |
+//! | GET    | `/dhcp/static-leases`                     | List all static MAC → IP bindings    |
+//! | POST   | `/dhcp/static-leases`                     | Add a static lease                   |
+//! | DELETE | `/dhcp/static-leases/{id}`                | Remove a static lease by UUID        |
+//! | GET    | `/dhcp/leases`                            | List active leases from dnsmasq      |
+//! | GET    | `/dhcp/pools`                             | List DHCP scopes as pool view        |
 
 use std::sync::Arc;
 
@@ -636,4 +641,376 @@ pub async fn list_pools(
         .collect();
 
     Ok(Json(serde_json::json!({ "success": true, "data": pools })))
+}
+
+// ---------------------------------------------------------------------------
+// GET /interfaces/{name}/dhcp/config
+// ---------------------------------------------------------------------------
+
+/// Get DHCP configuration for a specific interface.
+///
+/// Returns the DHCP configuration if the interface is enabled for DHCP,
+/// otherwise returns an empty/disabled config.
+pub async fn get_interface_dhcp_config(
+    State(state): State<Arc<AppState>>,
+    Path(interface_name): Path<String>,
+) -> Result<impl IntoResponse, DhcpError> {
+    let cfg = state
+        .config_store
+        .load_dhcp_config()
+        .map_err(DhcpError::StorageError)?
+        .unwrap_or_else(default_dhcp_cfg);
+
+    // If the global config is for a different interface, return empty config
+    if cfg.interface != interface_name && !cfg.interface.is_empty() {
+        let empty_response = DhcpFlatConfigResponse {
+            enabled: false,
+            interface: interface_name.clone(),
+            subnet: String::new(),
+            range_start: String::new(),
+            range_end: String::new(),
+            subnet_mask: String::new(),
+            gateway: String::new(),
+            dns_servers: vec![],
+            lease_time: 86400,
+            domain_name: String::new(),
+        };
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "data": empty_response
+        })));
+    }
+
+    info!(interface = %interface_name, "dhcp: loaded config for interface");
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": to_flat_response(&cfg)
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// POST /interfaces/{name}/dhcp/config
+// ---------------------------------------------------------------------------
+
+/// Update DHCP configuration for a specific interface.
+///
+/// This sets the interface field in the global DHCP config to the provided
+/// interface name, allowing per-interface DHCP management through the UI.
+pub async fn update_interface_dhcp_config(
+    State(state): State<Arc<AppState>>,
+    Path(interface_name): Path<String>,
+    Json(req): Json<UpdateDhcpFlatRequest>,
+) -> Result<impl IntoResponse, DhcpError> {
+    let mut cfg = state
+        .config_store
+        .load_dhcp_config()
+        .map_err(DhcpError::StorageError)?
+        .unwrap_or_else(default_dhcp_cfg);
+
+    // Set the interface name explicitly
+    cfg.interface = interface_name.clone();
+
+    // Apply top-level fields.
+    if let Some(v) = req.enabled    { cfg.enabled   = v; }
+
+    // Ensure at least one scope exists to hold the pool settings.
+    if cfg.scopes.is_empty() {
+        let subnet = req.subnet
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .or_else(|| {
+                req.range_start
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(derive_subnet_from_addr)
+            })
+            .or_else(|| {
+                req.gateway
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(derive_subnet_from_addr)
+            })
+            .unwrap_or_else(|| "192.168.1.0/24".to_string());
+
+        cfg.scopes.push(DhcpScope {
+            id: Uuid::new_v4(),
+            subnet,
+            pool_start: String::new(),
+            pool_end: String::new(),
+            gateway: None,
+            dns_servers: vec![],
+            lease_seconds: 86400,
+            domain_name: None,
+            reservations: vec![],
+        });
+    }
+
+    let scope = &mut cfg.scopes[0];
+    // Subnet can be updated explicitly; otherwise preserve the existing value.
+    if let Some(v) = req.subnet.filter(|s| !s.is_empty()) { scope.subnet = v; }
+    if let Some(v) = req.range_start  { scope.pool_start    = v; }
+    if let Some(v) = req.range_end    { scope.pool_end      = v; }
+    if let Some(v) = req.gateway      { scope.gateway       = if v.is_empty() { None } else { Some(v) }; }
+    if let Some(v) = req.dns_servers  { scope.dns_servers   = v; }
+    if let Some(v) = req.lease_time   { scope.lease_seconds = v; }
+    if let Some(v) = req.domain_name  { scope.domain_name   = if v.is_empty() { None } else { Some(v) }; }
+
+    // --- Validation --------------------------------------------------------
+
+    let scope = &cfg.scopes[0];
+
+    if !scope.pool_start.is_empty() && !is_valid_ip(&scope.pool_start) {
+        return Err(DhcpError::ValidationFailed(format!(
+            "invalid rangeStart: {}", scope.pool_start
+        )));
+    }
+    if !scope.pool_end.is_empty() && !is_valid_ip(&scope.pool_end) {
+        return Err(DhcpError::ValidationFailed(format!(
+            "invalid rangeEnd: {}", scope.pool_end
+        )));
+    }
+    if !scope.pool_start.is_empty()
+        && !scope.pool_end.is_empty()
+        && !is_valid_ipv4_range(&scope.pool_start, &scope.pool_end)
+    {
+        return Err(DhcpError::ValidationFailed(format!(
+            "rangeStart {} must be ≤ rangeEnd {}", scope.pool_start, scope.pool_end
+        )));
+    }
+    if let Some(gw) = &scope.gateway {
+        if !is_valid_ip(gw) {
+            return Err(DhcpError::ValidationFailed(format!("invalid gateway: {gw}")));
+        }
+    }
+    for dns in &scope.dns_servers {
+        if !is_valid_ip(dns) {
+            return Err(DhcpError::ValidationFailed(format!("invalid DNS server: {dns}")));
+        }
+    }
+
+    info!(
+        enabled = cfg.enabled,
+        interface = %cfg.interface,
+        "dhcp: received update config request for interface"
+    );
+
+    // --- Persist -----------------------------------------------------------
+
+    state
+        .config_store
+        .save_dhcp_config(cfg.clone())
+        .map_err(DhcpError::StorageError)?;
+
+    info!("dhcp: config persisted for interface");
+
+    // --- Apply -------------------------------------------------------------
+
+    apply_config(&cfg)
+        .await
+        .map_err(|e| DhcpError::EngineError(e.to_string()))?;
+
+    info!("dhcp: engine apply complete for interface");
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": to_flat_response(&cfg)
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// GET /interfaces/{name}/dhcp/static-leases
+// ---------------------------------------------------------------------------
+
+/// List static MAC → IP reservations for a specific interface.
+///
+/// Returns all reservations from scopes belonging to this interface.
+pub async fn list_interface_static_leases(
+    State(state): State<Arc<AppState>>,
+    Path(interface_name): Path<String>,
+) -> Result<impl IntoResponse, DhcpError> {
+    let cfg = state
+        .config_store
+        .load_dhcp_config()
+        .map_err(DhcpError::StorageError)?
+        .unwrap_or_else(default_dhcp_cfg);
+
+    // Only return leases if this config is for the requested interface
+    let leases: Vec<DhcpStaticLeaseResponse> = if cfg.interface == interface_name {
+        cfg.scopes
+            .iter()
+            .flat_map(|s| s.reservations.iter())
+            .map(|r| DhcpStaticLeaseResponse {
+                id: r.id.to_string(),
+                mac: r.mac_address.clone(),
+                ip_address: r.ip_address.clone(),
+                hostname: r.hostname.clone().unwrap_or_default(),
+                description: r.description.clone(),
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": leases
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// POST /interfaces/{name}/dhcp/static-leases
+// ---------------------------------------------------------------------------
+
+/// Add a static MAC → IP reservation for a specific interface.
+///
+/// Only allows creating leases for the interface specified in the URL.
+/// Appends to the first scope of the interface's DHCP config.
+pub async fn create_interface_static_lease(
+    State(state): State<Arc<AppState>>,
+    Path(interface_name): Path<String>,
+    Json(req): Json<CreateStaticLeaseRequest>,
+) -> Result<impl IntoResponse, DhcpError> {
+    // --- Validation --------------------------------------------------------
+
+    if !is_valid_mac(&req.mac) {
+        warn!(mac = %req.mac, "dhcp: invalid MAC in static lease");
+        return Err(DhcpError::ValidationFailed(format!(
+            "invalid MAC address: {} (expected aa:bb:cc:dd:ee:ff)",
+            req.mac
+        )));
+    }
+    if !is_valid_ip(&req.ip_address) {
+        return Err(DhcpError::ValidationFailed(format!(
+            "invalid IP address: {}",
+            req.ip_address
+        )));
+    }
+
+    let mut cfg = state
+        .config_store
+        .load_dhcp_config()
+        .map_err(DhcpError::StorageError)?
+        .unwrap_or_else(default_dhcp_cfg);
+
+    // Check that this config is for the requested interface
+    if cfg.interface != interface_name {
+        // If interface is empty, set it; otherwise reject
+        if cfg.interface.is_empty() {
+            cfg.interface = interface_name.clone();
+        } else {
+            return Err(DhcpError::ValidationFailed(format!(
+                "DHCP config is for interface {}, not {}",
+                cfg.interface, interface_name
+            )));
+        }
+    }
+
+    // Ensure at least one scope
+    if cfg.scopes.is_empty() {
+        cfg.scopes.push(DhcpScope {
+            id: Uuid::new_v4(),
+            subnet: derive_subnet_from_addr(&req.ip_address),
+            pool_start: String::new(),
+            pool_end: String::new(),
+            gateway: None,
+            dns_servers: vec![],
+            lease_seconds: 86400,
+            domain_name: None,
+            reservations: vec![],
+        });
+    }
+
+    let reservation = DhcpReservation {
+        id: Uuid::new_v4(),
+        hostname: req.hostname.filter(|h| !h.is_empty()),
+        mac_address: req.mac.clone(),
+        ip_address: req.ip_address.clone(),
+        description: req.description.unwrap_or_default(),
+    };
+
+    let resp = DhcpStaticLeaseResponse {
+        id: reservation.id.to_string(),
+        mac: reservation.mac_address.clone(),
+        ip_address: reservation.ip_address.clone(),
+        hostname: reservation.hostname.clone().unwrap_or_default(),
+        description: reservation.description.clone(),
+    };
+
+    cfg.scopes[0].reservations.push(reservation);
+
+    state
+        .config_store
+        .save_dhcp_config(cfg.clone())
+        .map_err(DhcpError::StorageError)?;
+
+    apply_config(&cfg)
+        .await
+        .map_err(|e| DhcpError::EngineError(e.to_string()))?;
+
+    info!(mac = %req.mac, ip = %req.ip_address, interface = %interface_name, "dhcp: static lease created for interface");
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "success": true, "data": resp })),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /interfaces/{name}/dhcp/static-leases/{id}
+// ---------------------------------------------------------------------------
+
+/// Remove a static reservation by UUID for a specific interface.
+///
+/// Only removes leases from the specified interface's DHCP config.
+pub async fn delete_interface_static_lease(
+    State(state): State<Arc<AppState>>,
+    Path((interface_name, id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, DhcpError> {
+    let target = id.parse::<Uuid>().map_err(|_| {
+        DhcpError::ValidationFailed(format!("invalid lease ID: {id}"))
+    })?;
+
+    let mut cfg = state
+        .config_store
+        .load_dhcp_config()
+        .map_err(DhcpError::StorageError)?
+        .unwrap_or_else(default_dhcp_cfg);
+
+    // Check that this config is for the requested interface
+    if cfg.interface != interface_name {
+        return Err(DhcpError::ValidationFailed(format!(
+            "DHCP config is for interface {}, not {}",
+            cfg.interface, interface_name
+        )));
+    }
+
+    let mut found = false;
+    for scope in &mut cfg.scopes {
+        let before = scope.reservations.len();
+        scope.reservations.retain(|r| r.id != target);
+        if scope.reservations.len() < before {
+            found = true;
+        }
+    }
+
+    if !found {
+        return Err(DhcpError::ValidationFailed(format!(
+            "static lease {id} not found in interface {interface_name}"
+        )));
+    }
+
+    state
+        .config_store
+        .save_dhcp_config(cfg.clone())
+        .map_err(DhcpError::StorageError)?;
+
+    apply_config(&cfg)
+        .await
+        .map_err(|e| DhcpError::EngineError(e.to_string()))?;
+
+    info!(%id, interface = %interface_name, "dhcp: static lease deleted from interface");
+
+    Ok(StatusCode::NO_CONTENT)
 }

@@ -71,6 +71,14 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Initialize the session signing key (creates it if missing or corrupted).
+    // This must happen before the router is created so that the login endpoint
+    // will have a valid key ready to use.
+    if let Err(e) = auth::session::load_or_create_key(std::path::Path::new(auth::session::DEFAULT_KEY_PATH)) {
+        warn!("failed to initialize session key: {}", e);
+        // Don't exit - the key will be created lazily on first login attempt
+    }
+
     // Build shared application state.
     let (app_state_inner, notify_rx) = AppState::new();
     let app_state = Arc::new(app_state_inner);

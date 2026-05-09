@@ -62,16 +62,18 @@ pub struct SessionClaims {
 /// yet exist.
 ///
 /// The key file is created with mode `0o600` (owner-read/write only).
+/// If the file exists but is empty or corrupted (< 32 bytes), it is recreated.
 pub fn load_or_create_key(path: &Path) -> Result<Vec<u8>, AuthError> {
+    // If file exists and is valid, load it
     if path.exists() {
         let bytes = fs::read(path)
             .map_err(|e| AuthError::StorageError(format!("read key: {e}")))?;
-        if bytes.len() < KEY_BYTES {
-            return Err(AuthError::StorageError(
-                "session key file is too short".into(),
-            ));
+        if bytes.len() == KEY_BYTES {
+            return Ok(bytes);
         }
-        return Ok(bytes);
+        // File exists but is too short (empty or corrupted) - recreate it
+        // This can happen if a placeholder empty file was created by the installer
+        tracing::warn!("session key file is corrupted ({} bytes), recreating", bytes.len());
     }
 
     // Generate a new random key.
@@ -82,6 +84,12 @@ pub fn load_or_create_key(path: &Path) -> Result<Vec<u8>, AuthError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| AuthError::StorageError(format!("create key dir: {e}")))?;
+    }
+
+    // If file exists but is invalid, delete it first
+    if path.exists() {
+        fs::remove_file(path)
+            .map_err(|e| AuthError::StorageError(format!("remove corrupted key: {e}")))?;
     }
 
     // Write with restricted permissions.

@@ -48,7 +48,7 @@ rand = "0.10"
 
 # Authentication subsystem
 argon2 = "0.5"
-jsonwebtoken = "10"
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 
 # Email / SMTP notifications
 lettre = { version = "0.11", features = ["smtp-transport", "rustls-tls", "hostname", "builder"], default-features = false }

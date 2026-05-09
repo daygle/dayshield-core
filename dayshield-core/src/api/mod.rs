@@ -196,6 +196,19 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/wireguard/interfaces/{name}/generate-keys",
             post(wireguard::generate_keys),
         )
+        // Per-WireGuard-interface firewall rules
+        .route(
+            "/wireguard/interfaces/{name}/firewall/rules",
+            get(firewall::list_interface_rules),
+        )
+        .route(
+            "/wireguard/interfaces/{name}/firewall/rules",
+            post(firewall::create_interface_rule),
+        )
+        .route(
+            "/wireguard/interfaces/{name}/firewall/rules/{id}",
+            delete(firewall::delete_interface_rule),
+        )
         // ACME / TLS certificates
         .route("/acme/config", get(acme::get_config))
         .route("/acme/config", post(acme::update_config))

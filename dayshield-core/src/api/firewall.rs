@@ -13,9 +13,15 @@
 //!
 //! # Per-interface endpoints
 //!
-//! - `GET /interfaces/{name}/firewall/rules` — get rules for a specific interface
-//! - `POST /interfaces/{name}/firewall/rules` — create a rule for a specific interface
+//! - `GET /interfaces/{name}/firewall/rules` — get rules for a physical interface
+//! - `POST /interfaces/{name}/firewall/rules` — create a rule for a physical interface
 //! - `DELETE /interfaces/{name}/firewall/rules/{id}` — delete a rule from an interface
+//!
+//! # Per-WireGuard-interface endpoints
+//!
+//! - `GET /wireguard/interfaces/{name}/firewall/rules` — get rules for a WireGuard interface
+//! - `POST /wireguard/interfaces/{name}/firewall/rules` — create a rule for a WireGuard interface
+//! - `DELETE /wireguard/interfaces/{name}/firewall/rules/{id}` — delete a rule from a WireGuard interface
 
 use std::sync::Arc;
 

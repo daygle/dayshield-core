@@ -20,6 +20,7 @@
 //! # Public routes (no token required)
 //!
 //! - `POST /auth/login`
+//! - `GET  /auth/status`
 //! - `GET  /system/status`
 //! - `GET  /installer/*`
 
@@ -51,6 +52,7 @@ use crate::auth::{
 /// strings, after normalising to lowercase).
 const PUBLIC_PATHS: &[&str] = &[
     "/auth/login",
+    "/auth/status",
     "/system/status",
     "/installer/",
 ];

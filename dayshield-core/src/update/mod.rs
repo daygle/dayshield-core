@@ -299,15 +299,38 @@ async fn ensure_origin(repo_path: &str, remote_url: &str) -> Result<()> {
     Ok(())
 }
 
+async fn remote_url_for_check(repo_path: &str, configured_url: &str) -> String {
+    match run_git(repo_path, &["remote", "get-url", "origin"]).await {
+        Ok(url) if !url.trim().is_empty() => url,
+        _ => configured_url.to_string(),
+    }
+}
+
+async fn remote_branch_head(repo_path: &str, remote_url: &str, branch: &str) -> Result<String> {
+    let out = run_git(repo_path, &["ls-remote", "--heads", remote_url, branch]).await?;
+    let line = out
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("no remote head found for branch {branch}"))?;
+
+    let sha = line
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("invalid ls-remote output for branch {branch}"))?;
+
+    if sha.is_empty() {
+        anyhow::bail!("invalid remote commit for branch {branch}");
+    }
+
+    Ok(sha.to_string())
+}
+
 async fn inspect_repo(repo_path: &str, remote_url: &str, branch: &str) -> Result<(String, String, bool)> {
     run_git(repo_path, &["rev-parse", "--is-inside-work-tree"]).await?;
-    ensure_origin(repo_path, remote_url).await?;
-    run_git(repo_path, &["fetch", "--quiet", "origin", branch]).await?;
-
     let current = run_git(repo_path, &["rev-parse", "HEAD"]).await?;
-    let remote_ref = format!("origin/{branch}");
-    let remote = run_git(repo_path, &["rev-parse", &remote_ref]).await?;
     let dirty = !run_git(repo_path, &["status", "--porcelain"]).await?.trim().is_empty();
+    let effective_remote = remote_url_for_check(repo_path, remote_url).await;
+    let remote = remote_branch_head(repo_path, &effective_remote, branch).await?;
 
     Ok((current, remote, dirty))
 }
@@ -418,6 +441,23 @@ pub async fn apply_updates(state: &AppState, component: UpdateComponent) -> Resu
         let (repo_path, remote_url, branch) = component_config(&settings, comp);
         let entry = ensure_component_state(&mut state_file, comp);
 
+        if let Err(err) = ensure_repo_writable(&repo_path) {
+            let msg = format!(
+                "{}: repository is read-only; apply requires writable repo ({err})",
+                comp.as_str()
+            );
+            entry.last_error = Some(msg.clone());
+            save_state(state, &state_file)?;
+            let status = get_status(state).await;
+            return Ok(UpdatesActionResult {
+                operation: "apply".to_string(),
+                success: false,
+                message: "update apply failed".to_string(),
+                details: vec![msg],
+                status,
+            });
+        }
+
         match inspect_repo(&repo_path, &remote_url, &branch).await {
             Ok((current, remote, _dirty)) => {
                 if current == remote {
@@ -428,7 +468,38 @@ pub async fn apply_updates(state: &AppState, component: UpdateComponent) -> Resu
                 entry.rollback_commit = Some(current.clone());
                 entry.last_error = None;
 
-                let apply_result = run_git(&repo_path, &["reset", "--hard", &remote]).await;
+                // Fetch the branch before resetting so target commit objects exist locally.
+                if let Err(err) = ensure_origin(&repo_path, &remote_url).await {
+                    let msg = format!("{}: failed to configure origin ({err})", comp.as_str());
+                    entry.last_error = Some(msg.clone());
+                    save_state(state, &state_file)?;
+                    let status = get_status(state).await;
+                    return Ok(UpdatesActionResult {
+                        operation: "apply".to_string(),
+                        success: false,
+                        message: "update apply failed".to_string(),
+                        details: vec![msg],
+                        status,
+                    });
+                }
+                if let Err(err) = run_git(&repo_path, &["fetch", "--quiet", "origin", &branch]).await {
+                    let msg = format!("{}: failed to fetch branch {} ({err})", comp.as_str(), branch);
+                    entry.last_error = Some(msg.clone());
+                    save_state(state, &state_file)?;
+                    let status = get_status(state).await;
+                    return Ok(UpdatesActionResult {
+                        operation: "apply".to_string(),
+                        success: false,
+                        message: "update apply failed".to_string(),
+                        details: vec![msg],
+                        status,
+                    });
+                }
+
+                let target_ref = format!("origin/{branch}");
+                let target_commit = run_git(&repo_path, &["rev-parse", &target_ref]).await?;
+
+                let apply_result = run_git(&repo_path, &["reset", "--hard", &target_commit]).await;
                 if let Err(err) = apply_result {
                     let _ = run_git(&repo_path, &["reset", "--hard", &current]).await;
                     let msg = format!("{}: apply failed, rolled back ({err})", comp.as_str());
@@ -445,13 +516,13 @@ pub async fn apply_updates(state: &AppState, component: UpdateComponent) -> Resu
                 }
 
                 let head = run_git(&repo_path, &["rev-parse", "HEAD"]).await?;
-                if head != remote {
+                if head != target_commit {
                     let _ = run_git(&repo_path, &["reset", "--hard", &current]).await;
                     let msg = format!(
                         "{}: validation failed (HEAD {} does not match target {})",
                         comp.as_str(),
                         head,
-                        remote
+                        target_commit
                     );
                     entry.last_error = Some(msg.clone());
                     save_state(state, &state_file)?;
@@ -517,6 +588,23 @@ pub async fn rollback_updates(state: &AppState, component: UpdateComponent) -> R
     for comp in RepoComponent::from_update_component(component) {
         let (repo_path, _remote_url, _branch) = component_config(&settings, comp);
         let entry = ensure_component_state(&mut state_file, comp);
+
+        if let Err(err) = ensure_repo_writable(&repo_path) {
+            let msg = format!(
+                "{}: repository is read-only; rollback requires writable repo ({err})",
+                comp.as_str()
+            );
+            entry.last_error = Some(msg.clone());
+            save_state(state, &state_file)?;
+            let status = get_status(state).await;
+            return Ok(UpdatesActionResult {
+                operation: "rollback".to_string(),
+                success: false,
+                message: "rollback failed".to_string(),
+                details: vec![msg],
+                status,
+            });
+        }
 
         let target = match &entry.rollback_commit {
             Some(c) => c.clone(),
@@ -628,6 +716,29 @@ pub async fn validate_updates(state: &AppState, component: UpdateComponent) -> R
 
 fn short_sha(commit: &str) -> String {
     commit.chars().take(8).collect()
+}
+
+fn ensure_repo_writable(repo_path: &str) -> Result<()> {
+    use std::io::Write;
+
+    let git_dir = Path::new(repo_path).join(".git");
+    if !git_dir.exists() {
+        anyhow::bail!("missing git directory: {}", git_dir.display());
+    }
+
+    let probe = git_dir.join(".dayshield-write-probe");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&probe)
+        .with_context(|| format!("repository is not writable: {}", repo_path))?;
+
+    file.write_all(b"probe")
+        .with_context(|| format!("repository is not writable: {}", repo_path))?;
+
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
 }
 
 pub async fn start_update_checker(state: std::sync::Arc<AppState>) {

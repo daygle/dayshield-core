@@ -7,7 +7,9 @@
 //! paths the middleware:
 //!
 //! 1. Extracts the bearer token from the `Authorization` header
-//!    (`Authorization: Bearer <token>`) or from the `session` cookie.
+//!    (`Authorization: Bearer <token>`), from the `session` cookie, or from a
+//!    `token` URL query parameter (used by browser WebSocket clients that
+//!    cannot set custom headers).
 //! 2. Validates the token signature and expiry using the HMAC-SHA256 session
 //!    key stored in `/etc/dayshield/session.key`.
 //! 3. On success, inserts an [`AuthenticatedUser`] extension into the request
@@ -82,10 +84,30 @@ fn token_from_cookie(req: &Request) -> Option<String> {
     None
 }
 
+/// Try to extract a token from the URL query string (`?token=<jwt>`).
+fn token_from_query(req: &Request) -> Option<String> {
+    let query = req.uri().query()?;
+    for pair in query.split('&') {
+        let mut it = pair.splitn(2, '=');
+        let key = it.next()?.trim();
+        if key != "token" {
+            continue;
+        }
+
+        let value = it.next().unwrap_or("").trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
 /// Extract a token from the request, preferring the `Authorization` header
-/// over the `session` cookie.
+/// over the `session` cookie, and then URL query parameter.
 fn extract_token(req: &Request) -> Option<String> {
-    token_from_header(req).or_else(|| token_from_cookie(req))
+    token_from_header(req)
+        .or_else(|| token_from_cookie(req))
+        .or_else(|| token_from_query(req))
 }
 
 // ---------------------------------------------------------------------------
@@ -289,6 +311,34 @@ mod tests {
                 Request::builder()
                     .uri("/protected")
                     .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn protected_route_accessible_with_query_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("session.key");
+
+        // Pre-create key so we can use it to sign a token.
+        let key = crate::auth::session::load_or_create_key(&key_path).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let token = crate::auth::session::create_token("admin", &key, now).unwrap();
+
+        let app = build_app(&key_path);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/protected?token={token}"))
                     .body(Body::empty())
                     .unwrap(),
             )

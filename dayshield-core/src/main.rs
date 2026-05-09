@@ -1,8 +1,7 @@
 //! DayShield Core - backend orchestrator entry point.
 //!
 //! Initialises logging, builds the shared application state, wires up the
-//! Axum router and starts the HTTP server on 0.0.0.0:3000 by default
-//! (overridden to 0.0.0.0:8443 in production via DAYSHIELD_PORT=8443 in the service unit).
+//! Axum router and starts the HTTP server on 0.0.0.0:8443 by default.
 //
 // Suppress dead-code warnings for the many placeholder engine functions and
 // config types that are defined here as stubs and will be wired up in future
@@ -99,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn default_bind_addr() -> &'static str {
-    "0.0.0.0:3000"
+    "0.0.0.0:8443"
 }
 
 fn resolve_bind_addr() -> String {

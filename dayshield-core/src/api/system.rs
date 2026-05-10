@@ -5,13 +5,15 @@
 //! - `PUT  /system/config`   — update host-level settings
 //! - `POST /system/reboot`   — schedule an immediate systemctl reboot
 //! - `POST /system/shutdown` — schedule an immediate systemctl poweroff
-//! - `GET  /system/updates/status`   — get update status for core/ui repos
+//! - `GET  /system/updates/status`   — get update status for core/ui/rootfs repos
 //! - `GET  /system/updates/settings` — get update settings
 //! - `PUT  /system/updates/settings` — update settings (interval/reboot policy/repos)
 //! - `POST /system/updates/check`    — force immediate update check
-//! - `POST /system/updates/apply`    — apply updates from configured GitHub repos
+//! - `POST /system/updates/apply`    — apply updates from configured Git repos
 //! - `POST /system/updates/rollback` — rollback to last known commit
 //! - `POST /system/updates/validate` — validate applied updates
+//! - `POST /system/updates/appliance-rebuild-complete` — clear pending appliance rebuild status
+//! - `POST /system/updates/rootfs-live-rollback` — rollback rootfs live update from latest backup snapshot
 
 use std::sync::Arc;
 
@@ -167,13 +169,16 @@ pub async fn shutdown(
 pub struct UpdateActionRequest {
     #[serde(default = "default_update_component")]
     pub component: UpdateComponent,
+    /// If true, allows applying updates to only a subset of components even when multiple have available updates
+    #[serde(default)]
+    pub force_partial_apply: bool,
 }
 
 fn default_update_component() -> UpdateComponent {
     UpdateComponent::Both
 }
 
-/// Handler: return software-update status for core and UI repositories.
+/// Handler: return software-update status for core, UI, and rootfs repositories.
 pub async fn get_updates_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, SystemApiError> {
@@ -211,7 +216,7 @@ pub async fn apply_updates(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateActionRequest>,
 ) -> Result<impl IntoResponse, SystemApiError> {
-    let result = update::apply_updates(&state, req.component)
+    let result = update::apply_updates(&state, req.component, req.force_partial_apply)
         .await
         .map_err(SystemApiError::StorageError)?;
     Ok(Json(result))
@@ -222,7 +227,7 @@ pub async fn rollback_updates(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateActionRequest>,
 ) -> Result<impl IntoResponse, SystemApiError> {
-    let result = update::rollback_updates(&state, req.component)
+    let result = update::rollback_updates(&state, req.component, req.force_partial_apply)
         .await
         .map_err(SystemApiError::StorageError)?;
     Ok(Json(result))
@@ -233,7 +238,25 @@ pub async fn validate_updates(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateActionRequest>,
 ) -> Result<impl IntoResponse, SystemApiError> {
-    let result = update::validate_updates(&state, req.component)
+    let result = update::validate_updates(&state, req.component, req.force_partial_apply)
+        .await
+        .map_err(SystemApiError::StorageError)?;
+    Ok(Json(result))
+}
+
+/// Handler: mark the appliance rebuild workflow as completed after rebuilding artifacts.
+pub async fn mark_appliance_rebuild_complete(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, SystemApiError> {
+    update::mark_appliance_rebuild_complete(&state).map_err(SystemApiError::StorageError)?;
+    Ok(Json(update::get_status(&state).await))
+}
+
+/// Handler: rollback rootfs live update using the latest snapshot backup.
+pub async fn rollback_rootfs_live_update(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, SystemApiError> {
+    let result = update::rollback_rootfs_live_update(&state)
         .await
         .map_err(SystemApiError::StorageError)?;
     Ok(Json(result))

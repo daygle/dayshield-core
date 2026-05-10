@@ -39,14 +39,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: daygle/dayshield-ui
-          path: dayshield-ui
+          path: deps/dayshield-ui
           ref: main
 
       - name: Checkout dayshield-rootfs
         uses: actions/checkout@v4
         with:
           repository: daygle/dayshield-rootfs
-          path: dayshield-rootfs
+          path: deps/dayshield-rootfs
           ref: main
 
       # Build core binary
@@ -75,14 +75,14 @@ jobs:
 
       - name: Build UI
         run: |
-          cd dayshield-ui
+          cd deps/dayshield-ui
           npm ci --no-audit --no-fund
           npm run build
 
       - name: Package UI artifact
         run: |
           mkdir -p release-artifacts
-          tar --zstd -cf release-artifacts/ui-${{ steps.version.outputs.VERSION }}.tar.zst -C dayshield-ui dist/
+          tar --zstd -cf release-artifacts/ui-${{ steps.version.outputs.VERSION }}.tar.zst -C deps/dayshield-ui dist/
           ls -lh release-artifacts/ui-*.tar.zst
 
       # Build rootfs bundle
@@ -93,7 +93,7 @@ jobs:
 
       - name: Build rootfs bundle
         run: |
-          cd dayshield-rootfs
+          cd deps/dayshield-rootfs
           # Build rootfs with live-update support
           ./scripts/build-rootfs.sh --output ../release-artifacts/rootfs-build
           cd ..

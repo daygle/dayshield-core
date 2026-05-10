@@ -5,6 +5,7 @@ mod admin;
 mod aliases;
 mod auth;
 mod backup;
+mod cloudflared;
 mod crowdsec;
 mod dashboard;
 mod dhcp;
@@ -257,6 +258,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/ntp/config", post(ntp::update_config))
         .route("/ntp/status", get(ntp::get_status))
         .route("/ntp/resync", post(ntp::resync))
+        // Cloudflared
+        .route("/cloudflared/config", get(cloudflared::get_config))
+        .route("/cloudflared/config", post(cloudflared::update_config))
+        .route("/cloudflared/status", get(cloudflared::get_status))
+        .route("/cloudflared/restart", post(cloudflared::restart_service))
+        .route("/cloudflared/logs", get(cloudflared::get_logs))
         // NAT
         .route("/nat/config", get(nat::get_config))
         .route("/nat/config", put(nat::put_config))

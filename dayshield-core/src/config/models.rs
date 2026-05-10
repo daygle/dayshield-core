@@ -1609,6 +1609,89 @@ pub fn validate_ntp_config(config: &NtpConfig) -> Result<(), String> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Cloudflared
+// ---------------------------------------------------------------------------
+
+fn default_cloudflared_metrics_address() -> String {
+    "127.0.0.1:60123".to_string()
+}
+
+fn default_cloudflared_log_level() -> String {
+    "info".to_string()
+}
+
+/// Single Cloudflare Tunnel ingress mapping.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudflaredIngressRule {
+    pub hostname: String,
+    pub service: String,
+}
+
+/// Configuration for the cloudflared outbound tunnel integration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudflaredConfig {
+    pub enabled: bool,
+    pub tunnel_name: String,
+    pub tunnel_token: String,
+    #[serde(default = "default_cloudflared_metrics_address")]
+    pub metrics_address: String,
+    #[serde(default = "default_cloudflared_log_level")]
+    pub log_level: String,
+    #[serde(default)]
+    pub ingress: Vec<CloudflaredIngressRule>,
+}
+
+impl Default for CloudflaredConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            tunnel_name: String::new(),
+            tunnel_token: String::new(),
+            metrics_address: default_cloudflared_metrics_address(),
+            log_level: default_cloudflared_log_level(),
+            ingress: vec![],
+        }
+    }
+}
+
+pub fn validate_cloudflared_config(config: &CloudflaredConfig) -> Result<(), String> {
+    if !config.enabled {
+        return Ok(());
+    }
+
+    if config.tunnel_name.trim().is_empty() {
+        return Err("cloudflared tunnel_name must not be empty".into());
+    }
+
+    if config.tunnel_token.trim().is_empty() {
+        return Err("cloudflared tunnel_token must not be empty when enabled".into());
+    }
+
+    if config.ingress.is_empty() {
+        return Err("cloudflared ingress must contain at least one route when enabled".into());
+    }
+
+    for rule in &config.ingress {
+        if !is_valid_domain(&rule.hostname) {
+            return Err(format!(
+                "cloudflared ingress hostname {:?} is not a valid domain",
+                rule.hostname
+            ));
+        }
+        if !validate_url(&rule.service) {
+            return Err(format!(
+                "cloudflared ingress service {:?} is not a valid HTTP/HTTPS URL",
+                rule.service
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Administrator account security policy.
 ///
 /// Controls session lifetime, login lockout behaviour, and password complexity
@@ -1692,6 +1775,9 @@ pub struct SystemConfig {
     /// NTP client/server configuration.
     #[serde(default)]
     pub ntp: Option<NtpConfig>,
+    /// Cloudflare Tunnel configuration.
+    #[serde(default)]
+    pub cloudflared: Option<CloudflaredConfig>,
     /// Named upstream gateways.
     #[serde(default)]
     pub gateways: Vec<Gateway>,

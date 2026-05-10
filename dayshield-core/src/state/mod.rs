@@ -25,6 +25,7 @@ pub const SVC_DHCP: &str = "dhcp";
 pub const SVC_VPN: &str = "vpn";
 pub const SVC_CROWDSEC: &str = "crowdsec";
 pub const SVC_ACME: &str = "acme";
+pub const SVC_CLOUDFLARED: &str = "cloudflared";
 
 /// Shared application state.
 ///
@@ -70,6 +71,7 @@ impl AppState {
             SVC_VPN,
             SVC_CROWDSEC,
             SVC_ACME,
+            SVC_CLOUDFLARED,
         ] {
             services.insert(name.to_string(), false);
         }

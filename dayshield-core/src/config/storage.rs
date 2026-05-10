@@ -29,7 +29,7 @@ use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
 use super::models::{
-    AcmeConfig, AdminSecuritySettings, CrowdSecConfig, DhcpConfig, DnsConfig, DnsDomainOverride,
+    AcmeConfig, AdminSecuritySettings, CloudflaredConfig, CrowdSecConfig, DhcpConfig, DnsConfig, DnsDomainOverride,
     DnsHostOverride, FirewallAlias, FirewallRule, FirewallSettings, Gateway, Interface, NatConfig,
     NotifyConfig, NtpConfig, SuricataConfig, SystemConfig, WireGuardInterface,
 };
@@ -701,6 +701,14 @@ impl ConfigStore {
             }
         }
 
+        // Cloudflared config validation.
+        if let Some(cloudflared) = &config.cloudflared {
+            use crate::config::models::validate_cloudflared_config;
+            if let Err(msg) = validate_cloudflared_config(cloudflared) {
+                anyhow::bail!("Cloudflared config is invalid: {msg}");
+            }
+        }
+
         Ok(())
     }
 
@@ -934,6 +942,18 @@ impl ConfigStore {
     pub fn save_ntp_config(&self, ntp: NtpConfig) -> Result<()> {
         let mut config = self.load()?;
         config.ntp = Some(ntp);
+        self.save_with_rollback(&config)
+    }
+
+    /// Return the Cloudflared configuration from the persisted config.
+    pub fn load_cloudflared_config(&self) -> Result<Option<CloudflaredConfig>> {
+        Ok(self.load()?.cloudflared)
+    }
+
+    /// Atomically replace the Cloudflared configuration in the persisted config.
+    pub fn save_cloudflared_config(&self, cloudflared: CloudflaredConfig) -> Result<()> {
+        let mut config = self.load()?;
+        config.cloudflared = Some(cloudflared);
         self.save_with_rollback(&config)
     }
 

@@ -786,15 +786,17 @@ pub async fn apply_updates(state: &AppState, component: UpdateComponent) -> Resu
 
     for (comp, current, remote) in baselines {
         let (repo_path, remote_url, branch) = component_config(&settings, comp);
-        let entry = ensure_component_state(&mut state_file, comp);
 
         if current == remote {
             details.push(format!("{}: already up to date", comp.as_str()));
             continue;
         }
 
-        entry.rollback_commit = Some(current.clone());
-        entry.last_error = None;
+        {
+            let entry = ensure_component_state(&mut state_file, comp);
+            entry.rollback_commit = Some(current.clone());
+            entry.last_error = None;
+        }
 
         info!(component = %comp.as_str(), branch = %branch, "updates: applying component");
 
@@ -818,7 +820,10 @@ pub async fn apply_updates(state: &AppState, component: UpdateComponent) -> Resu
 
         if let Err(err) = apply_result {
             let msg = format!("{}: apply failed ({err})", comp.as_str());
-            entry.last_error = Some(msg.clone());
+            {
+                let entry = ensure_component_state(&mut state_file, comp);
+                entry.last_error = Some(msg.clone());
+            }
             warn!(component = %comp.as_str(), error = %err, "updates: apply failed; attempting transactional rollback");
 
             // Roll back current component first.
@@ -903,14 +908,16 @@ pub async fn rollback_updates(state: &AppState, component: UpdateComponent) -> R
 
     for comp in RepoComponent::from_update_component(component) {
         let (repo_path, _remote_url, _branch) = component_config(&settings, comp);
-        let entry = ensure_component_state(&mut state_file, comp);
 
         if let Err(err) = ensure_repo_writable(&repo_path) {
             let msg = format!(
                 "{}: repository is read-only; rollback requires writable repo ({err})",
                 comp.as_str()
             );
-            entry.last_error = Some(msg.clone());
+            {
+                let entry = ensure_component_state(&mut state_file, comp);
+                entry.last_error = Some(msg.clone());
+            }
             save_state(state, &state_file)?;
             let status = get_status(state).await;
             return Ok(UpdatesActionResult {
@@ -922,11 +929,14 @@ pub async fn rollback_updates(state: &AppState, component: UpdateComponent) -> R
             });
         }
 
-        let target = match &entry.rollback_commit {
-            Some(c) => c.clone(),
-            None => {
-                details.push(format!("{}: no rollback commit available", comp.as_str()));
-                continue;
+        let target = {
+            let entry = ensure_component_state(&mut state_file, comp);
+            match &entry.rollback_commit {
+                Some(c) => c.clone(),
+                None => {
+                    details.push(format!("{}: no rollback commit available", comp.as_str()));
+                    continue;
+                }
             }
         };
 
@@ -943,7 +953,10 @@ pub async fn rollback_updates(state: &AppState, component: UpdateComponent) -> R
 
         if let Err(err) = result {
             let msg = format!("{}: rollback failed ({err})", comp.as_str());
-            entry.last_error = Some(msg.clone());
+            {
+                let entry = ensure_component_state(&mut state_file, comp);
+                entry.last_error = Some(msg.clone());
+            }
             save_state(state, &state_file)?;
             let status = get_status(state).await;
             return Ok(UpdatesActionResult {
@@ -955,8 +968,11 @@ pub async fn rollback_updates(state: &AppState, component: UpdateComponent) -> R
             });
         }
 
-        entry.rollback_commit = Some(current);
-        entry.last_error = None;
+        {
+            let entry = ensure_component_state(&mut state_file, comp);
+            entry.rollback_commit = Some(current);
+            entry.last_error = None;
+        }
     }
 
     state_file.last_applied_at = Some(Utc::now().to_rfc3339());

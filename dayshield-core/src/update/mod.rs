@@ -435,11 +435,9 @@ async fn preflight_component(settings: &UpdateSettings, component: RepoComponent
     if settings.deploy_runtime_after_apply && component_supports_runtime_deploy(component) {
         match component {
             RepoComponent::Core => {
-                ensure_command_available("cargo").await?;
                 ensure_parent_writable(Path::new("/usr/local/sbin/dayshield-core"))?;
             }
             RepoComponent::Ui => {
-                ensure_command_available("npm").await?;
                 ensure_parent_writable(Path::new("/usr/local/share/dayshield-ui"))?;
             }
             RepoComponent::Rootfs => {
@@ -564,6 +562,14 @@ async fn ensure_command_available(program: &str) -> Result<()> {
         .await
         .with_context(|| format!("required command '{}' is not available", program))?;
     Ok(())
+}
+
+async fn is_command_available(program: &str) -> bool {
+    Command::new(program)
+        .arg("--version")
+        .output()
+        .await
+        .is_ok()
 }
 
 async fn ensure_rootfs_repo_bootstrapped(settings: &UpdateSettings) -> Result<()> {
@@ -1078,17 +1084,25 @@ pub async fn get_status(state: &AppState) -> UpdatesStatus {
         rootfs_live_update: load_rootfs_live_update_summary(),
         components,
         available_update_count: if available_update_count > 0 {
-            Some(available_update_count)
+                if !is_command_available("cargo").await {
+                    return Err(anyhow::anyhow!("cargo is not available"));
+                }
         } else {
             None
         },
-    }
+                if !is_command_available("npm").await {
+                    return Err(anyhow::anyhow!("npm is not available"));
+                }
 }
 
 pub async fn check_for_updates(state: &AppState) -> Result<UpdatesStatus> {
-    let _guard = op_lock().lock().await;
+                if !is_command_available("sh").await {
+                    return Err(anyhow::anyhow!("sh is not available"));
+                }
 
-    let now = Utc::now().to_rfc3339();
+                    if !is_command_available("sha256sum").await {
+                        return Err(anyhow::anyhow!("sha256sum is not available"));
+                    }
     let mut state_file = load_state(state);
     state_file.last_checked_at = Some(now);
     save_state(state, &state_file)?;
@@ -1154,7 +1168,9 @@ pub async fn apply_updates(
     let mut details = Vec::new();
     let mut any_applied = false;
     let mut core_updated = false;
+    let mut core_runtime_deployed = false;
     let mut rootfs_updated = false;
+    let mut rootfs_runtime_deployed = false;
 
     info!(
         component = ?component,
@@ -1205,6 +1221,8 @@ pub async fn apply_updates(
 
         info!(component = %comp.as_str(), branch = %branch, "updates: applying component");
 
+        let mut deploy_runtime_for_component = settings.deploy_runtime_after_apply;
+
         let apply_result: Result<()> = async {
             ensure_origin(&repo_path, &remote_url).await?;
             run_git(&repo_path, &["fetch", "--quiet", "origin", &branch]).await?;
@@ -1220,7 +1238,6 @@ pub async fn apply_updates(
                 ));
             }
 
-            let mut deploy_runtime_for_component = settings.deploy_runtime_after_apply;
             if matches!(comp, RepoComponent::Rootfs) {
                 let policy = load_rootfs_live_update_policy(&repo_path, &target_commit).await?;
                 if policy.require_rebuild.unwrap_or(false) {
@@ -1234,6 +1251,36 @@ pub async fn apply_updates(
                     details.push(
                         "rootfs: live update blocked by policy; appliance rebuild required".to_string(),
                     );
+                }
+            }
+
+            if deploy_runtime_for_component {
+                match comp {
+                    RepoComponent::Core => {
+                        if !is_command_available("cargo").await {
+                            deploy_runtime_for_component = false;
+                            mark_appliance_rebuild_required(
+                                &mut state_file,
+                                "core repository changed but cargo is unavailable on this system; rebuild appliance artifacts to deploy updated core runtime",
+                            );
+                            details.push(
+                                "core: runtime deployment skipped because cargo is unavailable; appliance rebuild required".to_string(),
+                            );
+                        }
+                    }
+                    RepoComponent::Ui => {
+                        if !is_command_available("npm").await {
+                            deploy_runtime_for_component = false;
+                            mark_appliance_rebuild_required(
+                                &mut state_file,
+                                "ui repository changed but npm is unavailable on this system; rebuild appliance artifacts to deploy updated UI runtime",
+                            );
+                            details.push(
+                                "ui: runtime deployment skipped because npm is unavailable; appliance rebuild required".to_string(),
+                            );
+                        }
+                    }
+                    RepoComponent::Rootfs => {}
                 }
             }
 
@@ -1297,19 +1344,25 @@ pub async fn apply_updates(
         progressed.push((comp, current));
         if matches!(comp, RepoComponent::Core) {
             core_updated = true;
+            if deploy_runtime_for_component {
+                core_runtime_deployed = true;
+            }
         }
         if matches!(comp, RepoComponent::Rootfs) {
             rootfs_updated = true;
+            if deploy_runtime_for_component {
+                rootfs_runtime_deployed = true;
+            }
         }
     }
 
     if any_applied {
         state_file.last_applied_at = Some(Utc::now().to_rfc3339());
-        if settings.reboot_required_after_apply || core_updated {
+        if settings.reboot_required_after_apply || core_runtime_deployed {
             state_file.pending_reboot = true;
         }
         if rootfs_updated {
-            if settings.deploy_runtime_after_apply {
+            if rootfs_runtime_deployed {
                 clear_appliance_rebuild_required(&mut state_file);
                 state_file.pending_reboot = true;
                 details.push(
@@ -1326,7 +1379,7 @@ pub async fn apply_updates(
             }
         }
 
-        if settings.deploy_runtime_after_apply {
+        if core_runtime_deployed || rootfs_runtime_deployed {
             ensure_critical_services_healthy().await?;
             details.push("post-apply health check passed for critical services".to_string());
         }

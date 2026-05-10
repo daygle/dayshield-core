@@ -1494,6 +1494,7 @@ pub async fn validate_updates(
     let status = get_status(state).await;
     let mut details = Vec::new();
     let mut success = true;
+    let mut warning_count: usize = 0;
 
     let selected = selected_repos
         .into_iter()
@@ -1525,6 +1526,7 @@ pub async fn validate_updates(
                 ));
             }
             (Some(current), None) => {
+                warning_count += 1;
                 details.push(format!(
                     "{}: no applied baseline, current {}",
                     comp.component,
@@ -1582,6 +1584,7 @@ pub async fn validate_updates(
                     ));
                 }
                 (Some(current), None) => {
+                    warning_count += 1;
                     details.push(format!(
                         "{}: runtime marker missing (expected {})",
                         comp.component,
@@ -1595,6 +1598,7 @@ pub async fn validate_updates(
 
     if let Some(rootfs_live) = &status.rootfs_live_update {
         if !rootfs_live.staged_files.is_empty() {
+            warning_count += 1;
             details.push(format!(
                 "rootfs: {} staged config delta file(s) pending merge",
                 rootfs_live.staged_files.len()
@@ -1607,7 +1611,9 @@ pub async fn validate_updates(
     Ok(UpdatesActionResult {
         operation: "validate".to_string(),
         success,
-        message: if success {
+        message: if success && warning_count > 0 {
+            format!("validation passed with {warning_count} warning(s)")
+        } else if success {
             "validation passed".to_string()
         } else {
             "validation failed".to_string()

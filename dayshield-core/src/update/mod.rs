@@ -895,12 +895,20 @@ async fn deploy_component_runtime(component: RepoComponent, repo_path: &str) -> 
             install_file_atomic(&built_bin, Path::new("/usr/local/sbin/dayshield-core"))?;
         }
         RepoComponent::Ui => {
-            ensure_command_available("npm").await?;
-            run_command_in(repo_path, "npm", &["ci", "--no-audit", "--no-fund"]).await?;
-            run_command_in(repo_path, "npm", &["run", "build"]).await?;
-
             let dist_dir = Path::new(repo_path).join("dist");
-            if !dist_dir.join("index.html").exists() {
+            let dist_index = dist_dir.join("index.html");
+
+            if is_command_available("npm").await {
+                run_command_in(repo_path, "npm", &["ci", "--no-audit", "--no-fund"]).await?;
+                run_command_in(repo_path, "npm", &["run", "build"]).await?;
+            } else if !dist_index.exists() {
+                anyhow::bail!(
+                    "npm is unavailable and prebuilt UI assets are missing at {}",
+                    dist_index.display()
+                );
+            }
+
+            if !dist_index.exists() {
                 anyhow::bail!(
                     "UI build output missing index.html at {}",
                     dist_dir.display()
@@ -1261,14 +1269,19 @@ pub async fn apply_updates(
                         }
                     }
                     RepoComponent::Ui => {
-                        if !is_command_available("npm").await {
+                        let ui_dist_ready = Path::new(&repo_path).join("dist/index.html").exists();
+                        if !is_command_available("npm").await && !ui_dist_ready {
                             deploy_runtime_for_component = false;
                             mark_appliance_rebuild_required(
                                 &mut state_file,
-                                "ui repository changed but npm is unavailable on this system; rebuild appliance artifacts to deploy updated UI runtime",
+                                "ui repository changed but neither npm nor prebuilt UI dist assets are available; rebuild appliance artifacts to deploy updated UI runtime",
                             );
                             details.push(
-                                "ui: runtime deployment skipped because npm is unavailable; appliance rebuild required".to_string(),
+                                "ui: runtime deployment skipped because npm is unavailable and dist/index.html is missing; appliance rebuild required".to_string(),
+                            );
+                        } else if !is_command_available("npm").await && ui_dist_ready {
+                            details.push(
+                                "ui: npm unavailable, using prebuilt dist assets for runtime deployment".to_string(),
                             );
                         }
                     }

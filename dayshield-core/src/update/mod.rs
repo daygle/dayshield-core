@@ -1,5 +1,6 @@
 use std::{
     env,
+    fs,
     path::{Path, PathBuf},
     sync::OnceLock,
     time::{Duration, Instant},
@@ -17,6 +18,7 @@ const SETTINGS_FILE: &str = "updates_settings.json";
 const STATE_FILE: &str = "updates_state.json";
 const DEFAULT_CORE_URL: &str = "https://github.com/daygle/dayshield-core";
 const DEFAULT_UI_URL: &str = "https://github.com/daygle/dayshield-ui";
+const RUNTIME_MARKER_DIR: &str = "/var/lib/dayshield/update";
 
 fn default_core_repo_path() -> String {
     env::var("DAYSHIELD_UPDATE_CORE_PATH").unwrap_or_else(|_| "/opt/dayshield-core".to_string())
@@ -50,6 +52,10 @@ fn default_reboot_required_after_apply() -> bool {
     false
 }
 
+fn default_deploy_runtime_after_apply() -> bool {
+    true
+}
+
 fn op_lock() -> &'static Mutex<()> {
     static OP_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     OP_LOCK.get_or_init(|| Mutex::new(()))
@@ -64,6 +70,8 @@ pub struct UpdateSettings {
     pub check_interval_minutes: u64,
     #[serde(default = "default_reboot_required_after_apply")]
     pub reboot_required_after_apply: bool,
+    #[serde(default = "default_deploy_runtime_after_apply")]
+    pub deploy_runtime_after_apply: bool,
     #[serde(default = "default_core_repo_path")]
     pub core_repo_path: String,
     #[serde(default = "default_ui_repo_path")]
@@ -84,6 +92,7 @@ impl Default for UpdateSettings {
             auto_check_enabled: default_auto_check_enabled(),
             check_interval_minutes: default_check_interval_minutes(),
             reboot_required_after_apply: default_reboot_required_after_apply(),
+            deploy_runtime_after_apply: default_deploy_runtime_after_apply(),
             core_repo_path: default_core_repo_path(),
             ui_repo_path: default_ui_repo_path(),
             core_repo_url: default_core_repo_url(),
@@ -131,6 +140,7 @@ pub struct ComponentState {
     pub component: String,
     pub rollback_commit: Option<String>,
     pub last_applied_commit: Option<String>,
+    pub deployed_commit: Option<String>,
     pub last_error: Option<String>,
 }
 
@@ -256,6 +266,112 @@ fn component_config(settings: &UpdateSettings, component: RepoComponent) -> (Str
     }
 }
 
+fn runtime_marker_path(component: RepoComponent) -> PathBuf {
+    Path::new(RUNTIME_MARKER_DIR).join(format!("{}_deployed_commit", component.as_str()))
+}
+
+fn save_runtime_marker(component: RepoComponent, commit: &str) -> Result<()> {
+    let marker = runtime_marker_path(component);
+    if let Some(parent) = marker.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    std::fs::write(&marker, format!("{}\n", commit))
+        .with_context(|| format!("failed to write runtime marker {}", marker.display()))?;
+    Ok(())
+}
+
+fn load_runtime_marker(component: RepoComponent) -> Option<String> {
+    let marker = runtime_marker_path(component);
+    std::fs::read_to_string(&marker)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn ensure_parent_writable(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("invalid path {}", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create {}", parent.display()))?;
+
+    let probe = parent.join(format!(".dayshield-write-probe-{}", unique_suffix()));
+    std::fs::write(&probe, b"probe")
+        .with_context(|| format!("path is not writable: {}", parent.display()))?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
+}
+
+async fn preflight_component(settings: &UpdateSettings, component: RepoComponent) -> Result<(String, String)> {
+    let (repo_path, remote_url, branch) = component_config(settings, component);
+
+    ensure_repo_writable(&repo_path)
+        .with_context(|| format!("{}: repo preflight failed", component.as_str()))?;
+
+    let (current, remote, dirty) = inspect_repo(&repo_path, &remote_url, &branch)
+        .await
+        .with_context(|| format!("{}: inspect preflight failed", component.as_str()))?;
+
+    if dirty {
+        anyhow::bail!(
+            "{}: repository has local changes; aborting update to avoid destructive reset",
+            component.as_str()
+        );
+    }
+
+    if settings.deploy_runtime_after_apply {
+        match component {
+            RepoComponent::Core => {
+                ensure_command_available("cargo").await?;
+                ensure_parent_writable(Path::new("/usr/local/sbin/dayshield-core"))?;
+            }
+            RepoComponent::Ui => {
+                ensure_command_available("npm").await?;
+                ensure_parent_writable(Path::new("/usr/local/share/dayshield-ui"))?;
+            }
+        }
+    }
+
+    Ok((current, remote))
+}
+
+async fn reset_and_optionally_deploy(
+    settings: &UpdateSettings,
+    state_file: &mut UpdateStateFile,
+    component: RepoComponent,
+    target_commit: &str,
+    deploy_runtime: bool,
+    details: &mut Vec<String>,
+) -> Result<()> {
+    let (repo_path, _remote_url, _branch) = component_config(settings, component);
+    run_git(&repo_path, &["reset", "--hard", target_commit]).await?;
+
+    let head = run_git(&repo_path, &["rev-parse", "HEAD"]).await?;
+    if head != target_commit {
+        anyhow::bail!(
+            "{}: reset verification failed (expected {}, got {})",
+            component.as_str(),
+            target_commit,
+            head
+        );
+    }
+
+    let entry = ensure_component_state(state_file, component);
+
+    if deploy_runtime {
+        deploy_component_runtime(component, &repo_path).await?;
+        save_runtime_marker(component, &head)?;
+        entry.deployed_commit = Some(head.clone());
+        details.push(format!("{}: runtime artifacts deployed", component.as_str()));
+    }
+
+    entry.last_applied_commit = Some(head.clone());
+    entry.last_error = None;
+    details.push(format!("{}: moved to {}", component.as_str(), short_sha(&head)));
+    Ok(())
+}
+
 async fn run_git(repo_path: &str, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .arg("-C")
@@ -282,6 +398,202 @@ async fn run_git(repo_path: &str, args: &[&str]) -> Result<String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+async fn run_command_in(repo_path: &str, program: &str, args: &[&str]) -> Result<String> {
+    let output = Command::new(program)
+        .current_dir(repo_path)
+        .args(args)
+        .output()
+        .await
+        .with_context(|| format!("failed to execute {} {:?}", program, args))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        anyhow::bail!(
+            "{} {:?} failed: {}{}{}",
+            program,
+            args,
+            stderr.trim(),
+            if !stderr.trim().is_empty() && !stdout.trim().is_empty() {
+                " | "
+            } else {
+                ""
+            },
+            stdout.trim()
+        );
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+async fn ensure_command_available(program: &str) -> Result<()> {
+    Command::new(program)
+        .arg("--version")
+        .output()
+        .await
+        .with_context(|| format!("required command '{}' is not available", program))?;
+    Ok(())
+}
+
+fn unique_suffix() -> String {
+    Utc::now()
+        .timestamp_nanos_opt()
+        .unwrap_or_else(|| Utc::now().timestamp_millis() * 1_000_000)
+        .to_string()
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    if !src.is_dir() {
+        anyhow::bail!("source directory does not exist: {}", src.display());
+    }
+    fs::create_dir_all(dst)
+        .with_context(|| format!("failed to create directory {}", dst.display()))?;
+
+    for entry in fs::read_dir(src)
+        .with_context(|| format!("failed to read directory {}", src.display()))?
+    {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        let file_type = entry.file_type()?;
+
+        if file_type.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path).with_context(|| {
+                format!(
+                    "failed to copy {} -> {}",
+                    src_path.display(),
+                    dst_path.display()
+                )
+            })?;
+            let perms = fs::metadata(&src_path)?.permissions();
+            fs::set_permissions(&dst_path, perms)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn install_file_atomic(src: &Path, target: &Path) -> Result<()> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("invalid target path {}", target.display()))?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create directory {}", parent.display()))?;
+
+    let suffix = unique_suffix();
+    let staged = parent.join(format!("{}.new.{}", target.file_name().unwrap_or_default().to_string_lossy(), suffix));
+    let backup = parent.join(format!("{}.bak.{}", target.file_name().unwrap_or_default().to_string_lossy(), suffix));
+
+    fs::copy(src, &staged)
+        .with_context(|| format!("failed to stage {} -> {}", src.display(), staged.display()))?;
+
+    let had_existing = target.exists();
+    if had_existing {
+        fs::rename(target, &backup).with_context(|| {
+            format!(
+                "failed to move existing target {} -> {}",
+                target.display(),
+                backup.display()
+            )
+        })?;
+    }
+
+    if let Err(err) = fs::rename(&staged, target) {
+        if had_existing {
+            let _ = fs::rename(&backup, target);
+        }
+        let _ = fs::remove_file(&staged);
+        anyhow::bail!("failed to install {}: {}", target.display(), err);
+    }
+
+    if had_existing {
+        let _ = fs::remove_file(&backup);
+    }
+
+    Ok(())
+}
+
+fn install_dir_atomic(src: &Path, target: &Path) -> Result<()> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("invalid target path {}", target.display()))?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create directory {}", parent.display()))?;
+
+    let suffix = unique_suffix();
+    let staged = parent.join(format!("{}.new.{}", target.file_name().unwrap_or_default().to_string_lossy(), suffix));
+    let backup = parent.join(format!("{}.bak.{}", target.file_name().unwrap_or_default().to_string_lossy(), suffix));
+
+    if staged.exists() {
+        fs::remove_dir_all(&staged)
+            .with_context(|| format!("failed to clear staged dir {}", staged.display()))?;
+    }
+    copy_dir_recursive(src, &staged)?;
+
+    let had_existing = target.exists();
+    if had_existing {
+        fs::rename(target, &backup).with_context(|| {
+            format!(
+                "failed to move existing dir {} -> {}",
+                target.display(),
+                backup.display()
+            )
+        })?;
+    }
+
+    if let Err(err) = fs::rename(&staged, target) {
+        if had_existing {
+            let _ = fs::rename(&backup, target);
+        }
+        let _ = fs::remove_dir_all(&staged);
+        anyhow::bail!("failed to install directory {}: {}", target.display(), err);
+    }
+
+    if had_existing {
+        let _ = fs::remove_dir_all(&backup);
+    }
+
+    Ok(())
+}
+
+async fn deploy_component_runtime(component: RepoComponent, repo_path: &str) -> Result<()> {
+    match component {
+        RepoComponent::Core => {
+            ensure_command_available("cargo").await?;
+            run_command_in(repo_path, "cargo", &["build", "--release", "-p", "dayshield-core"]).await?;
+
+            let built_bin = Path::new(repo_path).join("target/release/dayshield-core");
+            if !built_bin.exists() {
+                anyhow::bail!(
+                    "core binary was not produced at {}",
+                    built_bin.display()
+                );
+            }
+
+            install_file_atomic(&built_bin, Path::new("/usr/local/sbin/dayshield-core"))?;
+        }
+        RepoComponent::Ui => {
+            ensure_command_available("npm").await?;
+            run_command_in(repo_path, "npm", &["ci", "--no-audit", "--no-fund"]).await?;
+            run_command_in(repo_path, "npm", &["run", "build"]).await?;
+
+            let dist_dir = Path::new(repo_path).join("dist");
+            if !dist_dir.join("index.html").exists() {
+                anyhow::bail!(
+                    "UI build output missing index.html at {}",
+                    dist_dir.display()
+                );
+            }
+
+            install_dir_atomic(&dist_dir, Path::new("/usr/local/share/dayshield-ui"))?;
+        }
+    }
+
+    Ok(())
 }
 
 async fn ensure_origin(repo_path: &str, remote_url: &str) -> Result<()> {
@@ -434,121 +746,35 @@ pub async fn apply_updates(state: &AppState, component: UpdateComponent) -> Resu
     let settings = load_settings(state);
     let mut state_file = load_state(state);
 
+    let selected = RepoComponent::from_update_component(component);
     let mut details = Vec::new();
     let mut any_applied = false;
+    let mut core_updated = false;
 
-    for comp in RepoComponent::from_update_component(component) {
-        let (repo_path, remote_url, branch) = component_config(&settings, comp);
-        let entry = ensure_component_state(&mut state_file, comp);
+    info!(
+        component = ?component,
+        deploy_runtime = settings.deploy_runtime_after_apply,
+        "updates: apply started"
+    );
 
-        if let Err(err) = ensure_repo_writable(&repo_path) {
-            let msg = format!(
-                "{}: repository is read-only; apply requires writable repo ({err})",
-                comp.as_str()
-            );
-            entry.last_error = Some(msg.clone());
-            save_state(state, &state_file)?;
-            let status = get_status(state).await;
-            return Ok(UpdatesActionResult {
-                operation: "apply".to_string(),
-                success: false,
-                message: "update apply failed".to_string(),
-                details: vec![msg],
-                status,
-            });
-        }
-
-        match inspect_repo(&repo_path, &remote_url, &branch).await {
-            Ok((current, remote, _dirty)) => {
-                if current == remote {
-                    details.push(format!("{}: already up to date", comp.as_str()));
-                    continue;
-                }
-
-                entry.rollback_commit = Some(current.clone());
-                entry.last_error = None;
-
-                // Fetch the branch before resetting so target commit objects exist locally.
-                if let Err(err) = ensure_origin(&repo_path, &remote_url).await {
-                    let msg = format!("{}: failed to configure origin ({err})", comp.as_str());
-                    entry.last_error = Some(msg.clone());
-                    save_state(state, &state_file)?;
-                    let status = get_status(state).await;
-                    return Ok(UpdatesActionResult {
-                        operation: "apply".to_string(),
-                        success: false,
-                        message: "update apply failed".to_string(),
-                        details: vec![msg],
-                        status,
-                    });
-                }
-                if let Err(err) = run_git(&repo_path, &["fetch", "--quiet", "origin", &branch]).await {
-                    let msg = format!("{}: failed to fetch branch {} ({err})", comp.as_str(), branch);
-                    entry.last_error = Some(msg.clone());
-                    save_state(state, &state_file)?;
-                    let status = get_status(state).await;
-                    return Ok(UpdatesActionResult {
-                        operation: "apply".to_string(),
-                        success: false,
-                        message: "update apply failed".to_string(),
-                        details: vec![msg],
-                        status,
-                    });
-                }
-
-                let target_ref = format!("origin/{branch}");
-                let target_commit = run_git(&repo_path, &["rev-parse", &target_ref]).await?;
-
-                let apply_result = run_git(&repo_path, &["reset", "--hard", &target_commit]).await;
-                if let Err(err) = apply_result {
-                    let _ = run_git(&repo_path, &["reset", "--hard", &current]).await;
-                    let msg = format!("{}: apply failed, rolled back ({err})", comp.as_str());
-                    entry.last_error = Some(msg.clone());
-                    save_state(state, &state_file)?;
-                    let status = get_status(state).await;
-                    return Ok(UpdatesActionResult {
-                        operation: "apply".to_string(),
-                        success: false,
-                        message: "update apply failed and rollback was attempted".to_string(),
-                        details: vec![msg],
-                        status,
-                    });
-                }
-
-                let head = run_git(&repo_path, &["rev-parse", "HEAD"]).await?;
-                if head != target_commit {
-                    let _ = run_git(&repo_path, &["reset", "--hard", &current]).await;
-                    let msg = format!(
-                        "{}: validation failed (HEAD {} does not match target {})",
-                        comp.as_str(),
-                        head,
-                        target_commit
-                    );
-                    entry.last_error = Some(msg.clone());
-                    save_state(state, &state_file)?;
-                    let status = get_status(state).await;
-                    return Ok(UpdatesActionResult {
-                        operation: "apply".to_string(),
-                        success: false,
-                        message: "update validation failed and rollback was attempted".to_string(),
-                        details: vec![msg],
-                        status,
-                    });
-                }
-
-                entry.last_applied_commit = Some(head.clone());
-                details.push(format!("{}: updated to {}", comp.as_str(), short_sha(&head)));
-                any_applied = true;
+    // Preflight all selected components before making any changes.
+    let mut baselines: Vec<(RepoComponent, String, String)> = Vec::new();
+    for comp in &selected {
+        match preflight_component(&settings, *comp).await {
+            Ok((current, remote)) => {
+                baselines.push((*comp, current, remote));
             }
             Err(err) => {
-                let msg = format!("{}: unable to inspect repo ({err})", comp.as_str());
+                let msg = format!("{}: preflight failed ({err})", comp.as_str());
+                let entry = ensure_component_state(&mut state_file, *comp);
                 entry.last_error = Some(msg.clone());
                 save_state(state, &state_file)?;
+                warn!(component = %comp.as_str(), error = %err, "updates: apply preflight failed");
                 let status = get_status(state).await;
                 return Ok(UpdatesActionResult {
                     operation: "apply".to_string(),
                     success: false,
-                    message: "update apply failed".to_string(),
+                    message: "update preflight failed".to_string(),
                     details: vec![msg],
                     status,
                 });
@@ -556,13 +782,101 @@ pub async fn apply_updates(state: &AppState, component: UpdateComponent) -> Resu
         }
     }
 
+    let mut progressed: Vec<(RepoComponent, String)> = Vec::new();
+
+    for (comp, current, remote) in baselines {
+        let (repo_path, remote_url, branch) = component_config(&settings, comp);
+        let entry = ensure_component_state(&mut state_file, comp);
+
+        if current == remote {
+            details.push(format!("{}: already up to date", comp.as_str()));
+            continue;
+        }
+
+        entry.rollback_commit = Some(current.clone());
+        entry.last_error = None;
+
+        info!(component = %comp.as_str(), branch = %branch, "updates: applying component");
+
+        let apply_result: Result<()> = async {
+            ensure_origin(&repo_path, &remote_url).await?;
+            run_git(&repo_path, &["fetch", "--quiet", "origin", &branch]).await?;
+            let target_ref = format!("origin/{branch}");
+            let target_commit = run_git(&repo_path, &["rev-parse", &target_ref]).await?;
+            reset_and_optionally_deploy(
+                &settings,
+                &mut state_file,
+                comp,
+                &target_commit,
+                settings.deploy_runtime_after_apply,
+                &mut details,
+            )
+            .await?;
+            Ok(())
+        }
+        .await;
+
+        if let Err(err) = apply_result {
+            let msg = format!("{}: apply failed ({err})", comp.as_str());
+            entry.last_error = Some(msg.clone());
+            warn!(component = %comp.as_str(), error = %err, "updates: apply failed; attempting transactional rollback");
+
+            // Roll back current component first.
+            let _ = reset_and_optionally_deploy(
+                &settings,
+                &mut state_file,
+                comp,
+                &current,
+                settings.deploy_runtime_after_apply,
+                &mut details,
+            )
+            .await;
+
+            // Roll back previously applied components.
+            for (done_comp, done_commit) in progressed.iter().rev() {
+                let _ = reset_and_optionally_deploy(
+                    &settings,
+                    &mut state_file,
+                    *done_comp,
+                    done_commit,
+                    settings.deploy_runtime_after_apply,
+                    &mut details,
+                )
+                .await;
+            }
+
+            save_state(state, &state_file)?;
+            let status = get_status(state).await;
+            return Ok(UpdatesActionResult {
+                operation: "apply".to_string(),
+                success: false,
+                message: "update apply failed and transactional rollback was attempted".to_string(),
+                details: vec![msg],
+                status,
+            });
+        }
+
+        any_applied = true;
+        progressed.push((comp, current));
+        if matches!(comp, RepoComponent::Core) {
+            core_updated = true;
+        }
+    }
+
     if any_applied {
         state_file.last_applied_at = Some(Utc::now().to_rfc3339());
-        if settings.reboot_required_after_apply {
+        if settings.reboot_required_after_apply || core_updated {
             state_file.pending_reboot = true;
         }
     }
     save_state(state, &state_file)?;
+
+    info!(
+        applied = any_applied,
+        core_updated,
+        pending_reboot = state_file.pending_reboot,
+        "updates: apply completed"
+    );
 
     let status = get_status(state).await;
     Ok(UpdatesActionResult {
@@ -584,6 +898,8 @@ pub async fn rollback_updates(state: &AppState, component: UpdateComponent) -> R
     let settings = load_settings(state);
     let mut state_file = load_state(state);
     let mut details = Vec::new();
+
+    info!(component = ?component, "updates: rollback started");
 
     for comp in RepoComponent::from_update_component(component) {
         let (repo_path, _remote_url, _branch) = component_config(&settings, comp);
@@ -615,11 +931,18 @@ pub async fn rollback_updates(state: &AppState, component: UpdateComponent) -> R
         };
 
         let current = run_git(&repo_path, &["rev-parse", "HEAD"]).await?;
-        run_git(&repo_path, &["reset", "--hard", &target]).await?;
-        let validated = run_git(&repo_path, &["rev-parse", "HEAD"]).await?;
+        let result = reset_and_optionally_deploy(
+            &settings,
+            &mut state_file,
+            comp,
+            &target,
+            true,
+            &mut details,
+        )
+        .await;
 
-        if validated != target {
-            let msg = format!("{}: rollback validation failed", comp.as_str());
+        if let Err(err) = result {
+            let msg = format!("{}: rollback failed ({err})", comp.as_str());
             entry.last_error = Some(msg.clone());
             save_state(state, &state_file)?;
             let status = get_status(state).await;
@@ -633,13 +956,14 @@ pub async fn rollback_updates(state: &AppState, component: UpdateComponent) -> R
         }
 
         entry.rollback_commit = Some(current);
-        entry.last_applied_commit = Some(validated.clone());
         entry.last_error = None;
-        details.push(format!("{}: rolled back to {}", comp.as_str(), short_sha(&validated)));
     }
 
     state_file.last_applied_at = Some(Utc::now().to_rfc3339());
+    state_file.pending_reboot = false;
     save_state(state, &state_file)?;
+
+    info!("updates: rollback completed");
 
     let status = get_status(state).await;
     Ok(UpdatesActionResult {
@@ -676,7 +1000,7 @@ pub async fn validate_updates(state: &AppState, component: UpdateComponent) -> R
 
         match (&comp.current_commit, &comp.last_applied_commit) {
             (Some(current), Some(applied)) if current == applied => {
-                details.push(format!("{}: validation ok ({})", comp.component, short_sha(current)));
+                details.push(format!("{}: git validation ok ({})", comp.component, short_sha(current)));
             }
             (Some(current), Some(applied)) => {
                 success = false;
@@ -699,7 +1023,45 @@ pub async fn validate_updates(state: &AppState, component: UpdateComponent) -> R
                 details.push(format!("{}: unable to read current commit", comp.component));
             }
         }
+
+        let repo_component = match comp.component.as_str() {
+            "core" => Some(RepoComponent::Core),
+            "ui" => Some(RepoComponent::Ui),
+            _ => None,
+        };
+
+        if let Some(repo_component) = repo_component {
+            let marker = load_runtime_marker(repo_component);
+            match (&comp.current_commit, marker) {
+                (Some(current), Some(deployed)) if current == &deployed => {
+                    details.push(format!(
+                        "{}: runtime validation ok ({})",
+                        comp.component,
+                        short_sha(current)
+                    ));
+                }
+                (Some(current), Some(deployed)) => {
+                    success = false;
+                    details.push(format!(
+                        "{}: runtime mismatch (deployed {}, expected {})",
+                        comp.component,
+                        short_sha(&deployed),
+                        short_sha(current)
+                    ));
+                }
+                (Some(current), None) => {
+                    details.push(format!(
+                        "{}: runtime marker missing (expected {})",
+                        comp.component,
+                        short_sha(current)
+                    ));
+                }
+                _ => {}
+            }
+        }
     }
+
+    info!(success, "updates: validation completed");
 
     Ok(UpdatesActionResult {
         operation: "validate".to_string(),

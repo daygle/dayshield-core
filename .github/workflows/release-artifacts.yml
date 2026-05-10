@@ -39,14 +39,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: daygle/dayshield-ui
-          path: ../dayshield-ui
+          path: dayshield-ui
           ref: main
 
       - name: Checkout dayshield-rootfs
         uses: actions/checkout@v4
         with:
           repository: daygle/dayshield-rootfs
-          path: ../dayshield-rootfs
+          path: dayshield-rootfs
           ref: main
 
       # Build core binary
@@ -57,14 +57,13 @@ jobs:
 
       - name: Build core binary
         run: |
-          cd dayshield-core
           cargo build --release -p dayshield-core
           mkdir -p release-artifacts
           cp target/release/dayshield-core release-artifacts/
 
       - name: Package core artifact
         run: |
-          cd dayshield-core/release-artifacts
+          cd release-artifacts
           tar --zstd -cf core-${{ steps.version.outputs.VERSION }}.tar.zst dayshield-core
           ls -lh core-*.tar.zst
 
@@ -76,16 +75,15 @@ jobs:
 
       - name: Build UI
         run: |
-          cd ../dayshield-ui
+          cd dayshield-ui
           npm ci --no-audit --no-fund
           npm run build
 
       - name: Package UI artifact
         run: |
-          cd ../dayshield-ui
-          mkdir -p ../release-artifacts
-          tar --zstd -cf ../release-artifacts/ui-${{ steps.version.outputs.VERSION }}.tar.zst dist/
-          ls -lh ../release-artifacts/ui-*.tar.zst
+          mkdir -p release-artifacts
+          tar --zstd -cf release-artifacts/ui-${{ steps.version.outputs.VERSION }}.tar.zst -C dayshield-ui dist/
+          ls -lh release-artifacts/ui-*.tar.zst
 
       # Build rootfs bundle
       - name: Setup rootfs build environment
@@ -95,17 +93,17 @@ jobs:
 
       - name: Build rootfs bundle
         run: |
-          cd ../dayshield-rootfs
+          cd dayshield-rootfs
           # Build rootfs with live-update support
           ./scripts/build-rootfs.sh --output ../release-artifacts/rootfs-build
-          mkdir -p ../release-artifacts
-          tar --zstd -cf ../release-artifacts/rootfs-${{ steps.version.outputs.VERSION }}.tar.zst ../release-artifacts/rootfs-build/
-          ls -lh ../release-artifacts/rootfs-*.tar.zst
+          cd ..
+          tar --zstd -cf release-artifacts/rootfs-${{ steps.version.outputs.VERSION }}.tar.zst -C release-artifacts rootfs-build/
+          ls -lh release-artifacts/rootfs-*.tar.zst
 
       # Generate checksums
       - name: Generate checksums
         run: |
-          cd ../release-artifacts
+          cd release-artifacts
           sha256sum *.tar.zst > checksums.txt
           cat checksums.txt
 
@@ -115,10 +113,10 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.VERSION }}
           files: |
-            ../release-artifacts/core-*.tar.zst
-            ../release-artifacts/ui-*.tar.zst
-            ../release-artifacts/rootfs-*.tar.zst
-            ../release-artifacts/checksums.txt
+            release-artifacts/core-*.tar.zst
+            release-artifacts/ui-*.tar.zst
+            release-artifacts/rootfs-*.tar.zst
+            release-artifacts/checksums.txt
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Git tag to build and release (e.g., v1.0.0)'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -12,10 +18,22 @@ jobs:
   build-and-release:
     runs-on: ubuntu-latest
     steps:
+      - name: Determine version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            VERSION="${{ github.event.inputs.tag }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Version: ${VERSION}"
+
       - name: Checkout all repos
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Checkout dayshield-ui
         uses: actions/checkout@v4
@@ -47,7 +65,7 @@ jobs:
       - name: Package core artifact
         run: |
           cd dayshield-core/release-artifacts
-          tar --zstd -cf core-${GITHUB_REF#refs/tags/}.tar.zst dayshield-core
+          tar --zstd -cf core-${{ steps.version.outputs.VERSION }}.tar.zst dayshield-core
           ls -lh core-*.tar.zst
 
       # Build UI dist
@@ -66,7 +84,7 @@ jobs:
         run: |
           cd ../dayshield-ui
           mkdir -p ../release-artifacts
-          tar --zstd -cf ../release-artifacts/ui-${GITHUB_REF#refs/tags/}.tar.zst dist/
+          tar --zstd -cf ../release-artifacts/ui-${{ steps.version.outputs.VERSION }}.tar.zst dist/
           ls -lh ../release-artifacts/ui-*.tar.zst
 
       # Build rootfs bundle
@@ -81,7 +99,7 @@ jobs:
           # Build rootfs with live-update support
           ./scripts/build-rootfs.sh --output ../release-artifacts/rootfs-build
           mkdir -p ../release-artifacts
-          tar --zstd -cf ../release-artifacts/rootfs-${GITHUB_REF#refs/tags/}.tar.zst ../release-artifacts/rootfs-build/
+          tar --zstd -cf ../release-artifacts/rootfs-${{ steps.version.outputs.VERSION }}.tar.zst ../release-artifacts/rootfs-build/
           ls -lh ../release-artifacts/rootfs-*.tar.zst
 
       # Generate checksums
@@ -95,6 +113,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
+          tag_name: ${{ steps.version.outputs.VERSION }}
           files: |
             ../release-artifacts/core-*.tar.zst
             ../release-artifacts/ui-*.tar.zst

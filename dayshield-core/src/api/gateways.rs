@@ -4,7 +4,7 @@
 //! - `POST   /gateways`        — create or update a gateway
 //! - `DELETE /gateways/{name}` — delete a gateway by name
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use axum::{
     extract::{Path, State},
@@ -61,7 +61,7 @@ pub async fn list_gateways(State(state): State<Arc<AppState>>) -> impl IntoRespo
 
     let default_interface = kernel_routes.first().map(|r| r.interface.clone());
 
-    let gateways = probed
+    let mut gateways = probed
         .into_iter()
         .map(|(gw, gw_state)| {
             let active_ip = kernel_routes
@@ -75,7 +75,30 @@ pub async fn list_gateways(State(state): State<Arc<AppState>>) -> impl IntoRespo
                 active_ip,
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
+
+    // Surface auto-discovered default routes even when no explicit gateway
+    // config entry exists yet, so the UI can show live upstream details.
+    let configured_ifaces: HashSet<&str> = configured.iter().map(|gw| gw.interface.as_str()).collect();
+    for route in &kernel_routes {
+        if configured_ifaces.contains(route.interface.as_str()) {
+            continue;
+        }
+
+        gateways.push(GatewayStatus {
+            gateway: Gateway {
+                name: format!("AUTO_DEFAULT_{}", route.interface),
+                description: Some("Auto-discovered from kernel default route".to_string()),
+                interface: route.interface.clone(),
+                gateway_ip: route.gateway_ip.clone(),
+                monitor_ip: None,
+                weight: 1,
+                enabled: true,
+            },
+            state: GatewayState::Unknown,
+            active_ip: route.gateway_ip.clone(),
+        });
+    }
 
     Json(ListGatewaysResponse {
         gateways,

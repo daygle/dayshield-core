@@ -250,7 +250,12 @@ pub async fn apply_config(config: &SuricataConfig) -> Result<()> {
 
     let conf_str = generate_config(config);
     write_config_atomic(SURICATA_YAML_PATH, &conf_str)
-        .context("failed to write suricata.yaml")?;
+        .with_context(|| {
+            format!(
+                "failed to write {} (check dayshield.service sandbox: ReadWritePaths should include /etc/suricata)",
+                SURICATA_YAML_PATH
+            )
+        })?;
 
     info!(path = SURICATA_YAML_PATH, "suricata: suricata.yaml written");
 

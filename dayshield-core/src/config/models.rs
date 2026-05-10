@@ -53,6 +53,12 @@ pub struct Interface {
     pub addresses: Vec<String>,
     /// MTU in bytes (defaults to 1500 when `None`).
     pub mtu: Option<u16>,
+    /// Optional TCP MSS value for this interface.
+    ///
+    /// Used for environments that require MSS tuning (for example PPPoE links).
+    /// The value is persisted and exposed via the API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mss: Option<u16>,
     /// Whether the interface should be brought up.
     pub enabled: bool,
     /// Obtain an IPv4 address via DHCP.
@@ -232,6 +238,11 @@ pub fn is_valid_cidr(cidr: &str) -> bool {
 /// Return `true` if `mtu` is within the acceptable range (68–65 535 bytes).
 pub fn is_valid_mtu(mtu: u16) -> bool {
     mtu >= 68
+}
+
+/// Return `true` if `mss` is within an acceptable TCP MSS range (536–65 535).
+pub fn is_valid_mss(mss: u16) -> bool {
+    mss >= 536
 }
 
 /// Return `true` for any [`Action`] value.
@@ -682,6 +693,19 @@ pub struct DnsConfig {
     pub dnssec: bool,
     /// Local DNS overrides: hostname → IP address.
     pub local_records: Vec<DnsLocalRecord>,
+}
+
+impl Default for DnsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            listen_addresses: vec![],
+            port: 53,
+            forwarders: vec![],
+            dnssec: false,
+            local_records: vec![],
+        }
+    }
 }
 
 /// A static DNS mapping.
@@ -1542,7 +1566,7 @@ pub struct NtpConfig {
 impl Default for NtpConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             upstream_servers: vec!["0.pool.ntp.org".into(), "1.pool.ntp.org".into()],
             serve_clients: false,
             listen_interfaces: vec![],

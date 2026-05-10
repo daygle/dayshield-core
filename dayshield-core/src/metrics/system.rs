@@ -76,10 +76,10 @@ pub fn cpu_percent(prev: &CpuStat, curr: &CpuStat) -> f64 {
 // Memory usage
 // ---------------------------------------------------------------------------
 
-/// Parse `/proc/meminfo` and return RAM utilisation as a percentage.
+/// Parse `/proc/meminfo` and return `(percent, used_bytes, total_bytes)`.
 ///
-/// Returns `0.0` if parsing fails.
-pub fn parse_ram_percent(content: &str) -> f64 {
+/// Returns `(0.0, 0, 0)` if parsing fails.
+pub fn parse_ram_metrics(content: &str) -> (f64, u64, u64) {
     let mut total: Option<u64> = None;
     let mut available: Option<u64> = None;
 
@@ -97,10 +97,19 @@ pub fn parse_ram_percent(content: &str) -> f64 {
     match (total, available) {
         (Some(t), Some(a)) if t > 0 => {
             let used = t.saturating_sub(a);
-            (used as f64 / t as f64) * 100.0
+            let percent = (used as f64 / t as f64) * 100.0;
+            (percent, used * 1024, t * 1024)  // Convert from KiB to bytes
         }
-        _ => 0.0,
+        _ => (0.0, 0, 0),
     }
+}
+
+/// Parse `/proc/meminfo` and return RAM utilisation as a percentage.
+///
+/// Returns `0.0` if parsing fails.
+pub fn parse_ram_percent(content: &str) -> f64 {
+    let (percent, _, _) = parse_ram_metrics(content);
+    percent
 }
 
 // ---------------------------------------------------------------------------
@@ -165,7 +174,55 @@ pub async fn read_temperature_c() -> f64 {
 }
 
 // ---------------------------------------------------------------------------
-// Uptime
+// Disk usage
+// ---------------------------------------------------------------------------
+
+/// Parse `df -B1` output for root filesystem usage.
+///
+/// Returns `(percent, used_bytes, total_bytes)` or `(0.0, 0, 0)` on failure.
+pub fn parse_disk_usage(content: &str) -> (f64, u64, u64) {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.len() < 2 {
+        return (0.0, 0, 0);
+    }
+
+    let parts: Vec<&str> = lines[1].split_whitespace().collect();
+    if parts.len() < 4 {
+        return (0.0, 0, 0);
+    }
+
+    let total_bytes = parts[1].parse::<u64>().unwrap_or(0);
+    let used_bytes = parts[2].parse::<u64>().unwrap_or(0);
+    let percent_str = parts[4].trim_end_matches('%');
+    let percent = percent_str.parse::<f64>().unwrap_or(0.0);
+
+    (percent, used_bytes, total_bytes)
+}
+
+/// Read root-filesystem usage by calling `df -B1 /`.
+pub async fn read_disk_usage() -> (f64, u64, u64) {
+    let output = tokio::process::Command::new("df")
+        .args(["-B1", "/"])
+        .output()
+        .await;
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            parse_disk_usage(&text)
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            warn!("metrics/system: df command failed: {}", stderr);
+            (0.0, 0, 0)
+        }
+        Err(e) => {
+            warn!("metrics/system: df command error: {}", e);
+            (0.0, 0, 0)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 
 /// Parse `/proc/uptime` and return uptime in whole seconds.
@@ -198,7 +255,7 @@ pub async fn collect_system(prev_cpu: Option<&CpuStat>) -> (SystemMetrics, CpuSt
 
     // --- RAM ---
     let mem_content = fs::read_to_string("/proc/meminfo").await.unwrap_or_default();
-    let ram_pct = parse_ram_percent(&mem_content);
+    let (ram_pct, ram_used_bytes, ram_total_bytes) = parse_ram_metrics(&mem_content);
 
     // --- Load average ---
     let load_content = fs::read_to_string("/proc/loadavg").await.unwrap_or_default();
@@ -211,6 +268,9 @@ pub async fn collect_system(prev_cpu: Option<&CpuStat>) -> (SystemMetrics, CpuSt
     let uptime_content = fs::read_to_string("/proc/uptime").await.unwrap_or_default();
     let uptime = parse_uptime(&uptime_content);
 
+    // --- Disk ---
+    let (disk_percent, disk_used_bytes, disk_total_bytes) = read_disk_usage().await;
+
     if cpu_pct.is_nan() || cpu_pct < 0.0 {
         warn!("metrics/system: unexpected CPU percent value: {}", cpu_pct);
     }
@@ -219,11 +279,16 @@ pub async fn collect_system(prev_cpu: Option<&CpuStat>) -> (SystemMetrics, CpuSt
         SystemMetrics {
             cpu_percent: cpu_pct.clamp(0.0, 100.0),
             ram_percent: ram_pct.clamp(0.0, 100.0),
+            ram_used_bytes,
+            ram_total_bytes,
             loadavg_1: l1,
             loadavg_5: l5,
             loadavg_15: l15,
             temperature_c: temp,
             uptime_seconds: uptime,
+            disk_percent,
+            disk_used_bytes,
+            disk_total_bytes,
         },
         curr_cpu,
     )

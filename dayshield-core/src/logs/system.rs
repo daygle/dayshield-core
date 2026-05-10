@@ -1,5 +1,5 @@
-//! System log parser — reads high-priority journald entries (PRIORITY ≤ 4,
-//! i.e. emergency, alert, critical, error, warning).
+//! System log parser — reads journald entries up to info level
+//! (PRIORITY ≤ 6, i.e. emergency through info).
 //!
 //! Like [`crate::logs::firewall`] this module spawns `journalctl` as a child
 //! process using `--output=json --follow --priority=warn` (syslog priority 4
@@ -22,9 +22,9 @@ use crate::logs::LogEvent;
 // Public streaming function
 // ---------------------------------------------------------------------------
 
-/// Stream system log events (PRIORITY ≤ 4) from journald to `tx`.
+/// Stream system log events (PRIORITY ≤ 6) from journald to `tx`.
 ///
-/// Spawns `journalctl --output=json --follow --priority=warn --lines=0` and
+/// Spawns `journalctl --output=json --follow --priority=info --lines=0` and
 /// processes its output line by line.  Restarts automatically on exit.
 pub async fn stream_system(tx: Sender<LogEvent>) {
     loop {
@@ -35,7 +35,7 @@ pub async fn stream_system(tx: Sender<LogEvent>) {
                 "--output=json",
                 "--follow",
                 "--lines=0",
-                "--priority=warning",
+                "--priority=info",
             ])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())

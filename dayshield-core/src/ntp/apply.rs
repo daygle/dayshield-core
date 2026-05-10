@@ -73,7 +73,17 @@ async fn apply_timesyncd(cfg: &NtpConfig) -> Result<(), NtpError> {
     );
 
     info!(path = TIMESYNCD_CONF, "Writing systemd-timesyncd config");
-    tokio::fs::write(TIMESYNCD_CONF, content).await?;
+    tokio::fs::write(TIMESYNCD_CONF, content)
+        .await
+        .map_err(|e| {
+            NtpError::Io(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "{} (check dayshield.service ReadWritePaths for /etc/systemd)",
+                    e
+                ),
+            ))
+        })?;
 
     // Stop chrony if it was previously running.
     stop_service("chrony").await;
@@ -128,7 +138,17 @@ async fn apply_chrony(cfg: &NtpConfig) -> Result<(), NtpError> {
     if let Some(parent) = std::path::Path::new(CHRONY_CONF).parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    tokio::fs::write(CHRONY_CONF, content).await?;
+    tokio::fs::write(CHRONY_CONF, content)
+        .await
+        .map_err(|e| {
+            NtpError::Io(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "{} (check dayshield.service ReadWritePaths for /etc/chrony)",
+                    e
+                ),
+            ))
+        })?;
 
     // Stop timesyncd if it was previously running.
     stop_service("systemd-timesyncd").await;

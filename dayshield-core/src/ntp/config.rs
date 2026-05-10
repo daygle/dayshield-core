@@ -11,7 +11,7 @@ use crate::ntp::model::NtpConfig;
 
 /// Load the [`NtpConfig`] from the persisted configuration.
 ///
-/// Returns a default (disabled) config when no NTP configuration has been
+/// Returns the clean-install default config when no NTP configuration has been
 /// saved yet.
 pub fn load(store: &ConfigStore) -> Result<NtpConfig> {
     Ok(store.load_ntp_config()?.unwrap_or_default())

@@ -118,6 +118,7 @@ pub struct UpdateRulesetRequest {
 pub struct SuricataAlertResponse {
     pub id: usize,
     pub timestamp: String,
+    pub interface: Option<String>,
     pub src_ip: String,
     pub src_port: u16,
     pub dst_ip: String,
@@ -389,6 +390,11 @@ pub async fn list_alerts(
                     .and_then(|t| t.as_str())
                     .unwrap_or("")
                     .to_string(),
+                interface: v
+                    .get("in_iface")
+                    .or_else(|| v.get("interface"))
+                    .and_then(|i| i.as_str())
+                    .map(|s| s.to_string()),
                 src_ip: v
                     .get("src_ip")
                     .and_then(|s| s.as_str())

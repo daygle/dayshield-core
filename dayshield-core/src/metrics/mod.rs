@@ -42,6 +42,10 @@ pub struct SystemMetrics {
     pub cpu_percent: f64,
     /// RAM utilisation as a percentage (0–100).
     pub ram_percent: f64,
+    /// RAM used in bytes.
+    pub ram_used_bytes: u64,
+    /// RAM total in bytes.
+    pub ram_total_bytes: u64,
     /// 1-minute load average.
     pub loadavg_1: f64,
     /// 5-minute load average.
@@ -52,6 +56,12 @@ pub struct SystemMetrics {
     pub temperature_c: f64,
     /// System uptime in seconds.
     pub uptime_seconds: u64,
+    /// Root filesystem utilisation as a percentage (0–100).
+    pub disk_percent: f64,
+    /// Root filesystem used bytes.
+    pub disk_used_bytes: u64,
+    /// Root filesystem total bytes.
+    pub disk_total_bytes: u64,
 }
 
 /// Throughput metrics for a single network interface.

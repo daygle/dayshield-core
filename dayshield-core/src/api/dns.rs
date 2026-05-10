@@ -82,7 +82,7 @@ pub struct UpdateDnsConfigRequest {
 /// Handler: return the current DNS configuration.
 ///
 /// Loads the DNS config from persistent storage.  If no configuration has been
-/// saved yet, returns a sensible default (disabled, port 53).
+/// saved yet, returns the clean-install default config.
 pub async fn get_config(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, DnsError> {
@@ -90,14 +90,7 @@ pub async fn get_config(
         .config_store
         .load_dns_config()
         .map_err(DnsError::StorageError)?
-        .unwrap_or_else(|| DnsConfig {
-            enabled: false,
-            listen_addresses: vec![],
-            port: 53,
-            forwarders: vec![],
-            dnssec: false,
-            local_records: vec![],
-        });
+        .unwrap_or_default();
 
     info!(enabled = cfg.enabled, "dns: loaded config");
 

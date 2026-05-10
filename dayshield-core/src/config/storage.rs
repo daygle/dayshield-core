@@ -288,7 +288,7 @@ impl ConfigStore {
     pub fn validate(&self, config: &SystemConfig) -> Result<()> {
         use crate::config::models::{
             is_valid_cidr, is_valid_domain, is_valid_interface_name, is_valid_ip,
-            is_valid_ipv4_range, is_valid_mac, is_valid_mtu, is_valid_port,
+            is_valid_ipv4_range, is_valid_mac, is_valid_mss, is_valid_mtu, is_valid_port,
         };
 
         for iface in &config.interfaces {
@@ -313,6 +313,15 @@ impl ConfigStore {
                         "Interface {:?} has invalid MTU {} (must be ≥ 68)",
                         iface.name,
                         mtu
+                    );
+                }
+            }
+            if let Some(mss) = iface.mss {
+                if !is_valid_mss(mss) {
+                    anyhow::bail!(
+                        "Interface {:?} has invalid MSS {} (must be ≥ 536)",
+                        iface.name,
+                        mss
                     );
                 }
             }
@@ -1174,10 +1183,15 @@ mod tests {
             description: None,
             addresses: vec!["192.168.1.1/24".into()],
             mtu: None,
+            mss: None,
             enabled: true,
             dhcp4: false,
             dhcp6: false,
             vlan: None,
+            wan_mode: None,
+            pppoe_username: None,
+            pppoe_password: None,
+            gateway: None,
         }
     }
 
@@ -1292,10 +1306,15 @@ mod tests {
             description: None,
             addresses: vec![],
             mtu: None,
+            mss: None,
             enabled: true,
             dhcp4: false,
             dhcp6: false,
             vlan: None,
+            wan_mode: None,
+            pppoe_username: None,
+            pppoe_password: None,
+            gateway: None,
         });
         assert!(store.validate(&cfg).is_err());
 
@@ -1313,10 +1332,15 @@ mod tests {
             description: None,
             addresses: vec!["not-a-cidr".into()],
             mtu: None,
+            mss: None,
             enabled: true,
             dhcp4: false,
             dhcp6: false,
             vlan: None,
+            wan_mode: None,
+            pppoe_username: None,
+            pppoe_password: None,
+            gateway: None,
         });
         assert!(store.validate(&cfg).is_err());
 
@@ -1334,10 +1358,15 @@ mod tests {
             description: None,
             addresses: vec![],
             mtu: Some(10),
+            mss: None,
             enabled: true,
             dhcp4: false,
             dhcp6: false,
             vlan: None,
+            wan_mode: None,
+            pppoe_username: None,
+            pppoe_password: None,
+            gateway: None,
         });
         assert!(store.validate(&cfg).is_err());
 

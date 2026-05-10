@@ -40,6 +40,10 @@ pub enum InterfaceError {
     #[error("invalid MTU value: {0}")]
     InvalidMtu(u16),
 
+    /// The MSS value is outside the acceptable range.
+    #[error("invalid MSS value: {0}")]
+    InvalidMss(u16),
+
     /// A CIDR address string is malformed.
     #[error("invalid CIDR address: {0:?}")]
     InvalidCIDR(String),
@@ -69,6 +73,7 @@ impl axum::response::IntoResponse for InterfaceError {
         let status = match &self {
             InterfaceError::InvalidName(_)
             | InterfaceError::InvalidMtu(_)
+            | InterfaceError::InvalidMss(_)
             | InterfaceError::InvalidCIDR(_) => StatusCode::UNPROCESSABLE_ENTITY,
             InterfaceError::NotFound(_) => StatusCode::NOT_FOUND,
             InterfaceError::ApplyFailed(_)
@@ -524,10 +529,15 @@ mod tests {
             description: None,
             addresses: addresses.into_iter().map(String::from).collect(),
             mtu: None,
+            mss: None,
             enabled,
             dhcp4: false,
             dhcp6: false,
             vlan: None,
+            wan_mode: None,
+            pppoe_username: None,
+            pppoe_password: None,
+            gateway: None,
         }
     }
 

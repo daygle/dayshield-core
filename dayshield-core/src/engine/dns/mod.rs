@@ -136,7 +136,12 @@ pub async fn apply_config(config: &DnsConfig) -> Result<()> {
 
     let conf_str = generate_config(config);
     write_config_atomic(UNBOUND_CONF_PATH, &conf_str)
-        .context("failed to write unbound.conf")?;
+        .with_context(|| {
+            format!(
+                "failed to write {} (check dayshield.service sandbox: ReadWritePaths should include /etc/unbound)",
+                UNBOUND_CONF_PATH
+            )
+        })?;
 
     info!(path = UNBOUND_CONF_PATH, "dns: unbound.conf written");
 

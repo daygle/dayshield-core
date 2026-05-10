@@ -43,6 +43,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 # Backup subsystem
 tar = "0.4"
 sha2 = "0.11"
+zstd = "0.13"
 aes-gcm = "0.10"
 rand = "0.10"
 

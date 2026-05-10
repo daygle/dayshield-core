@@ -1,0 +1,105 @@
+name: Build and Release Artifacts
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout all repos
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout dayshield-ui
+        uses: actions/checkout@v4
+        with:
+          repository: daygle/dayshield-ui
+          path: ../dayshield-ui
+          ref: main
+
+      - name: Checkout dayshield-rootfs
+        uses: actions/checkout@v4
+        with:
+          repository: daygle/dayshield-rootfs
+          path: ../dayshield-rootfs
+          ref: main
+
+      # Build core binary
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Build core binary
+        run: |
+          cd dayshield-core
+          cargo build --release -p dayshield-core
+          mkdir -p release-artifacts
+          cp target/release/dayshield-core release-artifacts/
+
+      - name: Package core artifact
+        run: |
+          cd dayshield-core/release-artifacts
+          tar --zstd -cf core-${GITHUB_REF#refs/tags/}.tar.zst dayshield-core
+          ls -lh core-*.tar.zst
+
+      # Build UI dist
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Build UI
+        run: |
+          cd ../dayshield-ui
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Package UI artifact
+        run: |
+          cd ../dayshield-ui
+          mkdir -p ../release-artifacts
+          tar --zstd -cf ../release-artifacts/ui-${GITHUB_REF#refs/tags/}.tar.zst dist/
+          ls -lh ../release-artifacts/ui-*.tar.zst
+
+      # Build rootfs bundle
+      - name: Setup rootfs build environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mmdebstrap
+
+      - name: Build rootfs bundle
+        run: |
+          cd ../dayshield-rootfs
+          # Build rootfs with live-update support
+          ./scripts/build-rootfs.sh --output ../release-artifacts/rootfs-build
+          mkdir -p ../release-artifacts
+          tar --zstd -cf ../release-artifacts/rootfs-${GITHUB_REF#refs/tags/}.tar.zst ../release-artifacts/rootfs-build/
+          ls -lh ../release-artifacts/rootfs-*.tar.zst
+
+      # Generate checksums
+      - name: Generate checksums
+        run: |
+          cd ../release-artifacts
+          sha256sum *.tar.zst > checksums.txt
+          cat checksums.txt
+
+      # Create GitHub Release with artifacts
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            ../release-artifacts/core-*.tar.zst
+            ../release-artifacts/ui-*.tar.zst
+            ../release-artifacts/rootfs-*.tar.zst
+            ../release-artifacts/checksums.txt
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

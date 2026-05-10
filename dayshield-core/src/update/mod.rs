@@ -1084,25 +1084,17 @@ pub async fn get_status(state: &AppState) -> UpdatesStatus {
         rootfs_live_update: load_rootfs_live_update_summary(),
         components,
         available_update_count: if available_update_count > 0 {
-                if !is_command_available("cargo").await {
-                    return Err(anyhow::anyhow!("cargo is not available"));
-                }
+            Some(available_update_count)
         } else {
             None
         },
-                if !is_command_available("npm").await {
-                    return Err(anyhow::anyhow!("npm is not available"));
-                }
+    }
 }
 
 pub async fn check_for_updates(state: &AppState) -> Result<UpdatesStatus> {
-                if !is_command_available("sh").await {
-                    return Err(anyhow::anyhow!("sh is not available"));
-                }
+    let _guard = op_lock().lock().await;
 
-                    if !is_command_available("sha256sum").await {
-                        return Err(anyhow::anyhow!("sha256sum is not available"));
-                    }
+    let now = Utc::now().to_rfc3339();
     let mut state_file = load_state(state);
     state_file.last_checked_at = Some(now);
     save_state(state, &state_file)?;

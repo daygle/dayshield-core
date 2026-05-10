@@ -93,6 +93,8 @@ pub struct CreateBackupResponse {
     pub sha256: String,
     /// Unix timestamp when the backup was created.
     pub created_at: u64,
+    /// File size in bytes.
+    pub size_bytes: u64,
     /// Whether the backup is encrypted.
     pub encrypted: bool,
 }
@@ -152,12 +154,17 @@ pub async fn create_handler(
         .unwrap_or("")
         .to_string();
 
-    info!(filename = %filename, "backup created via API");
+    let size_bytes = std::fs::metadata(&path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    info!(filename = %filename, size_bytes = %size_bytes, "backup created via API");
 
     Ok(Json(CreateBackupResponse {
         filename,
         sha256: meta.sha256,
         created_at: meta.created_at,
+        size_bytes,
         encrypted: meta.encrypted,
     }))
 }

@@ -4,7 +4,7 @@
 //! - `POST   /gateways`        — create or update a gateway
 //! - `DELETE /gateways/{name}` — delete a gateway by name
 
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::{HashMap, HashSet}, sync::Arc};
 
 use axum::{
     extract::{Path, State},
@@ -55,6 +55,18 @@ pub struct ListGatewaysResponse {
 /// Handler: list configured gateways with live routing table and health state.
 pub async fn list_gateways(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let configured = state.config_store.load_gateways().unwrap_or_default();
+    let configured_interfaces = state.config_store.load_interfaces().unwrap_or_default();
+
+    let iface_friendly_names: HashMap<String, String> = configured_interfaces
+        .into_iter()
+        .filter_map(|iface| {
+            iface
+                .description
+                .map(|d| d.trim().to_string())
+                .filter(|d| !d.is_empty())
+                .map(|friendly| (iface.name, friendly))
+        })
+        .collect();
 
     let kernel_routes = list_kernel_gateways().await;
     let probed = probe_all_gateways(&configured).await;
@@ -87,8 +99,14 @@ pub async fn list_gateways(State(state): State<Arc<AppState>>) -> impl IntoRespo
 
         gateways.push(GatewayStatus {
             gateway: Gateway {
-                name: format!("AUTO_DEFAULT_{}", route.interface),
-                description: Some("Auto-discovered from kernel default route".to_string()),
+                name: format!(
+                    "{}_AUTO",
+                    iface_friendly_names
+                        .get(&route.interface)
+                        .map(String::as_str)
+                        .unwrap_or(route.interface.as_str())
+                ),
+                description: Some("Auto-discovered Gateway".to_string()),
                 interface: route.interface.clone(),
                 gateway_ip: route.gateway_ip.clone(),
                 monitor_ip: None,

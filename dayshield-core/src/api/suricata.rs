@@ -344,6 +344,7 @@ pub async fn create_ruleset(
     };
 
     cfg.rule_sources.push(rule_source.clone());
+    let rule_id = cfg.rule_sources.len() - 1;
 
     state
         .config_store
@@ -353,7 +354,7 @@ pub async fn create_ruleset(
     info!("suricata: ruleset created");
 
     let response = SuricataRulesetResponse {
-        id: cfg.rule_sources.len() - 1,
+        id: rule_id,
         name: rule_source.name,
         source: rule_source
             .url

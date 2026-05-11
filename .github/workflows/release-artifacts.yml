@@ -91,7 +91,7 @@ jobs:
       - name: Setup rootfs build environment
         run: |
           sudo apt-get update
-          sudo apt-get install -y mmdebstrap
+          sudo apt-get install -y mmdebstrap debian-archive-keyring gnupg ca-certificates
 
       - name: Build rootfs bundle
         run: |
@@ -100,7 +100,7 @@ jobs:
           cd deps/dayshield-rootfs
           # Build rootfs with live-update support.
           # Use bookworm in CI to avoid trixie keyring mismatches on ubuntu-latest runners.
-          ./scripts/build-rootfs.sh \
+          sudo ./scripts/build-rootfs.sh \
             --suite bookworm \
             --ui-dir ../dayshield-ui/dist \
             --core-repo-dir ../.. \

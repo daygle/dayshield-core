@@ -49,7 +49,7 @@ pub async fn stream_firewall(tx: Sender<LogEvent>) {
             .args([
                 "--output=json",
                 "--follow",
-                "--lines=0",
+                "--lines=50",
                 "--identifier=nftables",
             ])
             .stdout(std::process::Stdio::piped())

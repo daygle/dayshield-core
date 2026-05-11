@@ -34,7 +34,7 @@ pub async fn stream_system(tx: Sender<LogEvent>) {
             .args([
                 "--output=json",
                 "--follow",
-                "--lines=0",
+                "--lines=50",
                 "--priority=info",
             ])
             .stdout(std::process::Stdio::piped())

@@ -111,7 +111,11 @@ pub fn parse_nft_json_hits(json_text: &str) -> Vec<RuleHitCount> {
             }
         }
 
-        result.push(RuleHitCount { handle, packets });
+        let comment = rule
+            .get("comment")
+            .and_then(|c| c.as_str())
+            .map(|s| s.to_string());
+        result.push(RuleHitCount { handle, packets, comment });
     }
 
     result

@@ -90,6 +90,7 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `POST /acme/issue`                                    — trigger certificate issuance / renewal
 /// - `GET  /acme/status`                                   — get certificate status for primary domain
 /// - `GET  /logs/ws`                                       — live log stream (WebSocket upgrade)
+/// - `GET  /logs/search?from=...&to=...`                   — historical log search by date/time range
 /// - `GET  /metrics`                                       — latest metrics snapshot (JSON)
 /// - `GET  /metrics/history?seconds=N`                     — last N seconds of metrics history
 /// - `GET  /metrics/ws`                                    — live metrics stream (WebSocket upgrade)
@@ -253,6 +254,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/acme/status", get(acme::get_certificate_status))
         // Live logs WebSocket
         .route("/logs/ws", get(logs::ws_handler))
+        .route("/logs/search", get(logs::search_logs))
         // Metrics REST API
         .route("/metrics", get(metrics::get_latest))
         .route("/metrics/history", get(metrics::get_history))

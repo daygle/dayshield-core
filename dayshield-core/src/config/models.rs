@@ -705,7 +705,7 @@ impl Default for DnsConfig {
             listen_addresses: vec![],
             port: 53,
             forwarders: vec![],
-            dnssec: false,
+            dnssec: true,
             local_records: vec![],
             interface_blocklists: vec![],
         }

@@ -13,6 +13,7 @@ use serde::Serialize;
 use tracing::warn;
 
 use crate::state::AppState;
+use crate::engine::interfaces::list_kernel_interfaces;
 
 // ---------------------------------------------------------------------------
 // GET /dashboard/system
@@ -147,6 +148,24 @@ pub async fn get_network_status(
     let wan = configured.iter().find(|i| i.enabled);
     let wan_name = wan.map(|i| i.name.clone()).unwrap_or_else(|| "eth0".into());
     let wan_ip = wan.and_then(|i| i.addresses.first().cloned());
+        // Resolve live kernel addresses (needed for DHCP interfaces whose config
+        // addresses vec is intentionally empty).
+        let kernel_ifaces = list_kernel_interfaces().await.unwrap_or_default();
+        let kernel_ip_for = |name: &str| -> Option<String> {
+            kernel_ifaces
+                .iter()
+                .find(|ki| ki.name == name)
+                // Pick the first IPv4 address (contains a dot), ignore IPv6.
+                .and_then(|ki| ki.addresses.iter().find(|a| a.contains('.')))
+                // Strip the CIDR prefix length (e.g. "192.168.1.1/24" → "192.168.1.1").
+                .map(|cidr| cidr.split('/').next().unwrap_or(cidr).to_string())
+        };
+        // Use static config IP (stripped of prefix) when present, otherwise fall
+        // back to the live kernel address.
+        let wan_ip = wan
+            .and_then(|i| i.addresses.first())
+            .map(|cidr| cidr.split('/').next().unwrap_or(cidr).to_string())
+            .or_else(|| kernel_ip_for(&wan_name));
 
     let wan_metrics = net_metrics.iter().find(|m| m.name == wan_name);
     let wan_rx_bps = wan_metrics.map(|m| m.rx_bps as f64).unwrap_or(0.0);
@@ -160,7 +179,9 @@ pub async fn get_network_status(
         .filter(|i| i.name != wan_name)
         .map(|i| LanIface {
             name: i.name.clone(),
-            ip: i.addresses.first().cloned(),
+                ip: i.addresses.first()
+                    .map(|cidr| cidr.split('/').next().unwrap_or(cidr).to_string())
+                    .or_else(|| kernel_ip_for(&i.name)),
             enabled: i.enabled,
         })
         .collect();

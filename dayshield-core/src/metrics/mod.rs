@@ -95,6 +95,9 @@ pub struct RuleHitCount {
     pub handle: u64,
     /// Number of packets matched by this rule.
     pub packets: u64,
+    /// Optional human-readable comment embedded in the nftables rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
 }
 
 /// Suricata IDS/IPS alert-rate metrics.

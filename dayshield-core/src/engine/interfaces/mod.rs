@@ -178,7 +178,7 @@ pub async fn list_kernel_interfaces() -> Result<Vec<KernelInterface>, InterfaceE
 
     // --- ip -j link --------------------------------------------------------
     let link_out = Command::new("ip")
-        .args(["-j", "link"])
+           .args(["-j", "-s", "link"])
         .output()
         .await
         .map_err(|e| InterfaceError::KernelQueryFailed(e.to_string()))?;

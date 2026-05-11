@@ -62,7 +62,7 @@ fn default_auto_check_enabled() -> bool {
 }
 
 fn default_check_interval_minutes() -> u64 {
-    60
+    1440
 }
 
 fn default_reboot_required_after_apply() -> bool {
@@ -2351,7 +2351,7 @@ pub async fn validate_updates(
         operation: "validate".to_string(),
         success,
         message: if success && warning_count > 0 {
-            format!("validation passed with {warning_count} warning(s)")
+            format!("validation passed with {warning_count} note(s)")
         } else if success {
             "validation passed".to_string()
         } else {

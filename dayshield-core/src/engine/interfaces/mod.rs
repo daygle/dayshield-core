@@ -100,8 +100,18 @@ pub struct KernelInterface {
     pub mtu: Option<u32>,
     /// Operational state: `"UP"` or `"DOWN"`.
     pub state: String,
+    /// Raw kernel flags from `ip -j link` (e.g. `UP`, `LOWER_UP`, `MULTICAST`).
+    pub flags: Vec<String>,
     /// Assigned addresses in CIDR notation.
     pub addresses: Vec<String>,
+    /// Received packet counter.
+    pub rx_packets: Option<u64>,
+    /// Received byte counter.
+    pub rx_bytes: Option<u64>,
+    /// Transmitted packet counter.
+    pub tx_packets: Option<u64>,
+    /// Transmitted byte counter.
+    pub tx_bytes: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -115,6 +125,26 @@ struct IpLinkEntry {
     flags: Vec<String>,
     mtu: Option<u32>,
     address: Option<String>,
+    #[serde(default)]
+    stats: Option<IpLinkStats>,
+    #[serde(default)]
+    stats64: Option<IpLinkStats>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IpLinkStats {
+    #[serde(default)]
+    rx: Option<IpLinkCounterValues>,
+    #[serde(default)]
+    tx: Option<IpLinkCounterValues>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IpLinkCounterValues {
+    #[serde(default)]
+    packets: Option<u64>,
+    #[serde(default)]
+    bytes: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -199,6 +229,7 @@ pub async fn list_kernel_interfaces() -> Result<Vec<KernelInterface>, InterfaceE
     let interfaces = link_entries
         .into_iter()
         .map(|link| {
+            let counters = link.stats64.or(link.stats);
             let state = if link.flags.iter().any(|f| f == "UP") {
                 "UP".to_string()
             } else {
@@ -210,7 +241,24 @@ pub async fn list_kernel_interfaces() -> Result<Vec<KernelInterface>, InterfaceE
                 mac: link.address,
                 mtu: link.mtu,
                 state,
+                flags: link.flags,
                 addresses,
+                rx_packets: counters
+                    .as_ref()
+                    .and_then(|stats| stats.rx.as_ref())
+                    .and_then(|rx| rx.packets),
+                rx_bytes: counters
+                    .as_ref()
+                    .and_then(|stats| stats.rx.as_ref())
+                    .and_then(|rx| rx.bytes),
+                tx_packets: counters
+                    .as_ref()
+                    .and_then(|stats| stats.tx.as_ref())
+                    .and_then(|tx| tx.packets),
+                tx_bytes: counters
+                    .as_ref()
+                    .and_then(|stats| stats.tx.as_ref())
+                    .and_then(|tx| tx.bytes),
             }
         })
         .collect();

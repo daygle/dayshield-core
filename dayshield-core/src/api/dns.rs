@@ -13,12 +13,14 @@
 
 use std::sync::Arc;
 
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{extract::{Path, State}, http::StatusCode, response::IntoResponse, Json};
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use crate::{
     config::models::{
-        is_valid_domain, is_valid_interface_name, is_valid_ip, DnsConfig, DnsLocalRecord,
+        is_valid_domain, is_valid_interface_name, is_valid_ip, DnsBlocklistEntry, DnsConfig,
+        DnsInterfaceBlocklists, DnsLocalRecord,
     },
     engine::dns::apply_config,
     state::AppState,
@@ -73,6 +75,30 @@ pub struct UpdateDnsConfigRequest {
     pub forwarders: Vec<String>,
     pub dnssec: bool,
     pub local_records: Vec<DnsLocalRecord>,
+    #[serde(default)]
+    pub interface_blocklists: Option<Vec<DnsInterfaceBlocklists>>,
+}
+
+/// Request body for creating a per-interface DNS blocklist URL.
+#[derive(serde::Deserialize)]
+pub struct CreateDnsBlocklistRequest {
+    pub url: String,
+    pub name: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn is_valid_blocklist_url(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 2048 {
+        return false;
+    }
+    (trimmed.starts_with("https://") || trimmed.starts_with("http://"))
+        && !trimmed.chars().any(|c| c.is_ascii_whitespace())
 }
 
 // ---------------------------------------------------------------------------
@@ -106,6 +132,12 @@ pub async fn update_config(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateDnsConfigRequest>,
 ) -> Result<impl IntoResponse, DnsError> {
+    let existing = state
+        .config_store
+        .load_dns_config()
+        .map_err(DnsError::StorageError)?
+        .unwrap_or_default();
+
     // --- Validation --------------------------------------------------------
 
     if req.port == 0 {
@@ -205,6 +237,9 @@ pub async fn update_config(
         forwarders: req.forwarders,
         dnssec: req.dnssec,
         local_records: req.local_records,
+        interface_blocklists: req
+            .interface_blocklists
+            .unwrap_or(existing.interface_blocklists),
     };
 
     info!(
@@ -232,4 +267,146 @@ pub async fn update_config(
     info!("dns: engine apply complete");
 
     Ok(Json(serde_json::json!({ "success": true, "data": cfg })))
+}
+
+/// Handler: list DNS blocklists for a specific interface.
+pub async fn list_interface_blocklists(
+    State(state): State<Arc<AppState>>,
+    Path(interface_name): Path<String>,
+) -> Result<impl IntoResponse, DnsError> {
+    if !is_valid_interface_name(&interface_name) {
+        return Err(DnsError::ValidationFailed(format!(
+            "invalid interface name: {interface_name}"
+        )));
+    }
+
+    let cfg = state
+        .config_store
+        .load_dns_config()
+        .map_err(DnsError::StorageError)?
+        .unwrap_or_default();
+
+    let blocklists = cfg
+        .interface_blocklists
+        .iter()
+        .find(|b| b.interface == interface_name)
+        .map(|b| b.blocklists.clone())
+        .unwrap_or_default();
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": blocklists
+    })))
+}
+
+/// Handler: create a DNS blocklist URL for a specific interface.
+pub async fn create_interface_blocklist(
+    State(state): State<Arc<AppState>>,
+    Path(interface_name): Path<String>,
+    Json(req): Json<CreateDnsBlocklistRequest>,
+) -> Result<impl IntoResponse, DnsError> {
+    if !is_valid_interface_name(&interface_name) {
+        return Err(DnsError::ValidationFailed(format!(
+            "invalid interface name: {interface_name}"
+        )));
+    }
+
+    if !is_valid_blocklist_url(&req.url) {
+        return Err(DnsError::ValidationFailed(format!(
+            "invalid blocklist URL: {}",
+            req.url
+        )));
+    }
+
+    let mut cfg = state
+        .config_store
+        .load_dns_config()
+        .map_err(DnsError::StorageError)?
+        .unwrap_or_default();
+
+    let entry = DnsBlocklistEntry {
+        id: Uuid::new_v4(),
+        name: req.name.as_ref().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()),
+        url: req.url.trim().to_string(),
+        enabled: req.enabled,
+    };
+
+    if let Some(group) = cfg
+        .interface_blocklists
+        .iter_mut()
+        .find(|group| group.interface == interface_name)
+    {
+        group.blocklists.push(entry.clone());
+    } else {
+        cfg.interface_blocklists.push(DnsInterfaceBlocklists {
+            interface: interface_name.clone(),
+            blocklists: vec![entry.clone()],
+        });
+    }
+
+    state
+        .config_store
+        .save_dns_config(cfg.clone())
+        .map_err(DnsError::StorageError)?;
+
+    apply_config(&cfg)
+        .await
+        .map_err(|e| DnsError::EngineError(e.to_string()))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "success": true, "data": entry })),
+    ))
+}
+
+/// Handler: delete a DNS blocklist URL from a specific interface.
+pub async fn delete_interface_blocklist(
+    State(state): State<Arc<AppState>>,
+    Path((interface_name, id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, DnsError> {
+    if !is_valid_interface_name(&interface_name) {
+        return Err(DnsError::ValidationFailed(format!(
+            "invalid interface name: {interface_name}"
+        )));
+    }
+
+    let target = id.parse::<Uuid>().map_err(|_| {
+        DnsError::ValidationFailed(format!("invalid blocklist ID: {id}"))
+    })?;
+
+    let mut cfg = state
+        .config_store
+        .load_dns_config()
+        .map_err(DnsError::StorageError)?
+        .unwrap_or_default();
+
+    let mut removed = false;
+    if let Some(group) = cfg
+        .interface_blocklists
+        .iter_mut()
+        .find(|group| group.interface == interface_name)
+    {
+        let before = group.blocklists.len();
+        group.blocklists.retain(|entry| entry.id != target);
+        removed = group.blocklists.len() < before;
+    }
+
+    if !removed {
+        return Err(DnsError::ValidationFailed(format!(
+            "blocklist {id} not found on interface {interface_name}"
+        )));
+    }
+
+    cfg.interface_blocklists.retain(|group| !group.blocklists.is_empty());
+
+    state
+        .config_store
+        .save_dns_config(cfg.clone())
+        .map_err(DnsError::StorageError)?;
+
+    apply_config(&cfg)
+        .await
+        .map_err(|e| DnsError::EngineError(e.to_string()))?;
+
+    Ok(StatusCode::NO_CONTENT)
 }

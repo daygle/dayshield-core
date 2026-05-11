@@ -171,6 +171,18 @@ pub fn router(state: Arc<AppState>) -> Router {
         // DNS config
         .route("/dns/config", get(dns::get_config))
         .route("/dns/config", post(dns::update_config))
+        .route(
+            "/interfaces/{name}/dns/blocklists",
+            get(dns::list_interface_blocklists),
+        )
+        .route(
+            "/interfaces/{name}/dns/blocklists",
+            post(dns::create_interface_blocklist),
+        )
+        .route(
+            "/interfaces/{name}/dns/blocklists/{id}",
+            delete(dns::delete_interface_blocklist),
+        )
         // DNS overrides
         .route("/dns/overrides", get(dns_overrides::list_overrides))
         .route("/dns/overrides", post(dns_overrides::create_override))

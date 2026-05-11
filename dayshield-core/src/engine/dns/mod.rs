@@ -248,6 +248,7 @@ mod tests {
             forwarders: vec!["1.1.1.1".into(), "8.8.8.8".into()],
             dnssec: false,
             local_records: vec![],
+            interface_blocklists: vec![],
         }
     }
 

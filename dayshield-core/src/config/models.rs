@@ -693,6 +693,9 @@ pub struct DnsConfig {
     pub dnssec: bool,
     /// Local DNS overrides: hostname → IP address.
     pub local_records: Vec<DnsLocalRecord>,
+    /// Per-interface DNS blocklist sources.
+    #[serde(default)]
+    pub interface_blocklists: Vec<DnsInterfaceBlocklists>,
 }
 
 impl Default for DnsConfig {
@@ -704,8 +707,26 @@ impl Default for DnsConfig {
             forwarders: vec![],
             dnssec: false,
             local_records: vec![],
+            interface_blocklists: vec![],
         }
     }
+}
+
+/// A set of DNS blocklist URLs scoped to one interface.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnsInterfaceBlocklists {
+    pub interface: String,
+    #[serde(default)]
+    pub blocklists: Vec<DnsBlocklistEntry>,
+}
+
+/// A DNS blocklist source URL.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnsBlocklistEntry {
+    pub id: Uuid,
+    pub name: Option<String>,
+    pub url: String,
+    pub enabled: bool,
 }
 
 /// A static DNS mapping.

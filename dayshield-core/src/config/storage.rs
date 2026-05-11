@@ -1582,6 +1582,7 @@ mod tests {
             forwarders: vec!["1.1.1.1".into()],
             dnssec: false,
             local_records: vec![],
+            interface_blocklists: vec![],
         }
     }
 
@@ -1693,6 +1694,7 @@ mod tests {
             forwarders: vec!["not-an-ip".into()],
             dnssec: false,
             local_records: vec![],
+            interface_blocklists: vec![],
         });
         assert!(store.validate(&cfg).is_err());
 

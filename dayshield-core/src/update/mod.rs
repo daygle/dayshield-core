@@ -1415,15 +1415,24 @@ async fn build_component_status(
     let (repo_path, remote_url, branch) = component_config(settings, component);
     let saved = find_component_state(state_file, component);
 
-    // If in registry mode, try to fetch available versions from registry
+    // Registry mode: compare installed tracked version to latest registry version.
     if settings.update_mode == "registry" {
-        if let Ok(manifest) = query_registry(&settings.registry_url).await {
-            for artifact in &manifest.components {
-                if artifact.component == component.as_str() {
-                    let current_version = saved.and_then(|s| s.current_version.clone());
-                    let update_available = current_version != Some(artifact.version.clone());
-                    
-                    return ComponentUpdateStatus {
+        return match query_registry(&settings.registry_url).await {
+            Ok(manifest) => {
+                if let Some(artifact) = manifest
+                    .components
+                    .iter()
+                    .find(|a| a.component == component.as_str())
+                {
+                    let current_version = saved
+                        .and_then(|s| s.current_version.clone())
+                        .or_else(|| saved.and_then(|s| s.last_applied_version.clone()));
+                    let update_available = match &current_version {
+                        Some(v) => v != &artifact.version,
+                        None => false,
+                    };
+
+                    ComponentUpdateStatus {
                         component: component.as_str().to_string(),
                         repo_path,
                         branch,
@@ -1438,13 +1447,49 @@ async fn build_component_status(
                         last_applied_commit: None,
                         last_applied_version: saved.and_then(|s| s.last_applied_version.clone()),
                         last_error: saved.and_then(|s| s.last_error.clone()),
-                    };
+                    }
+                } else {
+                    ComponentUpdateStatus {
+                        component: component.as_str().to_string(),
+                        repo_path,
+                        branch,
+                        valid_repo: true,
+                        dirty_worktree: false,
+                        update_available: false,
+                        current_commit: None,
+                        remote_commit: None,
+                        current_version: saved.and_then(|s| s.current_version.clone()),
+                        remote_version: None,
+                        rollback_commit: saved.and_then(|s| s.rollback_commit.clone()),
+                        last_applied_commit: None,
+                        last_applied_version: saved.and_then(|s| s.last_applied_version.clone()),
+                        last_error: Some(format!(
+                            "component '{}' missing from registry manifest",
+                            component.as_str()
+                        )),
+                    }
                 }
             }
-        }
+            Err(err) => ComponentUpdateStatus {
+                component: component.as_str().to_string(),
+                repo_path,
+                branch,
+                valid_repo: false,
+                dirty_worktree: false,
+                update_available: false,
+                current_commit: None,
+                remote_commit: None,
+                current_version: saved.and_then(|s| s.current_version.clone()),
+                remote_version: None,
+                rollback_commit: saved.and_then(|s| s.rollback_commit.clone()),
+                last_applied_commit: None,
+                last_applied_version: saved.and_then(|s| s.last_applied_version.clone()),
+                last_error: Some(format!("failed to query registry: {err}")),
+            },
+        };
     }
 
-    // Fallback to git-based status (legacy/when registry unavailable)
+    // Non-registry mode is no longer used by default but remains available if configured.
     let inspect_result = inspect_repo(&repo_path, &remote_url, &branch).await;
 
     match inspect_result {
@@ -1534,7 +1579,8 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
     
     match query_registry(&settings.registry_url).await {
         Ok(manifest) => {
-            // Update component state with available versions from registry
+            // Bootstrap tracked current version once for legacy systems that
+            // predate version tracking. This prevents perpetual false positives.
             for artifact in &manifest.components {
                 let comp = match artifact.component.as_str() {
                     "core" => RepoComponent::Core,
@@ -1544,7 +1590,18 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
                 };
                 
                 let comp_state = ensure_component_state(&mut state_file, comp);
-                comp_state.current_version = None; // Will be populated on deploy
+                if comp_state.current_version.is_none() {
+                    if let Some(applied) = comp_state.last_applied_version.clone() {
+                        comp_state.current_version = Some(applied);
+                    } else {
+                        comp_state.current_version = Some(artifact.version.clone());
+                        info!(
+                            component = %artifact.component,
+                            version = %artifact.version,
+                            "updates: bootstrapped current version baseline from registry"
+                        );
+                    }
+                }
                 
                 info!(
                     component = %artifact.component,

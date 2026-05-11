@@ -5,13 +5,13 @@
 //! - `PUT  /system/config`   — update host-level settings
 //! - `POST /system/reboot`   — schedule an immediate systemctl reboot
 //! - `POST /system/shutdown` — schedule an immediate systemctl poweroff
-//! - `GET  /system/updates/status`   — get update status for core/ui/rootfs repos
+//! - `GET  /system/updates/status`   — get artifact update status for core/ui/rootfs
 //! - `GET  /system/updates/settings` — get update settings
-//! - `PUT  /system/updates/settings` — update settings (interval/reboot policy/repos)
+//! - `PUT  /system/updates/settings` — update settings (interval/reboot policy/registry)
 //! - `POST /system/updates/check`    — force immediate update check
-//! - `POST /system/updates/apply`    — apply updates from configured Git repos
-//! - `POST /system/updates/rollback` — rollback to last known commit
-//! - `POST /system/updates/validate` — validate applied updates
+//! - `POST /system/updates/apply`    — apply updates from registry artifacts
+//! - `POST /system/updates/rollback` — rollback latest applied update transaction
+//! - `POST /system/updates/validate` — validate applied update state
 //! - `POST /system/updates/appliance-rebuild-complete` — clear pending appliance rebuild status
 //! - `POST /system/updates/rootfs-live-rollback` — rollback rootfs live update from latest backup snapshot
 
@@ -178,7 +178,7 @@ fn default_update_component() -> UpdateComponent {
     UpdateComponent::Both
 }
 
-/// Handler: return software-update status for core, UI, and rootfs repositories.
+/// Handler: return software-update status for core, UI, and rootfs artifacts.
 pub async fn get_updates_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, SystemApiError> {
@@ -201,7 +201,7 @@ pub async fn update_update_settings(
     Ok(Json(update::load_settings(&state)))
 }
 
-/// Handler: run an immediate check against configured GitHub repos.
+/// Handler: run an immediate check against configured update registry.
 pub async fn check_updates(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, SystemApiError> {

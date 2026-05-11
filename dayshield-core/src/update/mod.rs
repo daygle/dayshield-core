@@ -1515,7 +1515,6 @@ pub async fn get_status(state: &AppState) -> UpdatesStatus {
 pub async fn check_for_updates(state: &AppState) -> Result<UpdatesStatus> {
     let _guard = op_lock().lock().await;
 
-    let settings = load_settings(state);
     let now = Utc::now().to_rfc3339();
     let mut state_file = load_state(state);
     state_file.last_checked_at = Some(now.clone());
@@ -1733,12 +1732,10 @@ async fn check_atomicity_constraint(
 pub async fn apply_updates(
     state: &AppState,
     component: UpdateComponent,
-    force_partial_apply: bool,
+    _force_partial_apply: bool,
 ) -> Result<UpdatesActionResult> {
     let _guard = op_lock().lock().await;
 
-    let settings = load_settings(state);
-    
     // Registry-based update application (artifact distribution)
     let selected = RepoComponent::from_update_component(component);
     apply_updates_registry(state, selected).await

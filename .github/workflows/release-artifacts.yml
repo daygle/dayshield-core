@@ -98,8 +98,10 @@ jobs:
           mkdir -p release-artifacts
           cp target/release/dayshield-core deps/dayshield-rootfs/dayshield-core
           cd deps/dayshield-rootfs
-          # Build rootfs with live-update support
+          # Build rootfs with live-update support.
+          # Use bookworm in CI to avoid trixie keyring mismatches on ubuntu-latest runners.
           ./scripts/build-rootfs.sh \
+            --suite bookworm \
             --ui-dir ../dayshield-ui/dist \
             --core-repo-dir ../.. \
             --ui-repo-dir ../dayshield-ui \

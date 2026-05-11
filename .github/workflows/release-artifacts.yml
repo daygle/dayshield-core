@@ -130,3 +130,28 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Trigger ISO build workflow
+        env:
+          ISO_DISPATCH_TOKEN: ${{ secrets.ISO_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ISO_DISPATCH_TOKEN:-}" ]; then
+            echo "ISO_REPO_TOKEN is not set; skipping automatic ISO trigger."
+            echo "Set ISO_REPO_TOKEN in dayshield-core repo secrets with access to daygle/dayshield-iso."
+            exit 0
+          fi
+
+          curl -sSf -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${ISO_DISPATCH_TOKEN}" \
+            https://api.github.com/repos/daygle/dayshield-iso/dispatches \
+            -d @- <<EOF
+          {
+            "event_type": "build-iso-from-release",
+            "client_payload": {
+              "tag": "${{ steps.version.outputs.VERSION }}",
+              "core_repo": "${{ github.repository }}"
+            }
+          }
+          EOF

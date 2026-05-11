@@ -22,6 +22,9 @@ use crate::config::models::{
     FirewallSettings, NatConfig, NatProtocol, NatRuleType, OutboundMode, Protocol,
 };
 
+const DEFAULT_BLOCK_LOG_RATE_PER_SECOND: u32 = 10;
+const DEFAULT_BLOCK_LOG_BURST_PACKETS: u32 = 20;
+
 // ---------------------------------------------------------------------------
 // Stats
 // ---------------------------------------------------------------------------
@@ -207,6 +210,13 @@ pub fn generate_ruleset(
     for rule in &sorted {
         out.push_str(&format!("        {}\n", format_rule(rule)));
     }
+    if matches!(settings.input_policy, FirewallChainPolicy::Drop) {
+        out.push_str(&format!(
+            "        limit rate {}/second burst {} packets log prefix \"DEFAULT-BLOCK INPUT \"\n",
+            DEFAULT_BLOCK_LOG_RATE_PER_SECOND, DEFAULT_BLOCK_LOG_BURST_PACKETS
+        ));
+        out.push_str("        drop\n");
+    }
     out.push_str("    }\n\n");
 
     // forward chain
@@ -235,6 +245,13 @@ pub fn generate_ruleset(
     }
     for rule in &sorted {
         out.push_str(&format!("        {}\n", format_rule(rule)));
+    }
+    if matches!(settings.forward_policy, FirewallChainPolicy::Drop) {
+        out.push_str(&format!(
+            "        limit rate {}/second burst {} packets log prefix \"DEFAULT-BLOCK FORWARD \"\n",
+            DEFAULT_BLOCK_LOG_RATE_PER_SECOND, DEFAULT_BLOCK_LOG_BURST_PACKETS
+        ));
+        out.push_str("        drop\n");
     }
     out.push_str("    }\n\n");
 
@@ -1107,6 +1124,26 @@ mod tests {
             !rs.contains("table ip nat"),
             "nat table must not appear without nat config"
         );
+    }
+
+    #[test]
+    fn default_drop_policy_adds_logged_tail_rules_for_input_and_forward() {
+        let rs = generate_ruleset(&[], None, &[], None, &HashMap::new());
+        assert!(rs.contains("log prefix \"DEFAULT-BLOCK INPUT \""));
+        assert!(rs.contains("log prefix \"DEFAULT-BLOCK FORWARD \""));
+        assert!(rs.contains("limit rate 10/second burst 20 packets"));
+    }
+
+    #[test]
+    fn non_drop_policy_omits_default_block_log_tails() {
+        let settings = FirewallSettings {
+            input_policy: FirewallChainPolicy::Accept,
+            forward_policy: FirewallChainPolicy::Accept,
+            ..FirewallSettings::default()
+        };
+        let rs = generate_ruleset(&[], None, &[], Some(&settings), &HashMap::new());
+        assert!(!rs.contains("log prefix \"DEFAULT-BLOCK INPUT \""));
+        assert!(!rs.contains("log prefix \"DEFAULT-BLOCK FORWARD \""));
     }
 
     #[test]

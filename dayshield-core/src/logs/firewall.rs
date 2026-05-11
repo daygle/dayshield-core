@@ -233,6 +233,19 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_nftables_message_custom_prefix_action() {
+        let msg = "DEFAULT-BLOCK INPUT IN=eth0 OUT= SRC=203.0.113.20 DST=10.0.0.1 PROTO=TCP SPT=55555 DPT=22";
+        let event = parse_nftables_message(msg, "2024-01-15T12:00:00+00:00").expect("should parse");
+        match event {
+            LogEvent::FirewallEvent { action, src_ip, .. } => {
+                assert_eq!(action, "DEFAULT-BLOCK INPUT");
+                assert_eq!(src_ip, "203.0.113.20");
+            }
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
     fn test_parse_nftables_message_missing_src_dst_returns_none() {
         let msg = "DROP IN=eth0 OUT=";
         assert!(parse_nftables_message(msg, "2024-01-15T12:00:00+00:00").is_none());

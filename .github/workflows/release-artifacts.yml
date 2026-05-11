@@ -95,11 +95,17 @@ jobs:
 
       - name: Build rootfs bundle
         run: |
+          mkdir -p release-artifacts
+          cp target/release/dayshield-core deps/dayshield-rootfs/dayshield-core
           cd deps/dayshield-rootfs
           # Build rootfs with live-update support
-          ./scripts/build-rootfs.sh --output ../release-artifacts/rootfs-build
-          cd ..
-          tar --zstd -cf release-artifacts/rootfs-${{ steps.version.outputs.VERSION }}.tar.zst -C release-artifacts rootfs-build/
+          ./scripts/build-rootfs.sh \
+            --ui-dir ../dayshield-ui/dist \
+            --core-repo-dir ../.. \
+            --ui-repo-dir ../dayshield-ui \
+            --rootfs-repo-dir . \
+            --output ../../release-artifacts/rootfs-${{ steps.version.outputs.VERSION }}.tar.zst
+          cd ../..
           ls -lh release-artifacts/rootfs-*.tar.zst
 
       # Generate checksums

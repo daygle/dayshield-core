@@ -35,6 +35,9 @@ dayshield-core/
 
 ## Build
 
+Local Rust builds are for development and validation. Production release
+artifacts are built by GitHub Actions from a version tag in `dayshield-core`.
+
 From workspace root:
 
 ```sh
@@ -42,7 +45,7 @@ cargo check -p dayshield-core
 cargo build -p dayshield-core
 ```
 
-Release binary:
+Release binary for local testing:
 
 ```sh
 cargo build -p dayshield-core --release
@@ -74,3 +77,22 @@ You can override the bind address with environment variables:
 ```sh
 cargo test -p dayshield-core
 ```
+
+## Releases
+
+DayShield release artifacts are produced by
+`dayshield-core/.github/workflows/release-artifacts.yml`.
+
+Release flow:
+
+1. Merge the required `dayshield-core`, `dayshield-ui`, and `dayshield-rootfs`
+    changes.
+2. Create and push a version tag from `dayshield-core`, for example `v1.2.3`.
+3. GitHub Actions builds and publishes:
+    - `core-vX.Y.Z.tar.zst`
+    - `ui-vX.Y.Z.tar.zst`
+    - `rootfs-vX.Y.Z.tar.zst`
+    - `checksums.txt`
+
+Installed appliances consume these prebuilt artifacts through the update
+registry. They do not build core or UI on the appliance.

@@ -106,6 +106,16 @@ pub struct SuricataRulesetResponse {
     pub last_updated: Option<String>,
 }
 
+/// Request body for `POST /suricata/rulesets` (create new rule source).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateRulesetRequest {
+    pub name: String,
+    pub url: Option<String>,
+    pub path: Option<String>,
+    pub enabled: Option<bool>,
+}
+
 /// Request body for `PUT /suricata/rulesets/{id}`.
 #[derive(Deserialize)]
 pub struct UpdateRulesetRequest {
@@ -292,6 +302,72 @@ pub async fn list_rulesets(
         "success": true,
         "data": rulesets
     })))
+}
+
+// ---------------------------------------------------------------------------
+// POST /suricata/rulesets
+// ---------------------------------------------------------------------------
+
+/// Create a new rule source (URL-based or local file path).
+pub async fn create_ruleset(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateRulesetRequest>,
+) -> Result<impl IntoResponse, SuricataError> {
+    // Validate inputs
+    if req.name.trim().is_empty() {
+        return Err(SuricataError::ValidationFailed(
+            "ruleset name must not be empty".into(),
+        ));
+    }
+    if req.url.is_none() && req.path.is_none() {
+        return Err(SuricataError::ValidationFailed(
+            "either 'url' or 'path' must be provided".into(),
+        ));
+    }
+    if req.url.is_some() && req.path.is_some() {
+        return Err(SuricataError::ValidationFailed(
+            "only one of 'url' or 'path' should be provided".into(),
+        ));
+    }
+
+    let mut cfg = state
+        .config_store
+        .load_suricata_config()
+        .map_err(SuricataError::StorageError)?
+        .unwrap_or_else(default_suricata_cfg);
+
+    let rule_source = crate::config::models::RuleSource {
+        name: req.name,
+        enabled: req.enabled.unwrap_or(true),
+        url: req.url,
+        path: req.path,
+    };
+
+    cfg.rule_sources.push(rule_source.clone());
+
+    state
+        .config_store
+        .save_suricata_config(cfg)
+        .map_err(SuricataError::StorageError)?;
+
+    info!("suricata: ruleset created");
+
+    let response = SuricataRulesetResponse {
+        id: cfg.rule_sources.len() - 1,
+        name: rule_source.name,
+        source: rule_source
+            .url
+            .clone()
+            .or_else(|| rule_source.path.clone())
+            .unwrap_or_default(),
+        enabled: rule_source.enabled,
+        last_updated: None,
+    };
+
+    Ok((StatusCode::CREATED, Json(serde_json::json!({
+        "success": true,
+        "data": response
+    }))))
 }
 
 // ---------------------------------------------------------------------------

@@ -209,6 +209,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/suricata/config", get(suricata::get_config))
         .route("/suricata/config", post(suricata::update_config))
         .route("/suricata/rulesets", get(suricata::list_rulesets))
+        .route("/suricata/rulesets", post(suricata::create_ruleset))
         .route("/suricata/rulesets/{id}", put(suricata::update_ruleset))
         .route("/suricata/alerts", get(suricata::list_alerts))
         .route("/interfaces/{name}/suricata", get(suricata::get_interface_suricata_config))

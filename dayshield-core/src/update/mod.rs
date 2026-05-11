@@ -1146,7 +1146,10 @@ fn verify_checksum(file_path: &Path, expected: &str) -> Result<()> {
     let mut hasher = Sha256::new();
     hasher.update(&data);
     let result = hasher.finalize();
-    let computed = format!("{:x}", result);
+    let computed = result
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
     
     if computed != expected {
         anyhow::bail!(
@@ -1619,7 +1622,7 @@ async fn apply_updates_registry(
         core_backup: None,
         ui_backup: None,
         rootfs_backup: None,
-        downloaded_artifacts: downloads.iter().map(|(c, v, p)| format!("{}-{}", c, v)).collect(),
+        downloaded_artifacts: downloads.iter().map(|(c, v, _)| format!("{}-{}", c, v)).collect(),
         status: "in_progress".to_string(),
     };
     

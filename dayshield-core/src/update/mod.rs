@@ -1521,18 +1521,9 @@ pub async fn check_for_updates(state: &AppState) -> Result<UpdatesStatus> {
     state_file.last_checked_at = Some(now.clone());
     save_state(state, &state_file)?;
 
-    // Route to appropriate implementation based on update mode
-    if settings.update_mode == "registry" {
-        match check_for_updates_registry(state).await {
-            Ok(_) => {
-                info!("updates: registry check completed successfully");
-            },
-            Err(err) => {
-                warn!(error = %err, "updates: registry check failed, falling back to git-based check");
-                // Fall through to git-based check as fallback
-            }
-        }
-    }
+    // Registry-based update checking (artifact distribution)
+    check_for_updates_registry(state).await?;
+    info!("updates: registry check completed successfully");
 
     Ok(get_status(state).await)
 }
@@ -1748,21 +1739,19 @@ pub async fn apply_updates(
 
     let settings = load_settings(state);
     
-    // Route to appropriate implementation based on update mode
-    if settings.update_mode == "registry" {
-        let selected = RepoComponent::from_update_component(component);
-        match apply_updates_registry(state, selected).await {
-            Ok(result) => return Ok(result),
-            Err(err) => {
-                warn!(error = %err, "updates: registry apply failed, falling back to git-based apply");
-                // Fall through to git-based apply as fallback
-            }
-        }
-    }
+    // Registry-based update application (artifact distribution)
+    let selected = RepoComponent::from_update_component(component);
+    apply_updates_registry(state, selected).await
+}
 
-    // Git-based apply (legacy/fallback)
+// Git-based apply (legacy - kept for reference but no longer called)
+async fn _apply_updates_git_legacy(
+    state: &AppState,
+    component: UpdateComponent,
+    force_partial_apply: bool,
+) -> Result<UpdatesActionResult> {
     let mut state_file = load_state(state);
-
+    let settings = load_settings(state);
     let selected = RepoComponent::from_update_component(component);
 
     // Check atomicity constraint before proceeding

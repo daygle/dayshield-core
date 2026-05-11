@@ -13,6 +13,7 @@ use serde::Serialize;
 use tracing::warn;
 
 use crate::state::AppState;
+use crate::engine::acme::AcmeEngine;
 use crate::engine::interfaces::list_kernel_interfaces;
 
 // ---------------------------------------------------------------------------
@@ -115,6 +116,7 @@ async fn read_disk_percent(mount: &str) -> f64 {
 #[derive(Serialize)]
 pub struct LanIface {
     pub name: String,
+    pub description: Option<String>,
     pub ip: Option<String>,
     pub enabled: bool,
 }
@@ -122,6 +124,7 @@ pub struct LanIface {
 #[derive(Serialize)]
 pub struct NetworkStatus {
     pub wan_iface: String,
+    pub wan_iface_description: Option<String>,
     pub wan_ip: Option<String>,
     /// `"up"`, `"down"`, or `"unknown"`
     pub gateway_status: &'static str,
@@ -144,28 +147,30 @@ pub async fn get_network_status(
         buf.latest().map(|s| s.network.clone()).unwrap_or_default()
     };
 
-    // Heuristic: first enabled interface is WAN, the rest are LAN.
-    let wan = configured.iter().find(|i| i.enabled);
+    // Determine the WAN uplink using explicit WAN configuration when available.
+    let wan = configured
+        .iter()
+        .find(|i| i.wan_mode.is_some() || i.gateway.is_some())
+        .or_else(|| configured.iter().find(|i| i.enabled));
     let wan_name = wan.map(|i| i.name.clone()).unwrap_or_else(|| "eth0".into());
-    let wan_ip = wan.and_then(|i| i.addresses.first().cloned());
-        // Resolve live kernel addresses (needed for DHCP interfaces whose config
-        // addresses vec is intentionally empty).
-        let kernel_ifaces = list_kernel_interfaces().await.unwrap_or_default();
-        let kernel_ip_for = |name: &str| -> Option<String> {
-            kernel_ifaces
-                .iter()
-                .find(|ki| ki.name == name)
-                // Pick the first IPv4 address (contains a dot), ignore IPv6.
-                .and_then(|ki| ki.addresses.iter().find(|a| a.contains('.')))
-                // Strip the CIDR prefix length (e.g. "192.168.1.1/24" → "192.168.1.1").
-                .map(|cidr| cidr.split('/').next().unwrap_or(cidr).to_string())
-        };
-        // Use static config IP (stripped of prefix) when present, otherwise fall
-        // back to the live kernel address.
-        let wan_ip = wan
-            .and_then(|i| i.addresses.first())
+    let wan_description = wan.and_then(|i| i.description.clone());
+
+    // Resolve live kernel addresses (needed for DHCP interfaces whose config
+    // addresses vec is intentionally empty).
+    let kernel_ifaces = list_kernel_interfaces().await.unwrap_or_default();
+    let kernel_ip_for = |name: &str| -> Option<String> {
+        kernel_ifaces
+            .iter()
+            .find(|ki| ki.name == name)
+            // Pick the first IPv4 address (contains a dot), ignore IPv6.
+            .and_then(|ki| ki.addresses.iter().find(|a| a.contains('.')))
+            // Strip the CIDR prefix length (e.g. "192.168.1.1/24" → "192.168.1.1").
             .map(|cidr| cidr.split('/').next().unwrap_or(cidr).to_string())
-            .or_else(|| kernel_ip_for(&wan_name));
+    };
+    let wan_ip = wan
+        .and_then(|i| i.addresses.first())
+        .map(|cidr| cidr.split('/').next().unwrap_or(cidr).to_string())
+        .or_else(|| kernel_ip_for(&wan_name));
 
     let wan_metrics = net_metrics.iter().find(|m| m.name == wan_name);
     let wan_rx_bps = wan_metrics.map(|m| m.rx_bps as f64).unwrap_or(0.0);
@@ -179,15 +184,17 @@ pub async fn get_network_status(
         .filter(|i| i.name != wan_name)
         .map(|i| LanIface {
             name: i.name.clone(),
-                ip: i.addresses.first()
-                    .map(|cidr| cidr.split('/').next().unwrap_or(cidr).to_string())
-                    .or_else(|| kernel_ip_for(&i.name)),
+            description: i.description.clone(),
+            ip: i.addresses.first()
+                .map(|cidr| cidr.split('/').next().unwrap_or(cidr).to_string())
+                .or_else(|| kernel_ip_for(&i.name)),
             enabled: i.enabled,
         })
         .collect();
 
     Json(NetworkStatus {
         wan_iface: wan_name,
+        wan_iface_description: wan_description,
         wan_ip,
         gateway_status,
         wan_rx_bps,
@@ -258,11 +265,11 @@ pub async fn get_security_status(
 #[derive(Serialize)]
 pub struct AcmeStatus {
     pub domains: Vec<String>,
+    pub cert_exists: bool,
+    pub needs_renewal: bool,
     /// Days until primary certificate expires; `0` when no cert exists.
     pub expires_in_days: i64,
-    pub last_renewal: Option<String>,
     pub next_renewal: Option<String>,
-    pub last_renewal_result: Option<&'static str>,
 }
 
 pub async fn get_acme_status(
@@ -274,18 +281,30 @@ pub async fn get_acme_status(
         .ok()
         .flatten();
 
-    let (domains, expires_in_days, next_renewal) = match acme_cfg {
+    let (domains, cert_exists, needs_renewal, expires_in_days, next_renewal) = match acme_cfg {
         Some(cfg) if cfg.enabled => {
             let domains = cfg.domains.clone();
-            let primary = domains.first().cloned().unwrap_or_default();
-            let cert_path = format!("{}/{}/fullchain.pem", cfg.cert_storage_path, primary);
+            let primary = domains.first().cloned();
+            let engine = AcmeEngine::new(cfg.clone());
 
-            let expires = cert_expiry_days(&cert_path).await;
+            let (cert_exists, needs_renewal, expires_in_days) = if let Some(primary_domain) = &primary {
+                let cert_path = engine.cert_path(primary_domain);
+                let exists = cert_path.exists();
+                let renewal_check = engine.renewal_check().await.unwrap_or(true);
+                let days = if exists {
+                    cert_expiry_days(cert_path.to_str().unwrap_or_default()).await.unwrap_or(0)
+                } else {
+                    0
+                };
+                (exists, !exists || renewal_check, days)
+            } else {
+                (false, false, 0)
+            };
+
             let next = cfg
                 .domains
                 .first()
                 .map(|_| {
-                    // Estimate next renewal from renew_interval_hours.
                     let now = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .map(|d| d.as_secs())
@@ -296,17 +315,17 @@ pub async fn get_acme_status(
                 })
                 .flatten();
 
-            (domains, expires, next)
+            (domains, cert_exists, needs_renewal, expires_in_days, next)
         }
-        _ => (vec![], None, None),
+        _ => (vec![], false, false, 0, None),
     };
 
     Json(AcmeStatus {
         domains,
-        expires_in_days: expires_in_days.unwrap_or(0),
-        last_renewal: None,
+        cert_exists,
+        needs_renewal,
+        expires_in_days,
         next_renewal,
-        last_renewal_result: None,
     })
 }
 

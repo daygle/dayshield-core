@@ -53,13 +53,16 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-gnu
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get install -y musl-tools
 
       - name: Build core binary
         run: |
-          cargo build --release -p dayshield-core
+          cargo build --release -p dayshield-core --target x86_64-unknown-linux-musl
           mkdir -p release-artifacts
-          cp target/release/dayshield-core release-artifacts/
+          cp target/x86_64-unknown-linux-musl/release/dayshield-core release-artifacts/
 
       - name: Package core artifact
         run: |
@@ -96,7 +99,7 @@ jobs:
       - name: Build rootfs bundle
         run: |
           mkdir -p release-artifacts
-          cp target/release/dayshield-core deps/dayshield-rootfs/dayshield-core
+          cp target/x86_64-unknown-linux-musl/release/dayshield-core deps/dayshield-rootfs/dayshield-core
           cd deps/dayshield-rootfs
           # Build rootfs with live-update support.
           # Use bookworm in CI to avoid trixie keyring mismatches on ubuntu-latest runners.

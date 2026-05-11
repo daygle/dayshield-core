@@ -229,8 +229,8 @@ pub async fn search_logs(
     let limit = query.limit.unwrap_or(5000).min(20000);
 
     let mut events = Vec::<LogEvent>::new();
-    let from_s = from.to_rfc3339();
-    let to_s = to.to_rfc3339();
+    let from_s = from.format("%Y-%m-%d %H:%M:%S UTC").to_string();
+    let to_s = to.format("%Y-%m-%d %H:%M:%S UTC").to_string();
 
     if matches!(source.as_str(), "all" | "system") {
         events.extend(query_journal_system(&from_s, &to_s).await?);

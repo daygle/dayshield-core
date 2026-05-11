@@ -1710,27 +1710,34 @@ async fn apply_updates_registry(
         }
     }
     
-    // Step 5: Verify deployment health
-    if settings.deploy_runtime_after_apply {
+    // Step 5: Always verify deployment health after applying updates
+    if !downloads.is_empty() {
         if let Err(err) = ensure_critical_services_healthy().await {
             transaction.status = "rolled_back".to_string();
-            details.push(format!("service health check failed: {}", err));
+            details.push(format!("post-apply service health check failed: {}", err));
             save_state(state, &state_file)?;
             
             return Ok(UpdatesActionResult {
                 operation: "apply".to_string(),
                 success: false,
-                message: "service health check failed after update".to_string(),
+                message: "post-apply service health check failed".to_string(),
                 details,
                 status: get_status(state).await,
             });
         }
+        details.push("post-apply service health check passed".to_string());
     }
     
     // Step 6: Mark transaction complete
     transaction.status = "completed".to_string();
     state_file.last_applied_at = Some(Utc::now().to_rfc3339());
-    state_file.pending_reboot = true;
+    
+    // Enforce reboot requirement: always reboot if rootfs was updated, skip for core/ui only
+    let rootfs_included = components_to_update.iter().any(|c| matches!(c, RepoComponent::Rootfs));
+    if rootfs_included {
+        state_file.pending_reboot = true;
+        details.push("rootfs update requires system reboot".to_string());
+    }
     
     save_state(state, &state_file)?;
     
@@ -2216,30 +2223,58 @@ pub async fn validate_updates(
             continue;
         }
 
-        match (&comp.current_commit, &comp.last_applied_commit) {
-            (Some(current), Some(applied)) if current == applied => {
-                details.push(format!("{}: git validation ok ({})", comp.component, short_sha(current)));
+        // Registry mode: validate using versions (current_commit is None)
+        if comp.current_commit.is_none() && comp.current_version.is_some() {
+            match (&comp.current_version, &comp.last_applied_version) {
+                (Some(current), Some(applied)) if current == applied => {
+                    details.push(format!("{}: registry validation ok ({})", comp.component, current));
+                }
+                (Some(current), Some(applied)) => {
+                    success = false;
+                    details.push(format!(
+                        "{}: version mismatch (current {}, expected {})",
+                        comp.component, current, applied
+                    ));
+                }
+                (Some(current), None) => {
+                    warning_count += 1;
+                    details.push(format!(
+                        "{}: no applied baseline, current version {}",
+                        comp.component, current
+                    ));
+                }
+                _ => {
+                    success = false;
+                    details.push(format!("{}: unable to determine current version", comp.component));
+                }
             }
-            (Some(current), Some(applied)) => {
-                success = false;
-                details.push(format!(
-                    "{}: validation mismatch (current {}, expected {})",
-                    comp.component,
-                    short_sha(current),
-                    short_sha(applied)
-                ));
-            }
-            (Some(current), None) => {
-                warning_count += 1;
-                details.push(format!(
-                    "{}: no applied baseline, current {}",
-                    comp.component,
-                    short_sha(current)
-                ));
-            }
-            _ => {
-                success = false;
-                details.push(format!("{}: unable to read current commit", comp.component));
+        } else {
+            // Git mode: validate using commits
+            match (&comp.current_commit, &comp.last_applied_commit) {
+                (Some(current), Some(applied)) if current == applied => {
+                    details.push(format!("{}: git validation ok ({})", comp.component, short_sha(current)));
+                }
+                (Some(current), Some(applied)) => {
+                    success = false;
+                    details.push(format!(
+                        "{}: validation mismatch (current {}, expected {})",
+                        comp.component,
+                        short_sha(current),
+                        short_sha(applied)
+                    ));
+                }
+                (Some(current), None) => {
+                    warning_count += 1;
+                    details.push(format!(
+                        "{}: no applied baseline, current {}",
+                        comp.component,
+                        short_sha(current)
+                    ));
+                }
+                _ => {
+                    success = false;
+                    details.push(format!("{}: unable to read current commit", comp.component));
+                }
             }
         }
 

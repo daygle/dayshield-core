@@ -24,9 +24,9 @@ const DEFAULT_TRUSTED_SIGNERS_FILE: &str = "/etc/dayshield/update_trusted_signer
 const ROOTFS_LIVE_REPORT_FILE: &str = "/var/lib/dayshield/rootfs-live-update/last-run.json";
 const ARTIFACT_CACHE_DIR: &str = "/var/lib/dayshield/artifact-cache";
 const ARTIFACT_STAGING_DIR: &str = "/var/lib/dayshield/update-staging";
-/// GitHub Releases repository: https://github.com/daygle/dayshield-release
+/// GitHub Releases repository: https://github.com/daygle/dayshield-core
 /// Artifacts are attached to releases as: core-v1.2.3.tar.zst, ui-v1.2.3.tar.zst, etc.
-const DEFAULT_REGISTRY_URL: &str = "https://api.github.com/repos/daygle/dayshield-release";
+const DEFAULT_REGISTRY_URL: &str = "https://api.github.com/repos/daygle/dayshield-core";
 const DEFAULT_UPDATE_MODE: &str = "registry";
 
 fn default_core_repo_path() -> String {

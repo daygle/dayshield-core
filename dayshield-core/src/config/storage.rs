@@ -29,7 +29,7 @@ use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
 use super::models::{
-    AcmeConfig, AdminSecuritySettings, CloudflaredConfig, CrowdSecConfig, DhcpConfig, DnsConfig, DnsDomainOverride,
+    AcmeConfig, AdminSecuritySettings, AiEngineConfig, CloudflaredConfig, CrowdSecConfig, DhcpConfig, DnsConfig, DnsDomainOverride,
     DnsHostOverride, FirewallAlias, FirewallRule, FirewallSettings, Gateway, Interface, NatConfig,
     NotifyConfig, NtpConfig, SuricataConfig, SystemConfig, WireGuardInterface,
 };
@@ -718,6 +718,14 @@ impl ConfigStore {
             }
         }
 
+        // AI engine config validation.
+        if let Some(ai_engine) = &config.ai_engine {
+            use crate::config::models::validate_ai_engine_config;
+            if let Err(msg) = validate_ai_engine_config(ai_engine) {
+                anyhow::bail!("AI engine config is invalid: {msg}");
+            }
+        }
+
         Ok(())
     }
 
@@ -963,6 +971,20 @@ impl ConfigStore {
     pub fn save_cloudflared_config(&self, cloudflared: CloudflaredConfig) -> Result<()> {
         let mut config = self.load()?;
         config.cloudflared = Some(cloudflared);
+        self.save_with_rollback(&config)
+    }
+
+    /// Return the AI engine configuration from persisted config.
+    ///
+    /// Returns defaults when no AI configuration has been saved yet.
+    pub fn load_ai_engine_config(&self) -> Result<AiEngineConfig> {
+        Ok(self.load()?.ai_engine.unwrap_or_default())
+    }
+
+    /// Atomically replace the AI engine configuration in persisted config.
+    pub fn save_ai_engine_config(&self, ai_engine: AiEngineConfig) -> Result<()> {
+        let mut config = self.load()?;
+        config.ai_engine = Some(ai_engine);
         self.save_with_rollback(&config)
     }
 

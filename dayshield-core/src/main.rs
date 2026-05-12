@@ -17,6 +17,7 @@ use tokio::net::TcpListener;
 use tracing::{info, warn};
 
 mod api;
+mod ai_engine;
 mod auth;
 mod backup;
 mod config;
@@ -92,6 +93,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Start the periodic software update checker.
     update::start_update_checker(Arc::clone(&app_state)).await;
+
+    // Start AI engine background maintenance.
+    ai_engine::start_background_tasks(Arc::clone(&app_state)).await;
 
     // Start the background notification worker.
     notify::worker::start_notify_worker(Arc::clone(&app_state), notify_rx).await;

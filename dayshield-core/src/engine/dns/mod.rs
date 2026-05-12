@@ -18,10 +18,17 @@ use anyhow::{Context, Result};
 use tokio::process::Command;
 use tracing::{info, warn};
 
-use crate::config::models::{DnsConfig, DnsLocalRecord};
+use crate::config::models::{DnsConfig, DnsLocalRecord, DotConfig};
 
 /// Path where Unbound's configuration file is written.
 const UNBOUND_CONF_PATH: &str = "/etc/unbound/unbound.conf";
+
+/// Directory where DoT TLS certificate and key are stored.
+const DOT_CERTS_DIR: &str = "/etc/dayshield/certs";
+/// Path to the DoT TLS certificate file.
+pub const DOT_CERT_PATH: &str = "/etc/dayshield/certs/dot.crt";
+/// Path to the DoT TLS private key file.
+pub const DOT_KEY_PATH: &str = "/etc/dayshield/certs/dot.key";
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -32,10 +39,14 @@ const UNBOUND_CONF_PATH: &str = "/etc/unbound/unbound.conf";
 /// The generated file covers:
 /// - `server:` block with listen interfaces/addresses, port, DNSSEC, and
 ///   privacy/hardening settings.
+/// - Optional DoT TLS settings when `dot` is `Some` and `dot.enabled` is
+///   `true`: `ssl-port`, `ssl-service-key`, `ssl-service-pem`, and an
+///   additional `interface: 0.0.0.0@<port>` stanza so Unbound accepts both
+///   plain DNS (port 53) and DoT (port 853) connections.
 /// - `local-data:` entries for every [`DnsLocalRecord`] in `config`.
 /// - `forward-zone:` block for each forwarder IP when `config.forwarders` is
 ///   non-empty (falls back to full recursion when the list is empty).
-pub fn generate_config(config: &DnsConfig) -> String {
+pub fn generate_config(config: &DnsConfig, dot: Option<&DotConfig>) -> String {
     let mut out = String::new();
 
     out.push_str("# DayShield - Unbound configuration (auto-generated; do not edit by hand)\n\n");
@@ -46,7 +57,7 @@ pub fn generate_config(config: &DnsConfig) -> String {
     out.push_str("    statistics-cumulative: no\n");
     out.push_str("    num-threads: 1\n");
 
-    // Listen addresses.
+    // Listen addresses for plain DNS.
     if config.listen_addresses.is_empty() {
         out.push_str("    interface: 0.0.0.0\n");
     } else {
@@ -76,6 +87,20 @@ pub fn generate_config(config: &DnsConfig) -> String {
         out.push_str("    auto-trust-anchor-file: \"/var/lib/unbound/root.key\"\n");
     } else {
         out.push_str("    # DNSSEC disabled\n");
+    }
+
+    // DNS-over-TLS settings.
+    if let Some(dot) = dot {
+        if dot.enabled {
+            out.push_str(&format!("\n    # DNS-over-TLS (DoT)\n"));
+            out.push_str(&format!("    ssl-port: {}\n", dot.port));
+            out.push_str(&format!("    ssl-service-key: \"{DOT_KEY_PATH}\"\n"));
+            out.push_str(&format!("    ssl-service-pem: \"{DOT_CERT_PATH}\"\n"));
+            // Bind the DoT port on all interfaces so that both LAN and external
+            // clients can connect.  Restrict access at the firewall layer if
+            // finer-grained control is needed.
+            out.push_str(&format!("    interface: 0.0.0.0@{}\n", dot.port));
+        }
     }
 
     out.push('\n');
@@ -108,16 +133,19 @@ pub fn generate_config(config: &DnsConfig) -> String {
 /// Apply the provided DNS configuration to the running Unbound instance.
 ///
 /// Steps:
-/// 1. Generate `unbound.conf` via [`generate_config`].
-/// 2. Write the file atomically to [`UNBOUND_CONF_PATH`].
-/// 3. If Unbound is running, send it `unbound-control reload`; otherwise
+/// 1. If `dot` is `Some` and `dot.enabled`, write the TLS certificate and key
+///    to [`DOT_CERT_PATH`] / [`DOT_KEY_PATH`] before generating the config.
+/// 2. Generate `unbound.conf` via [`generate_config`].
+/// 3. Write the file atomically to [`UNBOUND_CONF_PATH`].
+/// 4. If Unbound is running, send it `unbound-control reload`; otherwise
 ///    attempt to start it with `systemctl start unbound`.
 ///
 /// # Errors
 ///
-/// Returns an error if the configuration file cannot be written or if the
-/// reload / start command fails.
-pub async fn apply_config(config: &DnsConfig) -> Result<()> {
+/// Returns an error if the certificate/key files cannot be written, if the
+/// configuration file cannot be written, or if the reload / start command
+/// fails.
+pub async fn apply_config(config: &DnsConfig, dot: Option<&DotConfig>) -> Result<()> {
     info!(
         enabled = config.enabled,
         forwarders = config.forwarders.len(),
@@ -134,7 +162,14 @@ pub async fn apply_config(config: &DnsConfig) -> Result<()> {
         return Ok(());
     }
 
-    let conf_str = generate_config(config);
+    // Write DoT TLS files before generating the config so Unbound can find them.
+    if let Some(dot) = dot {
+        if dot.enabled {
+            write_dot_tls_files(dot)?;
+        }
+    }
+
+    let conf_str = generate_config(config, dot);
     write_config_atomic(UNBOUND_CONF_PATH, &conf_str)
         .with_context(|| {
             format!(
@@ -174,6 +209,94 @@ pub async fn apply_config(config: &DnsConfig) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
+
+/// Write the DoT TLS certificate and private key to their well-known paths.
+///
+/// The private key is written with mode `0o600` on Unix systems so it cannot
+/// be read by unprivileged processes.  The certificate is written with mode
+/// `0o644` (world-readable) since it is not secret.
+fn write_dot_tls_files(dot: &DotConfig) -> Result<()> {
+    // Ensure the certificates directory exists.
+    std::fs::create_dir_all(DOT_CERTS_DIR)
+        .with_context(|| format!("failed to create directory {DOT_CERTS_DIR}"))?;
+
+    // Write certificate (public; world-readable is fine).
+    write_cert_file(DOT_CERT_PATH, dot.cert_pem.as_bytes())?;
+
+    // Write private key with restricted permissions.
+    write_key_restricted(DOT_KEY_PATH, dot.key_pem.as_bytes())?;
+
+    info!(cert = DOT_CERT_PATH, key = DOT_KEY_PATH, "dot: TLS files written");
+    Ok(())
+}
+
+/// Write `data` to `path` with mode `0o644`.
+///
+/// Uses a write-then-rename for atomicity on the same filesystem.  This is
+/// the standard pattern used throughout the DayShield config layer.
+#[cfg(unix)]
+fn write_cert_file(path: &str, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let tmp = format!("{path}.tmp");
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o644)
+            .open(&tmp)
+            .with_context(|| format!("failed to open temp cert file {tmp}"))?;
+        f.write_all(data)
+            .with_context(|| format!("failed to write temp cert file {tmp}"))?;
+    }
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("failed to rename {tmp} to {path}"))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_cert_file(path: &str, data: &[u8]) -> Result<()> {
+    std::fs::write(path, data)
+        .with_context(|| format!("failed to write cert file {path}"))?;
+    Ok(())
+}
+
+/// Write `data` to `path` with mode `0o600` on Unix, or a plain write on
+/// other platforms.
+///
+/// Uses a write-then-rename for atomicity on the same filesystem.  Each call
+/// operates on a uniquely suffixed `.tmp` file so concurrent callers do not
+/// interfere with each other's temporary files.
+#[cfg(unix)]
+fn write_key_restricted(path: &str, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let tmp = format!("{path}.tmp");
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .with_context(|| format!("failed to open temp key file {tmp}"))?;
+        f.write_all(data)
+            .with_context(|| format!("failed to write temp key file {tmp}"))?;
+    }
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("failed to rename {tmp} to {path}"))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_key_restricted(path: &str, data: &[u8]) -> Result<()> {
+    std::fs::write(path, data)
+        .with_context(|| format!("failed to write key file {path}"))?;
+    Ok(())
+}
 
 /// Format a [`DnsLocalRecord`] as a single Unbound `local-data` value.
 ///
@@ -252,24 +375,33 @@ mod tests {
         }
     }
 
+    fn dot_config() -> DotConfig {
+        DotConfig {
+            enabled: true,
+            port: 853,
+            cert_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n".into(),
+            key_pem: "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n".into(),
+        }
+    }
+
     #[test]
     fn generate_config_contains_listen_address() {
         let cfg = base_config();
-        let out = generate_config(&cfg);
+        let out = generate_config(&cfg, None);
         assert!(out.contains("interface: 127.0.0.1"), "should contain listen address");
     }
 
     #[test]
     fn generate_config_contains_port() {
         let cfg = base_config();
-        let out = generate_config(&cfg);
+        let out = generate_config(&cfg, None);
         assert!(out.contains("port: 53"));
     }
 
     #[test]
     fn generate_config_forward_zone() {
         let cfg = base_config();
-        let out = generate_config(&cfg);
+        let out = generate_config(&cfg, None);
         assert!(out.contains("forward-zone:"));
         assert!(out.contains("forward-addr: 1.1.1.1"));
         assert!(out.contains("forward-addr: 8.8.8.8"));
@@ -279,7 +411,7 @@ mod tests {
     fn generate_config_no_forward_zone_when_empty() {
         let mut cfg = base_config();
         cfg.forwarders.clear();
-        let out = generate_config(&cfg);
+        let out = generate_config(&cfg, None);
         assert!(!out.contains("forward-zone:"), "full recursion: no forward-zone expected");
     }
 
@@ -287,7 +419,7 @@ mod tests {
     fn generate_config_dnssec_enabled() {
         let mut cfg = base_config();
         cfg.dnssec = true;
-        let out = generate_config(&cfg);
+        let out = generate_config(&cfg, None);
         assert!(out.contains("auto-trust-anchor-file"));
     }
 
@@ -299,7 +431,7 @@ mod tests {
             record_type: "A".into(),
             value: "192.168.1.10".into(),
         });
-        let out = generate_config(&cfg);
+        let out = generate_config(&cfg, None);
         assert!(out.contains("local-data: \"host.local. IN A 192.168.1.10\""));
     }
 
@@ -311,7 +443,7 @@ mod tests {
             record_type: "UNKNOWN".into(),
             value: "value".into(),
         });
-        let out = generate_config(&cfg);
+        let out = generate_config(&cfg, None);
         assert!(!out.contains("UNKNOWN"));
     }
 
@@ -319,9 +451,46 @@ mod tests {
     fn generate_config_default_listen_when_empty() {
         let mut cfg = base_config();
         cfg.listen_addresses.clear();
-        let out = generate_config(&cfg);
+        let out = generate_config(&cfg, None);
         assert!(out.contains("interface: 0.0.0.0"));
         assert!(!out.contains("interface: ::"));
+    }
+
+    #[test]
+    fn generate_config_dot_enabled() {
+        let cfg = base_config();
+        let dot = dot_config();
+        let out = generate_config(&cfg, Some(&dot));
+        assert!(out.contains("ssl-port: 853"), "should contain ssl-port");
+        assert!(out.contains(DOT_KEY_PATH), "should reference key path");
+        assert!(out.contains(DOT_CERT_PATH), "should reference cert path");
+        assert!(out.contains("interface: 0.0.0.0@853"), "should add DoT interface stanza");
+    }
+
+    #[test]
+    fn generate_config_dot_disabled() {
+        let cfg = base_config();
+        let mut dot = dot_config();
+        dot.enabled = false;
+        let out = generate_config(&cfg, Some(&dot));
+        assert!(!out.contains("ssl-port:"), "disabled DoT should not add ssl-port");
+    }
+
+    #[test]
+    fn generate_config_dot_none() {
+        let cfg = base_config();
+        let out = generate_config(&cfg, None);
+        assert!(!out.contains("ssl-port:"), "no DoT config should not add ssl-port");
+    }
+
+    #[test]
+    fn generate_config_dot_custom_port() {
+        let cfg = base_config();
+        let mut dot = dot_config();
+        dot.port = 8853;
+        let out = generate_config(&cfg, Some(&dot));
+        assert!(out.contains("ssl-port: 8853"));
+        assert!(out.contains("interface: 0.0.0.0@8853"));
     }
 }
 

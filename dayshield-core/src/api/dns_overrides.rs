@@ -225,7 +225,11 @@ pub async fn create_override(
         .load_dns_config()
         .map_err(DnsOverrideError::StorageError)?
     {
-        apply_config(&dns_cfg)
+        let dot = state
+            .config_store
+            .load_dot_config()
+            .map_err(DnsOverrideError::StorageError)?;
+        apply_config(&dns_cfg, dot.as_ref())
             .await
             .map_err(|e| DnsOverrideError::EngineError(e.to_string()))?;
         info!("dns_overrides: dns engine apply complete");
@@ -270,7 +274,11 @@ pub async fn delete_override(
         .load_dns_config()
         .map_err(DnsOverrideError::StorageError)?
     {
-        apply_config(&dns_cfg)
+        let dot = state
+            .config_store
+            .load_dot_config()
+            .map_err(DnsOverrideError::StorageError)?;
+        apply_config(&dns_cfg, dot.as_ref())
             .await
             .map_err(|e| DnsOverrideError::EngineError(e.to_string()))?;
         info!("dns_overrides: dns engine apply complete after delete");

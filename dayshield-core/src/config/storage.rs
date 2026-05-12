@@ -30,7 +30,7 @@ use tracing::{debug, info, warn};
 
 use super::models::{
     AcmeConfig, AdminSecuritySettings, AiEngineConfig, CloudflaredConfig, CrowdSecConfig, DhcpConfig, DnsConfig, DnsDomainOverride,
-    DnsHostOverride, FirewallAlias, FirewallRule, FirewallSettings, Gateway, Interface, NatConfig,
+    DnsHostOverride, DotConfig, FirewallAlias, FirewallRule, FirewallSettings, Gateway, Interface, NatConfig,
     NotifyConfig, NtpConfig, SuricataConfig, SystemConfig, WireGuardInterface,
 };
 
@@ -726,6 +726,14 @@ impl ConfigStore {
             }
         }
 
+        // DoT config validation.
+        if let Some(dot) = &config.dot {
+            use crate::config::models::validate_dot_config;
+            if let Err(msg) = validate_dot_config(dot) {
+                anyhow::bail!("DoT config is invalid: {msg}");
+            }
+        }
+
         Ok(())
     }
 
@@ -845,6 +853,24 @@ impl ConfigStore {
     pub fn save_dns_config(&self, dns: DnsConfig) -> Result<()> {
         let mut config = self.load()?;
         config.dns = Some(dns);
+        self.save_with_rollback(&config)
+    }
+
+    /// Return the DNS-over-TLS configuration from the persisted config.
+    ///
+    /// Returns `None` if no DoT configuration has been saved yet.
+    pub fn load_dot_config(&self) -> Result<Option<DotConfig>> {
+        Ok(self.load()?.dot)
+    }
+
+    /// Atomically replace the DNS-over-TLS configuration in the persisted config.
+    ///
+    /// Loads the current config, replaces `dot`, validates, then calls
+    /// [`Self::save_with_rollback`] to write atomically with rollback on
+    /// post-write validation failure.
+    pub fn save_dot_config(&self, dot: DotConfig) -> Result<()> {
+        let mut config = self.load()?;
+        config.dot = Some(dot);
         self.save_with_rollback(&config)
     }
 

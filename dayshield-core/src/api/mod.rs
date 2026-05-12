@@ -12,6 +12,7 @@ mod dashboard;
 mod dhcp;
 mod dns;
 mod dns_overrides;
+mod dot;
 mod firewall;
 mod gateways;
 mod interfaces;
@@ -74,6 +75,8 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `DELETE /firewall/aliases/{name}`                     - delete a firewall alias
 /// - `GET  /dns/config`                                    - get DNS (Unbound) configuration
 /// - `POST /dns/config`                                    - update DNS (Unbound) configuration
+/// - `GET  /dns/dot/config`                                - get DNS-over-TLS (DoT) configuration
+/// - `POST /dns/dot/config`                                - update DNS-over-TLS (DoT) configuration
 /// - `GET  /dns/overrides`                                 - list DNS host and domain overrides
 /// - `POST /dns/overrides`                                 - create a DNS override
 /// - `DELETE /dns/overrides/{name}`                        - delete a DNS override
@@ -189,6 +192,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         // DNS config
         .route("/dns/config", get(dns::get_config))
         .route("/dns/config", post(dns::update_config))
+        // DNS-over-TLS (DoT)
+        .route("/dns/dot/config", get(dot::get_config))
+        .route("/dns/dot/config", post(dot::update_config))
         .route(
             "/interfaces/{name}/dns/blocklists",
             get(dns::list_interface_blocklists),

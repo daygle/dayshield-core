@@ -787,11 +787,21 @@ pub fn validate_dot_config(config: &DotConfig) -> Result<(), String> {
         if config.key_pem.trim().is_empty() {
             return Err("DoT key_pem must not be empty when enabled".into());
         }
-        if !config.cert_pem.contains("-----BEGIN") {
-            return Err("DoT cert_pem does not appear to be a valid PEM certificate".into());
+        // Basic PEM structure checks – a full crypto parse would require
+        // additional heavy dependencies; this guards against obvious mistakes.
+        if !config.cert_pem.contains("-----BEGIN CERTIFICATE-----") {
+            return Err(
+                "DoT cert_pem does not appear to be a valid PEM certificate \
+                 (expected '-----BEGIN CERTIFICATE-----' header)"
+                    .into(),
+            );
         }
         if !config.key_pem.contains("-----BEGIN") {
-            return Err("DoT key_pem does not appear to be a valid PEM private key".into());
+            return Err(
+                "DoT key_pem does not appear to be a valid PEM private key \
+                 (expected '-----BEGIN' header)"
+                    .into(),
+            );
         }
     }
     Ok(())

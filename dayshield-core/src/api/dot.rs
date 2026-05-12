@@ -88,7 +88,8 @@ fn default_dot_port() -> u16 {
 ///
 /// When no DoT configuration has been saved yet, returns the default
 /// (disabled) configuration.  The private key is included in the response;
-/// treat this endpoint as authenticated.
+/// this endpoint is protected by the application-level JWT auth middleware
+/// applied to all registered API routes.
 pub async fn get_config(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, DotError> {

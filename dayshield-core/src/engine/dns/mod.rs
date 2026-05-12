@@ -96,7 +96,9 @@ pub fn generate_config(config: &DnsConfig, dot: Option<&DotConfig>) -> String {
             out.push_str(&format!("    ssl-port: {}\n", dot.port));
             out.push_str(&format!("    ssl-service-key: \"{DOT_KEY_PATH}\"\n"));
             out.push_str(&format!("    ssl-service-pem: \"{DOT_CERT_PATH}\"\n"));
-            // Additional interface stanza for the DoT port.
+            // Bind the DoT port on all interfaces so that both LAN and external
+            // clients can connect.  Restrict access at the firewall layer if
+            // finer-grained control is needed.
             out.push_str(&format!("    interface: 0.0.0.0@{}\n", dot.port));
         }
     }
@@ -211,15 +213,15 @@ pub async fn apply_config(config: &DnsConfig, dot: Option<&DotConfig>) -> Result
 /// Write the DoT TLS certificate and private key to their well-known paths.
 ///
 /// The private key is written with mode `0o600` on Unix systems so it cannot
-/// be read by unprivileged processes.
+/// be read by unprivileged processes.  The certificate is written with mode
+/// `0o644` (world-readable) since it is not secret.
 fn write_dot_tls_files(dot: &DotConfig) -> Result<()> {
     // Ensure the certificates directory exists.
     std::fs::create_dir_all(DOT_CERTS_DIR)
         .with_context(|| format!("failed to create directory {DOT_CERTS_DIR}"))?;
 
-    // Write certificate.
-    std::fs::write(DOT_CERT_PATH, dot.cert_pem.as_bytes())
-        .with_context(|| format!("failed to write DoT certificate to {DOT_CERT_PATH}"))?;
+    // Write certificate (public; world-readable is fine).
+    write_cert_file(DOT_CERT_PATH, dot.cert_pem.as_bytes())?;
 
     // Write private key with restricted permissions.
     write_key_restricted(DOT_KEY_PATH, dot.key_pem.as_bytes())?;
@@ -228,8 +230,45 @@ fn write_dot_tls_files(dot: &DotConfig) -> Result<()> {
     Ok(())
 }
 
+/// Write `data` to `path` with mode `0o644`.
+///
+/// Uses a write-then-rename for atomicity on the same filesystem.  This is
+/// the standard pattern used throughout the DayShield config layer.
+#[cfg(unix)]
+fn write_cert_file(path: &str, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let tmp = format!("{path}.tmp");
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o644)
+            .open(&tmp)
+            .with_context(|| format!("failed to open temp cert file {tmp}"))?;
+        f.write_all(data)
+            .with_context(|| format!("failed to write temp cert file {tmp}"))?;
+    }
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("failed to rename {tmp} to {path}"))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_cert_file(path: &str, data: &[u8]) -> Result<()> {
+    std::fs::write(path, data)
+        .with_context(|| format!("failed to write cert file {path}"))?;
+    Ok(())
+}
+
 /// Write `data` to `path` with mode `0o600` on Unix, or a plain write on
 /// other platforms.
+///
+/// Uses a write-then-rename for atomicity on the same filesystem.  Each call
+/// operates on a uniquely suffixed `.tmp` file so concurrent callers do not
+/// interfere with each other's temporary files.
 #[cfg(unix)]
 fn write_key_restricted(path: &str, data: &[u8]) -> Result<()> {
     use std::io::Write;

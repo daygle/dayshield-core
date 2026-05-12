@@ -90,6 +90,7 @@ impl AppState {
             .unwrap_or(std::path::Path::new(DEFAULT_CONFIG_DIR))
             .to_path_buf();
 
+        let config = config_store.load_ai_engine_config().unwrap_or_default();
         let state = Self {
             services: RwLock::new(services),
             interfaces: RwLock::new(vec![]),
@@ -99,7 +100,7 @@ impl AppState {
             metrics_buffer: RwLock::new(MetricsBuffer::default()),
             notify_queue,
             login_attempts: RwLock::new(HashMap::new()),
-            ai_runtime: AiRuntime::new(&config_dir),
+            ai_runtime: AiRuntime::new(&config_dir, config),
         };
         (state, notify_rx)
     }
@@ -115,7 +116,8 @@ impl AppState {
             .parent()
             .unwrap_or(std::path::Path::new(DEFAULT_CONFIG_DIR))
             .to_path_buf();
-        state.ai_runtime = AiRuntime::new(&config_dir);
+        let config = state.config_store.load_ai_engine_config().unwrap_or_default();
+        state.ai_runtime = AiRuntime::new(&config_dir, config);
         (state, rx)
     }
 

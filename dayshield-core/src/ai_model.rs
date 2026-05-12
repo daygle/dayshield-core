@@ -363,6 +363,10 @@ impl LocalLogisticModel {
         file.write_all(raw.as_bytes())?;
         Ok(())
     }
+
+    pub fn reset_to_default_weights(&mut self) {
+        self.weights = Self::default_weights();
+    }
 }
 
 impl RemoteInferenceModel {

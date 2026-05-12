@@ -132,17 +132,12 @@ pub struct AiRuntime {
 }
 
 impl AiRuntime {
-    pub fn new(config_dir: &Path) -> Self {
+    pub fn new(config_dir: &Path, model_config: AiEngineConfig) -> Self {
         let primary_path = config_dir.join("ai_engine").join("threat_events.db");
         let store = ThreatEventStore::open(&primary_path).unwrap_or_else(|e| {
             warn!(error = %e, path = %primary_path.display(), "ai_engine: falling back to temporary event store");
             ThreatEventStore::temporary().expect("failed to create temporary threat event store")
         });
-
-        let model_config = state
-            .config_store
-            .load_ai_engine_config()
-            .unwrap_or_default();
 
         Self {
             store: Arc::new(store),
@@ -161,26 +156,29 @@ impl AiRuntime {
         }
 
         let this = self.clone();
+        let state_clone = Arc::clone(&state);
         tokio::spawn(async move {
             let mut ticker = interval(Duration::from_secs(MAINTENANCE_INTERVAL_SECONDS));
             loop {
                 ticker.tick().await;
-                if let Err(e) = this.expire_blocks_and_reconcile(&state).await {
+                if let Err(e) = this.expire_blocks_and_reconcile(&state_clone).await {
                     warn!(error = %e, "ai_engine: failed to reconcile expiring blocks");
                 }
             }
         });
 
         let this = self.clone();
+        let state_clone = Arc::clone(&state);
         tokio::spawn(async move {
-            if let Err(e) = this.start_suricata_scoring(Arc::clone(&state)).await {
+            if let Err(e) = this.start_suricata_scoring(state_clone).await {
                 warn!(error = %e, "ai_engine: suricata scoring task failed");
             }
         });
 
         let this = self.clone();
+        let state_clone = Arc::clone(&state);
         tokio::spawn(async move {
-            if let Err(e) = this.start_firewall_scoring(Arc::clone(&state)).await {
+            if let Err(e) = this.start_firewall_scoring(state_clone).await {
                 warn!(error = %e, "ai_engine: firewall scoring task failed");
             }
         });
@@ -251,7 +249,7 @@ impl AiRuntime {
         }
 
         let flow = FlowMetadata {
-            timestamp: parse_suricata_timestamp(&timestamp).unwrap_or_else(now_unix_secs),
+            timestamp: Self::parse_suricata_timestamp(&timestamp).unwrap_or_else(now_unix_secs),
             src_ip: src_ip.clone(),
             dst_ip: dst_ip.clone(),
             src_port: Some(src_port).filter(|p| *p != 0),
@@ -527,7 +525,7 @@ impl AiRuntime {
         }
 
         let flow = FlowMetadata {
-            timestamp: parse_suricata_timestamp(&timestamp).unwrap_or_else(now_unix_secs),
+            timestamp: Self::parse_suricata_timestamp(&timestamp).unwrap_or_else(now_unix_secs),
             src_ip: src_ip.clone(),
             dst_ip: dst_ip.clone(),
             src_port,
@@ -646,10 +644,9 @@ impl AiRuntime {
             .load()
             .map(|cfg| {
                 cfg.dns
-                    .interface_blocklists
-                    .iter()
-                    .flat_map(|group| group.blocklists.iter())
-                    .count()
+                    .as_ref()
+                    .map(|dns| dns.interface_blocklists.iter().flat_map(|group| group.blocklists.iter()).count())
+                    .unwrap_or(0)
             })
             .unwrap_or(0)
             .min(1) as f64;
@@ -758,10 +755,9 @@ impl AiRuntime {
             .load()
             .map(|cfg| {
                 cfg.dns
-                    .interface_blocklists
-                    .iter()
-                    .flat_map(|group| group.blocklists.iter())
-                    .count()
+                    .as_ref()
+                    .map(|dns| dns.interface_blocklists.iter().flat_map(|group| group.blocklists.iter()).count())
+                    .unwrap_or(0)
             })
             .unwrap_or(0)
             .min(1) as f64;

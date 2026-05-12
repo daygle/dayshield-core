@@ -18,6 +18,7 @@ use tracing::{info, warn};
 
 mod api;
 mod ai_engine;
+mod ai_model;
 mod auth;
 mod backup;
 mod config;

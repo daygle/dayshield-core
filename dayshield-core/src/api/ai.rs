@@ -42,6 +42,11 @@ pub struct ListThreatsQuery {
     pub limit: usize,
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct FeedbackRequest {
+    pub feedback: String,
+}
+
 fn default_limit() -> usize {
     100
 }
@@ -90,6 +95,25 @@ pub async fn list_blocked(
 ) -> Result<impl IntoResponse, AiApiError> {
     let blocked = state.ai_runtime.list_blocked().await;
     Ok(Json(blocked))
+}
+
+/// POST /api/ai/feedback/{id}
+pub async fn submit_feedback(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<FeedbackRequest>,
+) -> Result<impl IntoResponse, AiApiError> {
+    let feedback = match req.feedback.as_str() {
+        "false_positive" => crate::ai_engine::FeedbackKind::FalsePositive,
+        "confirmed_malicious" => crate::ai_engine::FeedbackKind::ConfirmedMalicious,
+        _ => return Err(AiApiError::BadRequest(format!("invalid feedback value: {}", req.feedback))),
+    };
+
+    let event = state.ai_runtime.apply_feedback(&state, &id, feedback).await?;
+    match event {
+        Some(evt) => Ok(Json(evt).into_response()),
+        None => Err(AiApiError::NotFound),
+    }
 }
 
 /// GET /api/ai/config

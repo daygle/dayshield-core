@@ -162,6 +162,7 @@ pub(crate) fn parse_nftables_message(message: &str, timestamp: &str) -> Option<L
 
     let sport: u16 = kv.get("SPT").and_then(|v| v.parse().ok()).unwrap_or(0);
     let dport: u16 = kv.get("DPT").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let proto = kv.get("PROTO").cloned().unwrap_or_default();
     let iface = kv.get("IN").cloned().unwrap_or_default();
 
     Some(LogEvent::FirewallEvent {
@@ -171,6 +172,7 @@ pub(crate) fn parse_nftables_message(message: &str, timestamp: &str) -> Option<L
         dest_ip,
         sport,
         dport,
+        proto,
         iface,
     })
 }

@@ -37,12 +37,18 @@ pub enum LogEvent {
         src_ip: String,
         /// Destination IPv4 address (dotted-decimal).
         dest_ip: String,
-        /// Transport protocol (e.g. `"TCP"`, `"UDP"`).
+        /// Source port, if reported by Suricata.
+        src_port: Option<u16>,
+        /// Destination port, if reported by Suricata.
+        dest_port: Option<u16>,
+        /// Transport protocol (e.g. "TCP", "UDP").
         proto: String,
         /// Suricata alert signature text.
         signature: String,
         /// Alert severity level (1 = high, 3 = low).
         severity: u8,
+        /// Optional alert category from Suricata.
+        category: Option<String>,
     },
 
     /// An event logged by the nftables firewall via journald.
@@ -58,8 +64,8 @@ pub enum LogEvent {
         /// Source port (0 when not available).
         sport: u16,
         /// Destination port (0 when not available).
-        dport: u16,
-        /// Network interface name (e.g. `"eth0"`).
+        dport: u16,        /// Network protocol token if present (e.g. "TCP", "UDP").
+        proto: String,        /// Network interface name (e.g. `"eth0"`).
         iface: String,
     },
 

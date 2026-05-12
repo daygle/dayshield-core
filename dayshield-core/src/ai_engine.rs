@@ -17,6 +17,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
+    ai_model::AiModel,
     config::models::{
         Action, AiEngineConfig, FirewallRule, NotifyCategory,
     },
@@ -47,9 +48,11 @@ pub struct FlowMetadata {
     pub src_port: Option<u16>,
     pub dst_port: Option<u16>,
     pub protocol: String,
+    pub event_source: String,
+    pub action: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ThreatEvent {
     pub id: String,
     pub timestamp: u64,
@@ -58,6 +61,10 @@ pub struct ThreatEvent {
     pub src_port: Option<u16>,
     pub dst_port: Option<u16>,
     pub protocol: String,
+    pub event_source: String,
+    pub action: Option<String>,
+    pub signature: Option<String>,
+    pub alert_severity: Option<u8>,
     pub risk_score: f64,
     pub reasons: Vec<String>,
     pub blocked: bool,
@@ -65,6 +72,9 @@ pub struct ThreatEvent {
     pub escalated: bool,
     pub quarantine: bool,
     pub manually_unblocked: bool,
+    pub label: Option<f64>,
+    pub feedback: Option<String>,
+    pub feedback_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,11 +93,42 @@ struct ActiveBlock {
     quarantine: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum FeedbackKind {
+    FalsePositive,
+    ConfirmedMalicious,
+}
+
+impl FeedbackKind {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "false_positive" => Some(Self::FalsePositive),
+            "confirmed_malicious" => Some(Self::ConfirmedMalicious),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            FeedbackKind::FalsePositive => "false_positive",
+            FeedbackKind::ConfirmedMalicious => "confirmed_malicious",
+        }
+    }
+
+    fn label(self) -> f64 {
+        match self {
+            FeedbackKind::FalsePositive => 0.0,
+            FeedbackKind::ConfirmedMalicious => 1.0,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AiRuntime {
     store: Arc<ThreatEventStore>,
     active_blocks: Arc<Mutex<HashMap<IpAddr, ActiveBlock>>>,
     maintenance_started: Arc<AtomicBool>,
+    model: Arc<Mutex<AiModel>>,
 }
 
 impl AiRuntime {
@@ -98,10 +139,16 @@ impl AiRuntime {
             ThreatEventStore::temporary().expect("failed to create temporary threat event store")
         });
 
+        let model_config = state
+            .config_store
+            .load_ai_engine_config()
+            .unwrap_or_default();
+
         Self {
             store: Arc::new(store),
             active_blocks: Arc::new(Mutex::new(HashMap::new())),
             maintenance_started: Arc::new(AtomicBool::new(false)),
+            model: Arc::new(Mutex::new(AiModel::new(config_dir, &model_config))),
         }
     }
 
@@ -123,6 +170,107 @@ impl AiRuntime {
                 }
             }
         });
+
+        let this = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = this.start_suricata_scoring(Arc::clone(&state)).await {
+                warn!(error = %e, "ai_engine: suricata scoring task failed");
+            }
+        });
+
+        let this = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = this.start_firewall_scoring(Arc::clone(&state)).await {
+                warn!(error = %e, "ai_engine: firewall scoring task failed");
+            }
+        });
+    }
+
+    async fn start_firewall_scoring(&self, state: Arc<AppState>) -> Result<()> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::logs::LogEvent>(256);
+        tokio::spawn(async move {
+            crate::logs::firewall::stream_firewall(tx).await;
+        });
+
+        while let Some(event) = rx.recv().await {
+            if let Err(e) = self.handle_firewall_event(&state, event).await {
+                warn!(error = %e, "ai_engine: failed to process firewall event");
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_firewall_event(
+        &self,
+        state: &Arc<AppState>,
+        event: crate::logs::LogEvent,
+    ) -> Result<()> {
+        let (timestamp, action, src_ip, dst_ip, protocol, src_port, dst_port, iface) = match event {
+            crate::logs::LogEvent::FirewallEvent {
+                timestamp,
+                action,
+                src_ip,
+                dest_ip,
+                proto,
+                sport,
+                dport,
+                iface,
+            } => (timestamp, action, src_ip, dest_ip, proto, sport, dport, iface),
+            _ => return Ok(()),
+        };
+
+        if src_ip.is_empty() || dst_ip.is_empty() {
+            return Ok(());
+        }
+
+        let policy = state.config_store.load_ai_engine_config().unwrap_or_default();
+        if !policy.enabled {
+            return Ok(());
+        }
+
+        let history = self.gather_history_features(state, &src_ip, policy.escalation_window_seconds).await?;
+        let (risk_score, reasons) = self
+            .model
+            .lock()
+            .await
+            .predict_firewall_event(
+                &action,
+                &protocol,
+                &src_ip,
+                &dst_ip,
+                Some(src_port).filter(|p| *p != 0),
+                Some(dst_port).filter(|p| *p != 0),
+                &iface,
+                &history,
+            )
+            .await?;
+
+        if risk_score <= 0.0 {
+            return Ok(());
+        }
+
+        let flow = FlowMetadata {
+            timestamp: parse_suricata_timestamp(&timestamp).unwrap_or_else(now_unix_secs),
+            src_ip: src_ip.clone(),
+            dst_ip: dst_ip.clone(),
+            src_port: Some(src_port).filter(|p| *p != 0),
+            dst_port: Some(dst_port).filter(|p| *p != 0),
+            protocol: protocol.clone(),
+            event_source: "firewall".to_string(),
+            action: Some(action.clone()),
+        };
+
+        self.submit_risk_assessment(
+            state,
+            flow,
+            risk_score,
+            reasons,
+            None,
+            None,
+        )
+        .await?;
+        Ok(())
     }
 
     pub async fn submit_risk_assessment(
@@ -131,6 +279,8 @@ impl AiRuntime {
         flow: FlowMetadata,
         risk_score: f64,
         reasons: Vec<String>,
+        signature: Option<String>,
+        alert_severity: Option<u8>,
     ) -> Result<ThreatEvent> {
         let policy = state
             .config_store
@@ -186,6 +336,10 @@ impl AiRuntime {
             src_port: flow.src_port,
             dst_port: flow.dst_port,
             protocol: flow.protocol,
+            event_source: flow.event_source,
+            action: flow.action,
+            signature,
+            alert_severity,
             risk_score,
             reasons,
             blocked,
@@ -193,6 +347,9 @@ impl AiRuntime {
             escalated,
             quarantine,
             manually_unblocked: false,
+            label: None,
+            feedback: None,
+            feedback_at: None,
         };
 
         self.store.insert_event(&event)?;
@@ -241,6 +398,10 @@ impl AiRuntime {
                 src_port: None,
                 dst_port: None,
                 protocol: "manual".to_string(),
+                event_source: "manual".to_string(),
+                action: None,
+                signature: None,
+                alert_severity: None,
                 risk_score: 0.0,
                 reasons: vec!["manual unblock override".to_string()],
                 blocked: false,
@@ -248,6 +409,9 @@ impl AiRuntime {
                 escalated: false,
                 quarantine: false,
                 manually_unblocked: true,
+                label: Some(0.0),
+                feedback: Some("manual_unblock".to_string()),
+                feedback_at: Some(now_unix_secs()),
             };
             self.store.insert_event(&override_event)?;
         }
@@ -284,6 +448,351 @@ impl AiRuntime {
         }
 
         Ok(())
+    }
+
+    async fn start_suricata_scoring(&self, state: Arc<AppState>) -> Result<()> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::logs::LogEvent>(256);
+        tokio::spawn(async move {
+            crate::logs::suricata::stream_suricata(tx).await;
+        });
+
+        while let Some(event) = rx.recv().await {
+            if let Err(e) = self.handle_suricata_event(&state, event).await {
+                warn!(error = %e, "ai_engine: failed to process suricata alert");
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_suricata_event(
+        &self,
+        state: &Arc<AppState>,
+        event: crate::logs::LogEvent,
+    ) -> Result<()> {
+        let (timestamp, src_ip, dst_ip, src_port, dst_port, protocol, signature, severity, category) = match event {
+            crate::logs::LogEvent::SuricataAlert {
+                timestamp,
+                src_ip,
+                dest_ip,
+                src_port,
+                dest_port,
+                proto,
+                signature,
+                severity,
+                category,
+            } => (
+                timestamp,
+                src_ip,
+                dest_ip,
+                src_port,
+                dest_port,
+                proto,
+                signature,
+                severity,
+                category,
+            ),
+            _ => return Ok(()),
+        };
+
+        if src_ip.is_empty() || dst_ip.is_empty() {
+            return Ok(());
+        }
+
+        let policy = state.config_store.load_ai_engine_config().unwrap_or_default();
+        if !policy.enabled {
+            return Ok(());
+        }
+
+        let history = self.gather_history_features(state, &src_ip, policy.escalation_window_seconds).await?;
+        let (risk_score, reasons) = self
+            .model
+            .lock()
+            .await
+            .predict_suricata_alert(
+                &signature,
+                severity,
+                category.as_deref(),
+                &protocol,
+                &src_ip,
+                &dst_ip,
+                src_port,
+                dst_port,
+                &history,
+            )
+            .await?;
+
+        if risk_score <= 0.0 {
+            return Ok(());
+        }
+
+        let flow = FlowMetadata {
+            timestamp: parse_suricata_timestamp(&timestamp).unwrap_or_else(now_unix_secs),
+            src_ip: src_ip.clone(),
+            dst_ip: dst_ip.clone(),
+            src_port,
+            dst_port,
+            protocol: protocol.clone(),
+            event_source: "suricata".to_string(),
+            action: None,
+        };
+
+        self.submit_risk_assessment(
+            state,
+            flow,
+            risk_score,
+            reasons,
+            Some(signature),
+            Some(severity),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn apply_feedback(
+        &self,
+        state: &Arc<AppState>,
+        id: &str,
+        feedback: FeedbackKind,
+    ) -> Result<Option<ThreatEvent>> {
+        let mut event = match self.get_threat_event(id)? {
+            Some(event) => event,
+            None => return Ok(None),
+        };
+
+        if let Some(label) = Some(feedback.label()) {
+            let history = self.gather_history_features(state, &event.src_ip, state.config_store.load_ai_engine_config()?.escalation_window_seconds).await?;
+            let features = AiModel::build_feature_vector(
+                event.signature.as_deref(),
+                event.alert_severity,
+                None,
+                &event.protocol,
+                &event.src_ip,
+                &event.dst_ip,
+                event.src_port,
+                event.dst_port,
+                event.action.as_deref(),
+                None,
+                &history,
+            ).0;
+            let mut model = self.model.lock().await;
+            model.train_on_feedback(&features, label)?;
+        }
+
+        event.feedback = Some(feedback.as_str().to_string());
+        event.feedback_at = Some(now_unix_secs());
+        event.label = Some(feedback.label());
+        self.store.insert_event(&event)?;
+        self.retrain_model_from_history(state).await?;
+        Ok(Some(event))
+    }
+
+    async fn gather_history_features(
+        &self,
+        state: &Arc<AppState>,
+        src_ip: &str,
+        window_seconds: u64,
+    ) -> Result<crate::ai_model::AiContextFeatures> {
+        let min_timestamp = now_unix_secs().saturating_sub(window_seconds);
+        let recent_events = self.store.list_recent(2000)?;
+
+        let mut high_risk_count = 0.0;
+        let mut feedback_malicious = 0.0;
+        let mut feedback_false_positive = 0.0;
+        let mut manual_unblock = 0.0;
+        let mut firewall_drops = 0.0;
+        let mut firewall_accepts = 0.0;
+        let mut scan_events = 0.0;
+
+        for event in recent_events.into_iter() {
+            if event.src_ip != src_ip || event.timestamp < min_timestamp {
+                continue;
+            }
+            if event.risk_score >= 0.8 {
+                high_risk_count += 1.0;
+            }
+            if event.feedback.as_deref() == Some("confirmed_malicious") {
+                feedback_malicious += 1.0;
+            }
+            if event.feedback.as_deref() == Some("false_positive") {
+                feedback_false_positive += 1.0;
+            }
+            if event.manually_unblocked {
+                manual_unblock += 1.0;
+            }
+            if event.event_source == "firewall" {
+                if event.action.as_deref().map_or(false, |a| a.eq_ignore_ascii_case("drop")) {
+                    firewall_drops += 1.0;
+                }
+                if event.action.as_deref().map_or(false, |a| a.eq_ignore_ascii_case("accept")) {
+                    firewall_accepts += 1.0;
+                }
+            }
+            if Self::is_scan_like_event(&event) {
+                scan_events += 1.0;
+            }
+        }
+
+        let crowdsec_decisions = {
+            let decisions = state.crowdsec_decisions.read().await;
+            decisions
+                .iter()
+                .filter(|decision| decision.value.contains(src_ip))
+                .count() as f64
+        };
+
+        let dns_blocklist_configured = state
+            .config_store
+            .load()
+            .map(|cfg| {
+                cfg.dns
+                    .interface_blocklists
+                    .iter()
+                    .flat_map(|group| group.blocklists.iter())
+                    .count()
+            })
+            .unwrap_or(0)
+            .min(1) as f64;
+
+        Ok(crate::ai_model::AiContextFeatures {
+            recent_high_risk_count: high_risk_count,
+            recent_feedback_malicious: feedback_malicious,
+            recent_feedback_false_positive: feedback_false_positive,
+            recent_manual_unblock: manual_unblock,
+            recent_firewall_drops: firewall_drops,
+            recent_firewall_accepts: firewall_accepts,
+            recent_scan_events: scan_events,
+            crowdsec_decisions,
+            dns_blocklist_configured,
+        })
+    }
+
+    async fn retrain_model_from_history(&self, state: &Arc<AppState>) -> Result<()> {
+        let mut events = self.store.list_recent(2000)?;
+        events.sort_by_key(|event| event.timestamp);
+
+        let mut model = self.model.lock().await;
+        model.reset_to_default_weights();
+
+        for event in events.iter().filter(|event| event.label.is_some()) {
+            let label = event.label.unwrap();
+            let history = self.history_features_for_event(state, event, &events).await?;
+            let features = AiModel::build_feature_vector(
+                event.signature.as_deref(),
+                event.alert_severity,
+                None,
+                &event.protocol,
+                &event.src_ip,
+                &event.dst_ip,
+                event.src_port,
+                event.dst_port,
+                event.action.as_deref(),
+                None,
+                &history,
+            ).0;
+            model.train_on_feedback(&features, label)?;
+        }
+
+        Ok(())
+    }
+
+    async fn history_features_for_event(
+        &self,
+        state: &Arc<AppState>,
+        target: &ThreatEvent,
+        events: &[ThreatEvent],
+    ) -> Result<crate::ai_model::AiContextFeatures> {
+        let window_seconds = 3600;
+        let min_timestamp = target.timestamp.saturating_sub(window_seconds);
+
+        let mut high_risk_count = 0.0;
+        let mut feedback_malicious = 0.0;
+        let mut feedback_false_positive = 0.0;
+        let mut manual_unblock = 0.0;
+        let mut firewall_drops = 0.0;
+        let mut firewall_accepts = 0.0;
+        let mut scan_events = 0.0;
+
+        for event in events.iter() {
+            if event.timestamp >= target.timestamp {
+                break;
+            }
+            if event.src_ip != target.src_ip || event.timestamp < min_timestamp {
+                continue;
+            }
+            if event.risk_score >= 0.8 {
+                high_risk_count += 1.0;
+            }
+            if event.feedback.as_deref() == Some("confirmed_malicious") {
+                feedback_malicious += 1.0;
+            }
+            if event.feedback.as_deref() == Some("false_positive") {
+                feedback_false_positive += 1.0;
+            }
+            if event.manually_unblocked {
+                manual_unblock += 1.0;
+            }
+            if event.event_source == "firewall" {
+                if event.action.as_deref().map_or(false, |a| a.eq_ignore_ascii_case("drop")) {
+                    firewall_drops += 1.0;
+                }
+                if event.action.as_deref().map_or(false, |a| a.eq_ignore_ascii_case("accept")) {
+                    firewall_accepts += 1.0;
+                }
+            }
+            if Self::is_scan_like_event(event) {
+                scan_events += 1.0;
+            }
+        }
+
+        let crowdsec_decisions = {
+            let decisions = state.crowdsec_decisions.read().await;
+            decisions
+                .iter()
+                .filter(|decision| decision.value.contains(&target.src_ip))
+                .count() as f64
+        };
+
+        let dns_blocklist_configured = state
+            .config_store
+            .load()
+            .map(|cfg| {
+                cfg.dns
+                    .interface_blocklists
+                    .iter()
+                    .flat_map(|group| group.blocklists.iter())
+                    .count()
+            })
+            .unwrap_or(0)
+            .min(1) as f64;
+
+        Ok(crate::ai_model::AiContextFeatures {
+            recent_high_risk_count: high_risk_count,
+            recent_feedback_malicious: feedback_malicious,
+            recent_feedback_false_positive: feedback_false_positive,
+            recent_manual_unblock: manual_unblock,
+            recent_firewall_drops: firewall_drops,
+            recent_firewall_accepts: firewall_accepts,
+            recent_scan_events: scan_events,
+            crowdsec_decisions,
+            dns_blocklist_configured,
+        })
+    }
+
+    fn is_scan_like_event(event: &ThreatEvent) -> bool {
+        let lower = event
+            .signature
+            .as_deref()
+            .unwrap_or_default()
+            .to_lowercase();
+        let scan_terms = ["scan", "recon", "port sweep", "nmap", "masscan"];
+        scan_terms.iter().any(|term| lower.contains(term))
+    }
+
+    fn parse_suricata_timestamp(timestamp: &str) -> Option<u64> {
+        chrono::DateTime::parse_from_str(timestamp, "%Y-%m-%dT%H:%M:%S%.f%z")
+            .map(|dt| dt.timestamp().try_into().unwrap_or_default())
+            .ok()
     }
 
     async fn reconcile_block_rules(&self, state: &Arc<AppState>) -> Result<()> {
@@ -345,7 +854,7 @@ pub async fn submit_flow_risk(
 ) -> Result<ThreatEvent> {
     state
         .ai_runtime
-        .submit_risk_assessment(state, flow, risk_score, reasons)
+        .submit_risk_assessment(state, flow, risk_score, reasons, None, None)
         .await
 }
 
@@ -499,6 +1008,10 @@ mod tests {
             src_port: Some(12345),
             dst_port: Some(53),
             protocol: "udp".to_string(),
+            event_source: "test".to_string(),
+            action: Some("DROP".to_string()),
+            signature: None,
+            alert_severity: None,
             risk_score: 0.92,
             reasons: vec!["suspicious dns burst".to_string()],
             blocked: true,
@@ -506,6 +1019,9 @@ mod tests {
             escalated: false,
             quarantine: false,
             manually_unblocked: false,
+            label: None,
+            feedback: None,
+            feedback_at: None,
         };
 
         store.insert_event(&event).unwrap();

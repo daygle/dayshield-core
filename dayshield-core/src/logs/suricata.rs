@@ -25,6 +25,8 @@ struct EveRecord {
     timestamp: Option<String>,
     src_ip: Option<String>,
     dest_ip: Option<String>,
+    src_port: Option<u16>,
+    dest_port: Option<u16>,
     proto: Option<String>,
     event_type: Option<String>,
     alert: Option<EveAlert>,
@@ -34,6 +36,7 @@ struct EveRecord {
 struct EveAlert {
     signature: Option<String>,
     severity: Option<u8>,
+    category: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -87,9 +90,12 @@ pub(crate) fn parse_eve_line(line: &str) -> Option<LogEvent> {
         timestamp: record.timestamp.unwrap_or_default(),
         src_ip: record.src_ip.unwrap_or_default(),
         dest_ip: record.dest_ip.unwrap_or_default(),
+        src_port: record.src_port,
+        dest_port: record.dest_port,
         proto: record.proto.unwrap_or_default(),
         signature: alert.signature.unwrap_or_default(),
         severity: alert.severity.unwrap_or(3),
+        category: alert.category,
     })
 }
 

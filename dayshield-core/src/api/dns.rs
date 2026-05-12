@@ -260,7 +260,12 @@ pub async fn update_config(
 
     // --- Apply -------------------------------------------------------------
 
-    apply_config(&cfg)
+    let dot = state
+        .config_store
+        .load_dot_config()
+        .map_err(DnsError::StorageError)?;
+
+    apply_config(&cfg, dot.as_ref())
         .await
         .map_err(|e| DnsError::EngineError(e.to_string()))?;
 
@@ -349,7 +354,12 @@ pub async fn create_interface_blocklist(
         .save_dns_config(cfg.clone())
         .map_err(DnsError::StorageError)?;
 
-    apply_config(&cfg)
+    let dot = state
+        .config_store
+        .load_dot_config()
+        .map_err(DnsError::StorageError)?;
+
+    apply_config(&cfg, dot.as_ref())
         .await
         .map_err(|e| DnsError::EngineError(e.to_string()))?;
 
@@ -404,7 +414,12 @@ pub async fn delete_interface_blocklist(
         .save_dns_config(cfg.clone())
         .map_err(DnsError::StorageError)?;
 
-    apply_config(&cfg)
+    let dot = state
+        .config_store
+        .load_dot_config()
+        .map_err(DnsError::StorageError)?;
+
+    apply_config(&cfg, dot.as_ref())
         .await
         .map_err(|e| DnsError::EngineError(e.to_string()))?;
 

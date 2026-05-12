@@ -738,6 +738,66 @@ pub struct DnsLocalRecord {
 }
 
 // ---------------------------------------------------------------------------
+// DNS-over-TLS (DoT)
+// ---------------------------------------------------------------------------
+
+fn default_dot_port() -> u16 {
+    853
+}
+
+/// Configuration for the DNS-over-TLS (DoT) listener.
+///
+/// When enabled, Unbound listens on [`DotConfig::port`] (default 853) using
+/// the provided TLS certificate and private key, accepting connections from
+/// any client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DotConfig {
+    /// Whether the DoT listener should be active.
+    pub enabled: bool,
+    /// TCP port to listen on.  Defaults to 853 (the IANA-assigned DoT port).
+    #[serde(default = "default_dot_port")]
+    pub port: u16,
+    /// PEM-encoded TLS certificate chain presented to connecting clients.
+    pub cert_pem: String,
+    /// PEM-encoded private key matching the certificate.
+    pub key_pem: String,
+}
+
+impl Default for DotConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 853,
+            cert_pem: String::new(),
+            key_pem: String::new(),
+        }
+    }
+}
+
+/// Return `Ok(())` if `config` is a valid [`DotConfig`], or `Err` with a
+/// descriptive message.
+pub fn validate_dot_config(config: &DotConfig) -> Result<(), String> {
+    if config.port == 0 {
+        return Err("DoT port must be non-zero".into());
+    }
+    if config.enabled {
+        if config.cert_pem.trim().is_empty() {
+            return Err("DoT cert_pem must not be empty when enabled".into());
+        }
+        if config.key_pem.trim().is_empty() {
+            return Err("DoT key_pem must not be empty when enabled".into());
+        }
+        if !config.cert_pem.contains("-----BEGIN") {
+            return Err("DoT cert_pem does not appear to be a valid PEM certificate".into());
+        }
+        if !config.key_pem.contains("-----BEGIN") {
+            return Err("DoT key_pem does not appear to be a valid PEM private key".into());
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // DHCP (Kea / dnsmasq)
 // ---------------------------------------------------------------------------
 
@@ -1909,4 +1969,7 @@ pub struct SystemConfig {
     /// Administrator account security policy.
     #[serde(default)]
     pub admin_security: Option<AdminSecuritySettings>,
+    /// DNS-over-TLS (DoT) listener configuration.
+    #[serde(default)]
+    pub dot: Option<DotConfig>,
 }

@@ -6,7 +6,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, RwLock};
 
 use crate::{
     ai_engine::AiRuntime,
@@ -14,6 +14,7 @@ use crate::{
         models::{CrowdSecDecision, FirewallRule, Interface},
         ConfigStore,
     },
+    logs::LogEvent,
     metrics::buffer::MetricsBuffer,
     notify::queue::NotifyQueue,
 };
@@ -56,6 +57,8 @@ pub struct AppState {
     pub login_attempts: RwLock<HashMap<String, (u32, Option<u64>)>>,
     /// AI runtime for threat recording and automated blocking.
     pub ai_runtime: AiRuntime,
+    /// Broadcast sender for live AI log events.
+    pub ai_log_sender: broadcast::Sender<LogEvent>,
 }
 
 impl AppState {
@@ -82,6 +85,7 @@ impl AppState {
         }
 
         let (notify_queue, notify_rx) = NotifyQueue::new();
+        let (ai_log_sender, _) = broadcast::channel::<LogEvent>(1024);
 
         let config_store = ConfigStore::new();
         let config_dir = config_store
@@ -101,6 +105,7 @@ impl AppState {
             notify_queue,
             login_attempts: RwLock::new(HashMap::new()),
             ai_runtime: AiRuntime::new(&config_dir, config),
+            ai_log_sender,
         };
         (state, notify_rx)
     }

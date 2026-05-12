@@ -311,6 +311,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/ai/threats/{id}", get(ai::get_threat))
         .route("/api/ai/unblock/{ip}", post(ai::unblock_ip))
         .route("/api/ai/blocked", get(ai::list_blocked))
+        .route("/api/ai/config", get(ai::get_config))
+        .route("/api/ai/config", post(ai::update_config))
         // NAT
         .route("/nat/config", get(nat::get_config))
         .route("/nat/config", put(nat::put_config))

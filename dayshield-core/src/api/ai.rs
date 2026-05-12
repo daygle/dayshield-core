@@ -7,6 +7,7 @@ use axum::{
     Json,
 };
 
+use crate::config::models::{AiEngineConfig, validate_ai_engine_config};
 use crate::state::AppState;
 
 #[derive(Debug, thiserror::Error)]
@@ -89,4 +90,24 @@ pub async fn list_blocked(
 ) -> Result<impl IntoResponse, AiApiError> {
     let blocked = state.ai_runtime.list_blocked().await;
     Ok(Json(blocked))
+}
+
+/// GET /api/ai/config
+pub async fn get_config(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, AiApiError> {
+    let config = state.config_store.load_ai_engine_config()?;
+    Ok(Json(config))
+}
+
+/// POST /api/ai/config
+pub async fn update_config(
+    State(state): State<Arc<AppState>>,
+    Json(config): Json<AiEngineConfig>,
+) -> Result<impl IntoResponse, AiApiError> {
+    validate_ai_engine_config(&config)
+        .map_err(|e| AiApiError::BadRequest(e))?;
+
+    state.config_store.save_ai_engine_config(config.clone())?;
+    Ok(Json(config))
 }

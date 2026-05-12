@@ -62,9 +62,11 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `POST /system/updates/appliance-rebuild-complete`     - clear pending appliance rebuild status
 /// - `POST /system/updates/rootfs-live-rollback`           - rollback latest in-place rootfs live update
 /// - `GET  /interfaces`                                    - list all network interfaces
-/// - `POST /interfaces`                                    - create / update a network interface/// - `GET  /gateways`                                       - list gateways with live routing and health state
+/// - `POST /interfaces`                                    - create or update a network interface
+/// - `GET  /gateways`                                      - list gateways with live routing and health state
 /// - `POST /gateways`                                      - create or update a gateway
-/// - `DELETE /gateways/{name}`                             - delete a gateway/// - `GET  /firewall/rules`                                - list firewall rules
+/// - `DELETE /gateways/{name}`                             - delete a gateway
+/// - `GET  /firewall/rules`                                - list firewall rules
 /// - `POST /firewall/rules`                                - add a new firewall rule
 /// - `GET  /firewall/aliases`                              - list firewall aliases
 /// - `POST /firewall/aliases`                              - create a firewall alias
@@ -73,11 +75,11 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `POST /dns/config`                                    - update DNS (Unbound) configuration
 /// - `GET  /dns/overrides`                                 - list DNS host and domain overrides
 /// - `POST /dns/overrides`                                 - create a DNS override
-/// - `DELETE /dns/overrides/{hostname_or_domain}`          - delete a DNS override
+/// - `DELETE /dns/overrides/{name}`                        - delete a DNS override
 /// - `GET  /dhcp/config`                                   - get DHCP (dnsmasq) configuration
 /// - `POST /dhcp/config`                                   - update DHCP (dnsmasq) configuration
-/// - `GET  /ips/config`                                    - get Suricata IPS configuration
-/// - `POST /ips/config`                                    - update Suricata IPS configuration
+/// - `GET  /suricata/config`                               - get Suricata configuration
+/// - `POST /suricata/config`                               - update Suricata configuration
 /// - `GET  /wireguard/interfaces`                          - list WireGuard interfaces
 /// - `POST /wireguard/interfaces`                          - create / update a WireGuard interface
 /// - `DELETE /wireguard/interfaces/{name}`                 - remove a WireGuard interface
@@ -108,6 +110,20 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `GET  /ntp/config`                                    - get NTP configuration
 /// - `POST /ntp/config`                                    - update + apply NTP configuration
 /// - `GET  /ntp/status`                                    - live NTP synchronisation status
+/// - `POST /ntp/resync`                                    - trigger an NTP resynchronization
+/// - `GET  /cloudflared/config`                            - get Cloudflared configuration
+/// - `POST /cloudflared/config`                            - update Cloudflared configuration
+/// - `GET  /cloudflared/status`                            - get Cloudflared service status
+/// - `POST /cloudflared/restart`                           - restart the Cloudflared service
+/// - `GET  /cloudflared/logs`                              - get Cloudflared logs
+/// - `GET  /nat/config`                                    - get NAT configuration
+/// - `PUT  /nat/config`                                    - update NAT configuration
+/// - `GET  /nat/rules`                                     - list NAT rules
+/// - `POST /nat/rules`                                     - create a NAT rule
+/// - `PUT  /nat/rules/{id}`                                - update a NAT rule
+/// - `DELETE /nat/rules/{id}`                              - delete a NAT rule
+/// - `GET  /admin/security`                                - get admin security settings
+/// - `PUT  /admin/security`                                - update admin security settings
 /// - `GET  /dashboard/system`                              - host resource usage summary
 /// - `GET  /dashboard/network`                             - WAN/LAN network overview
 /// - `GET  /dashboard/security`                            - firewall, Suricata, CrowdSec summary

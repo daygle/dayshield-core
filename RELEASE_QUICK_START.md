@@ -8,7 +8,7 @@
 
 ### 1. Enable GitHub Actions (if not already)
 
-In `.github/workflows/release-artifacts.yml` (already created in dayshield-core):
+In `.github/workflows/release-artifacts.yml` (already created in this repository):
 - Automatically triggers on tag push
 - Builds core, ui, rootfs
 - Uploads to GitHub Releases
@@ -67,15 +67,15 @@ Already configured in code. In `updates_settings.json`:
   "autoCheckEnabled": true,
   "checkIntervalMinutes": 60,
   "updateMode": "registry",
-  "registryUrl": "https://api.github.com/repos/daygle/dayshield-release",
-  "verifyArtifactSignatures": false
+  "registryUrl": "https://api.github.com/repos/daygle/dayshield-core",
+  "verifyArtifactSignatures": true
 }
 ```
 
-**Note**: Uses `dayshield-core` repo by default. Change `registryUrl` to use different repo:
+**Note**: Uses `dayshield-core` repo by default. Change `registryUrl` to use a different repo:
 ```json
 {
-  "registryUrl": "https://api.github.com/repos/daygle/dayshield-release"
+  "registryUrl": "https://api.github.com/repos/daygle/dayshield-core"
 }
 ```
 
@@ -165,4 +165,4 @@ git push origin v1.0.1
 
 - [Full Documentation](UPDATE_SYSTEM.md) - Complete architecture guide
 - [GitHub Actions Workflow](.github/workflows/release-artifacts.yml) - CI/CD pipeline
-- [Update API](../api/system.rs) - HTTP endpoints
+- [Update API](dayshield-core/src/api/system.rs) - HTTP endpoints

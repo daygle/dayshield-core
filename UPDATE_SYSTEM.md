@@ -17,7 +17,7 @@ The redesigned update system eliminates the need for build tools (cargo, npm) on
    - Uploads to GitHub Releases
 
 2. **Artifact Storage** (GitHub Releases)
-   - Registry: `https://api.github.com/repos/daygle/dayshield-release` (or use any repo)
+   - Registry: `https://api.github.com/repos/daygle/dayshield-core` (or use any repo)
    - Release format: `v1.2.3` semantic versioning
    - Assets: `core-v1.2.3.tar.zst`, `ui-v1.2.3.tar.zst`, `rootfs-v1.2.3.tar.zst`, `checksums.txt`
 
@@ -45,8 +45,8 @@ git push origin v1.0.0
 
 Option B: Create dedicated release repository
 ```bash
-git clone https://github.com/daygle/dayshield-release.git
-cd dayshield-release
+git clone https://github.com/<org>/<release-repo>.git
+cd <release-repo>
 # No code needed, only workflows and releases
 ```
 
@@ -66,7 +66,7 @@ Default configuration automatically uses GitHub Releases. Update settings:
 ```json
 {
   "updateMode": "registry",
-  "registryUrl": "https://api.github.com/repos/daygle/dayshield-release"
+  "registryUrl": "https://api.github.com/repos/daygle/dayshield-core"
 }
 ```
 
@@ -119,7 +119,7 @@ echo "Released v${VERSION}"
 ### Check for Updates
 
 1. User clicks "Check for Updates" in web console
-2. Appliance queries: `GET https://api.github.com/repos/daygle/dayshield-release/releases/latest`
+2. Appliance queries: `GET https://api.github.com/repos/daygle/dayshield-core/releases/latest`
 3. Parses response to find:
    - `core-v*.tar.zst`
    - `ui-v*.tar.zst`

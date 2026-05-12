@@ -81,7 +81,7 @@ cargo test -p dayshield-core
 ## Releases
 
 DayShield release artifacts are produced by
-`dayshield-core/.github/workflows/release-artifacts.yml`.
+`.github/workflows/release-artifacts.yml`.
 
 Release flow:
 

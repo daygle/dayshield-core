@@ -215,12 +215,176 @@ impl AiModel {
         }
     }
 
-    pub fn save(&self) -> Result<()> {
-        if let AiModelRuntime::Local(local) = &self.inner {
-            local.save()
-        } else {
-            Ok(())
+    pub fn reset_to_default_weights(&mut self) {
+        if let AiModelRuntime::Local(local) = &mut self.inner {
+            local.reset_to_default_weights();
         }
+    }
+
+    pub fn build_feature_vector(
+        signature: Option<&str>,
+        severity: Option<u8>,
+        category: Option<&str>,
+        protocol: &str,
+        src_ip: &str,
+        dst_ip: &str,
+        src_port: Option<u16>,
+        dst_port: Option<u16>,
+        action: Option<&str>,
+        iface: Option<&str>,
+        history: &AiContextFeatures,
+    ) -> (Vec<f64>, Vec<String>) {
+        let mut reasons = Vec::new();
+        let normalized_severity = severity.map(Self::normalize_severity).unwrap_or(0.25);
+
+        let signature_lc = signature.unwrap_or_default().to_lowercase();
+        let category_lc = category.unwrap_or_default().to_lowercase();
+
+        if let Some(sig) = signature {
+            reasons.push(format!("Signature matched: {}", sig));
+        }
+        if !category_lc.is_empty() {
+            reasons.push(format!("Alert category: {}", category_lc));
+        }
+
+        let scan = (signature_lc.contains("scan") || category_lc.contains("scan") || category_lc.contains("recon")) as u8 as f64;
+        let brute = (signature_lc.contains("brute") || signature_lc.contains("password") || category_lc.contains("brute")) as u8 as f64;
+        let malware = (signature_lc.contains("botnet")
+            || signature_lc.contains("malware")
+            || signature_lc.contains("trojan")
+            || signature_lc.contains("ransomware")
+            || category_lc.contains("malware")) as u8 as f64;
+        let ssh = (signature_lc.contains("ssh") || category_lc.contains("ssh")) as u8 as f64;
+        let rdp = (signature_lc.contains("rdp") || category_lc.contains("rdp")) as u8 as f64;
+        let http = ((protocol.eq_ignore_ascii_case("tcp") && signature_lc.contains("http")) || category_lc.contains("http")) as u8 as f64;
+
+        let proto_tcp = protocol.eq_ignore_ascii_case("tcp") as u8 as f64;
+        let proto_udp = protocol.eq_ignore_ascii_case("udp") as u8 as f64;
+        let proto_icmp = protocol.eq_ignore_ascii_case("icmp") as u8 as f64;
+
+        let high_risk_port = Self::is_high_risk_port(src_port) || Self::is_high_risk_port(dst_port);
+        let high_risk_port = if high_risk_port { 1.0 } else { 0.0 };
+
+        let action_drop = action.map_or(0.0, |a| a.eq_ignore_ascii_case("drop") as u8 as f64);
+        let action_accept = action.map_or(0.0, |a| a.eq_ignore_ascii_case("accept") as u8 as f64);
+        let action_other = if action.is_some() && action_drop == 0.0 && action_accept == 0.0 {
+            1.0
+        } else {
+            0.0
+        };
+
+        let external_iface = iface
+            .map(|value| {
+                let lower = value.to_lowercase();
+                !lower.is_empty() && lower != "lo" && !lower.starts_with("br") && !lower.starts_with("docker")
+            })
+            .unwrap_or(false) as u8 as f64;
+
+        let src_public = Self::is_public_ip(src_ip) as u8 as f64;
+        let dst_public = Self::is_public_ip(dst_ip) as u8 as f64;
+
+        if src_public > 0.0 {
+            reasons.push("Source IP appears public".to_string());
+        }
+        if dst_public > 0.0 {
+            reasons.push("Destination IP appears public".to_string());
+        }
+        if action_drop > 0.0 {
+            reasons.push("Firewall drop action observed".to_string());
+        }
+        if action_accept > 0.0 {
+            reasons.push("Firewall accept action observed".to_string());
+        }
+        if high_risk_port > 0.0 {
+            reasons.push("High-risk port observed".to_string());
+        }
+        if history.recent_high_risk_count > 0.0 {
+            reasons.push(format!("{} recent high-risk events for this source", history.recent_high_risk_count));
+        }
+        if history.recent_feedback_malicious > 0.0 {
+            reasons.push("Source IP has prior confirmed malicious feedback".to_string());
+        }
+        if history.recent_feedback_false_positive > 0.0 {
+            reasons.push("Source IP has prior false positive feedback".to_string());
+        }
+        if history.recent_manual_unblock > 0.0 {
+            reasons.push("Source IP was manually unblocked previously".to_string());
+        }
+        if history.recent_firewall_drops > 0.0 {
+            reasons.push(format!("{} recent firewall drop events", history.recent_firewall_drops));
+        }
+        if history.recent_scan_events > 0.0 {
+            reasons.push(format!("{} recent scan-like events", history.recent_scan_events));
+        }
+        if history.crowdsec_decisions > 0.0 {
+            reasons.push("CrowdSec has decisions for this source IP".to_string());
+        }
+        if history.dns_blocklist_configured > 0.0 {
+            reasons.push("DNS blocklist sources are configured".to_string());
+        }
+
+        if reasons.is_empty() {
+            reasons.push("AI model applied baseline risk features".to_string());
+        }
+
+        let features = vec![
+            1.0,
+            normalized_severity,
+            src_public,
+            dst_public,
+            scan,
+            brute,
+            malware,
+            ssh,
+            rdp,
+            http,
+            proto_tcp,
+            proto_udp,
+            proto_icmp,
+            high_risk_port,
+            action_drop,
+            action_accept,
+            action_other,
+            external_iface,
+            history.recent_scan_events,
+            history.crowdsec_decisions,
+            history.dns_blocklist_configured,
+            history.recent_high_risk_count,
+            history.recent_feedback_malicious,
+            history.recent_feedback_false_positive,
+            history.recent_manual_unblock,
+            history.recent_firewall_drops,
+            history.recent_firewall_accepts,
+        ];
+
+        (features, reasons)
+    }
+
+    fn normalize_severity(severity: u8) -> f64 {
+        match severity {
+            1 => 1.0,
+            2 => 0.75,
+            3 => 0.45,
+            _ => 0.25,
+        }
+    }
+
+    fn is_high_risk_port(port: Option<u16>) -> bool {
+        matches!(port, Some(22 | 23 | 25 | 53 | 80 | 123 | 443 | 445 | 3389 | 5900 | 8080))
+    }
+
+    fn is_public_ip(value: &str) -> bool {
+        value
+            .parse::<IpAddr>()
+            .map(|ip| match ip {
+                IpAddr::V4(addr) => {
+                    !(addr.is_private() || addr.is_loopback() || addr.is_link_local() || addr.is_broadcast() || addr.is_documentation())
+                }
+                IpAddr::V6(addr) => {
+                    !(addr.is_loopback() || addr.is_unique_local() || addr.is_unspecified() || addr.is_multicast())
+                }
+            })
+            .unwrap_or(false)
     }
 }
 

@@ -1,8 +1,8 @@
 //! DNS override endpoints.
 //!
-//! - `GET  /dns/overrides`                        — list all overrides
-//! - `POST /dns/overrides`                        — create a host or domain override
-//! - `DELETE /dns/overrides/{hostname_or_domain}` — remove an override by hostname or domain
+//! - `GET  /dns/overrides`                        - list all overrides
+//! - `POST /dns/overrides`                        - create a host or domain override
+//! - `DELETE /dns/overrides/{hostname_or_domain}` - remove an override by hostname or domain
 
 use std::sync::Arc;
 

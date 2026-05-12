@@ -101,7 +101,7 @@ pub struct LoginData {
     pub token: String,
 }
 
-/// Response body for `POST /auth/login` — follows the standard ApiResponse envelope.
+/// Response body for `POST /auth/login` - follows the standard ApiResponse envelope.
 #[derive(Debug, Serialize)]
 pub struct LoginResponse {
     pub success: bool,
@@ -174,7 +174,7 @@ pub async fn login_with_paths(
         return Err(AuthApiError::InvalidCredentials);
     }
 
-    // Verify password — argon2id is CPU + memory intensive; run on a blocking thread.
+    // Verify password - argon2id is CPU + memory intensive; run on a blocking thread.
     let password = req.password.clone();
     let hash = user.password_hash.clone();
     let verify_result = tokio::task::spawn_blocking(move || verify_password(&password, &hash))
@@ -196,7 +196,7 @@ pub async fn login_with_paths(
         return Err(AuthApiError::InvalidCredentials);
     }
 
-    // Successful auth — clear any accumulated failure counter.
+    // Successful auth - clear any accumulated failure counter.
     {
         let mut attempts = state.login_attempts.write().await;
         attempts.remove(&req.username);
@@ -321,7 +321,7 @@ pub async fn change_password_with_path(
         .map_err(|_| AuthApiError::StorageError("password verification task panicked".into()))?
         .map_err(|_| AuthApiError::InvalidCredentials)?;
 
-    // Hash and persist new password — also CPU intensive.
+    // Hash and persist new password - also CPU intensive.
     let new_password = req.new_password.clone();
     let new_hash = tokio::task::spawn_blocking(move || hash_password(&new_password))
         .await

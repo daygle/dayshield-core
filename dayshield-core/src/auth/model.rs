@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 /// `/etc/dayshield/admin.json` as the persistent user record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
-    /// Login name — always `"admin"` in v1.0.
+    /// Login name - always `"admin"` in v1.0.
     pub username: String,
     /// Argon2id PHC hash string, e.g. `$argon2id$v=19$…`.
     pub password_hash: String,

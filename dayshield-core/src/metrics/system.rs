@@ -148,7 +148,7 @@ pub async fn read_temperature_c() -> f64 {
             continue;
         }
 
-        // Check type — look for "x86_pkg_temp" or "cpu-thermal" first.
+        // Check type - look for "x86_pkg_temp" or "cpu-thermal" first.
         let type_path = format!("{}/{}/type", base, name_str);
         let zone_type = fs::read_to_string(&type_path).await.unwrap_or_default();
         let zone_type = zone_type.trim();
@@ -322,7 +322,7 @@ mod tests {
         // 200ms of work out of 1000ms total → 20%
         let curr = CpuStat { user: 1150, nice: 0, system: 250, idle: 4550, iowait: 50, irq: 0, softirq: 0, steal: 0 };
         let pct = cpu_percent(&prev, &curr);
-        // total_delta = 200; idle_delta = 800; used = -600 → clamped to 0 — wait, let me recalc
+        // total_delta = 200; idle_delta = 800; used = -600 → clamped to 0 - wait, let me recalc
         // prev.total = 1000+200+3800 = 5000; curr.total = 1150+250+4550+50 = 6000 → delta = 1000
         // prev.idle_total = 3800; curr.idle_total = 4550+50 = 4600 → idle_delta = 800
         // used = 1000 - 800 = 200; pct = 20.0

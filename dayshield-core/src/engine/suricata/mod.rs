@@ -1,4 +1,4 @@
-//! Suricata engine — manages the Suricata IPS/IDS process and rule sets.
+//! Suricata engine - manages the Suricata IPS/IDS process and rule sets.
 //!
 //! # Overview
 //!
@@ -40,7 +40,7 @@ pub fn generate_config(config: &SuricataConfig) -> String {
 
     out.push_str("%YAML 1.1\n");
     out.push_str("---\n");
-    out.push_str("# DayShield — Suricata configuration (auto-generated; do not edit by hand)\n\n");
+    out.push_str("# DayShield - Suricata configuration (auto-generated; do not edit by hand)\n\n");
 
     // ---------------------------------------------------------------------------
     // vars
@@ -240,7 +240,7 @@ pub async fn apply_config(config: &SuricataConfig) -> Result<()> {
     );
 
     if !config.enabled {
-        info!("suricata: service disabled — stopping Suricata");
+        info!("suricata: service disabled - stopping Suricata");
         let _ = Command::new("systemctl")
             .args(["stop", "suricata"])
             .output()

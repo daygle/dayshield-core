@@ -1,8 +1,8 @@
 //! Firewall alias endpoints.
 //!
-//! - `GET  /firewall/aliases`       — list all aliases
-//! - `POST /firewall/aliases`       — create a new alias
-//! - `DELETE /firewall/aliases/{name}` — remove an alias by name
+//! - `GET  /firewall/aliases`       - list all aliases
+//! - `POST /firewall/aliases`       - create a new alias
+//! - `DELETE /firewall/aliases/{name}` - remove an alias by name
 
 use std::sync::Arc;
 

@@ -1,9 +1,9 @@
 //! WireGuard VPN endpoints.
 //!
-//! - `GET  /wireguard/interfaces`                     — list all WireGuard interfaces
-//! - `POST /wireguard/interfaces`                     — create or update an interface
-//! - `DELETE /wireguard/interfaces/{name}`            — remove an interface
-//! - `POST /wireguard/interfaces/{name}/generate-keys` — generate a keypair
+//! - `GET  /wireguard/interfaces`                     - list all WireGuard interfaces
+//! - `POST /wireguard/interfaces`                     - create or update an interface
+//! - `DELETE /wireguard/interfaces/{name}`            - remove an interface
+//! - `POST /wireguard/interfaces/{name}/generate-keys` - generate a keypair
 
 use std::sync::Arc;
 

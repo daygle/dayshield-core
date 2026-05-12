@@ -17,7 +17,7 @@ use super::smtp::send_email;
 use crate::config::models::NotifyConfig;
 use crate::state::AppState;
 
-/// Digest flush interval — events are batched for this duration when
+/// Digest flush interval - events are batched for this duration when
 /// `digest_mode` is enabled.
 const DIGEST_INTERVAL: Duration = Duration::from_secs(5 * 60);
 

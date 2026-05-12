@@ -1,4 +1,4 @@
-//! SMTP client — sends notification emails via SMTP over TLS.
+//! SMTP client - sends notification emails via SMTP over TLS.
 //!
 //! Uses `lettre` with the `smtp-transport` + `rustls-tls` features.
 //! IPv4-only: the host is resolved to the first IPv4 address found.
@@ -36,7 +36,7 @@ pub enum NotifyError {
 
 /// Resolve `host` to the first IPv4 address reachable on `port`.
 ///
-/// Returns an error when no IPv4 address can be found — IPv6-only hosts are
+/// Returns an error when no IPv4 address can be found - IPv6-only hosts are
 /// intentionally rejected to keep the subsystem deterministic on
 /// IPv4-only networks.
 fn resolve_ipv4(host: &str, port: u16) -> Result<Ipv4Addr, NotifyError> {

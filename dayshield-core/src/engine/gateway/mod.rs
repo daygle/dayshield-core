@@ -1,4 +1,4 @@
-//! Gateway engine — manages default routes and monitors upstream gateways.
+//! Gateway engine - manages default routes and monitors upstream gateways.
 //!
 //! # Overview
 //!
@@ -12,7 +12,7 @@
 //! | [`probe_gateway`]        | Single ICMP ping health check for one IP.           |
 //! | [`probe_all_gateways`]   | Probe every configured gateway and return results.  |
 //!
-//! DHCP and PPPoE gateways are **not** written by this module — their default
+//! DHCP and PPPoE gateways are **not** written by this module - their default
 //! routes are managed by `dhclient` / `pppd` respectively.  This engine only
 //! writes routes for gateways that have an explicit `gateway_ip`.
 

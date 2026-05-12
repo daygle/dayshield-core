@@ -1,4 +1,4 @@
-//! NTP engine — write daemon config files and restart system services.
+//! NTP engine - write daemon config files and restart system services.
 //!
 //! # Service strategy
 //!
@@ -44,7 +44,7 @@ pub enum NtpError {
 /// 4. Enable and restart the daemon via `systemctl`.
 pub async fn apply_ntp_config(cfg: &NtpConfig) -> Result<(), NtpError> {
     if !cfg.enabled {
-        info!("NTP disabled — stopping daemons");
+        info!("NTP disabled - stopping daemons");
         stop_service("systemd-timesyncd").await;
         stop_service("chrony").await;
         return Ok(());
@@ -66,7 +66,7 @@ const TIMESYNCD_CONF: &str = "/etc/systemd/timesyncd.conf";
 async fn apply_timesyncd(cfg: &NtpConfig) -> Result<(), NtpError> {
     let servers = cfg.upstream_servers.join(" ");
     let content = format!(
-        "# Managed by DayShield — do not edit manually\n\
+        "# Managed by DayShield - do not edit manually\n\
          [Time]\n\
          NTP={servers}\n\
          FallbackNTP=\n"
@@ -101,7 +101,7 @@ const CHRONY_CONF: &str = "/etc/chrony/chrony.conf";
 
 async fn apply_chrony(cfg: &NtpConfig) -> Result<(), NtpError> {
     let mut lines: Vec<String> = vec![
-        "# Managed by DayShield — do not edit manually".into(),
+        "# Managed by DayShield - do not edit manually".into(),
         String::new(),
         "# Upstream servers".into(),
     ];
@@ -224,7 +224,7 @@ mod tests {
         };
         let servers = cfg.upstream_servers.join(" ");
         let content = format!(
-            "# Managed by DayShield — do not edit manually\n\
+            "# Managed by DayShield - do not edit manually\n\
              [Time]\n\
              NTP={servers}\n\
              FallbackNTP=\n"

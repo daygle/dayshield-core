@@ -1,8 +1,8 @@
 //! Gateway endpoints.
 //!
-//! - `GET    /gateways`        — list configured gateways with live routing and health state
-//! - `POST   /gateways`        — create or update a gateway
-//! - `DELETE /gateways/{name}` — delete a gateway by name
+//! - `GET    /gateways`        - list configured gateways with live routing and health state
+//! - `POST   /gateways`        - create or update a gateway
+//! - `DELETE /gateways/{name}` - delete a gateway by name
 
 use std::{collections::{HashMap, HashSet}, sync::Arc};
 

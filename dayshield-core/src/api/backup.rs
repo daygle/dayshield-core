@@ -271,8 +271,8 @@ pub async fn delete_handler(
 /// the configuration.
 ///
 /// Query parameters:
-/// - `passphrase` — decryption passphrase (required for encrypted backups).
-/// - `subsystems` — comma-separated list of subsystems to restore (optional).
+/// - `passphrase` - decryption passphrase (required for encrypted backups).
+/// - `subsystems` - comma-separated list of subsystems to restore (optional).
 pub async fn restore_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<RestoreQuery>,

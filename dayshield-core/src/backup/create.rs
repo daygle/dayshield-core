@@ -78,12 +78,12 @@ pub struct DnsBackup {
 ///
 /// # Parameters
 ///
-/// * `store` — configuration store used to read the current config.
-/// * `subsystems` — subsystems to include; `None` means all.
-/// * `encrypt_backup` — whether to encrypt the archive.
-/// * `passphrase` — passphrase for encryption (required when `encrypt_backup`
+/// * `store` - configuration store used to read the current config.
+/// * `subsystems` - subsystems to include; `None` means all.
+/// * `encrypt_backup` - whether to encrypt the archive.
+/// * `passphrase` - passphrase for encryption (required when `encrypt_backup`
 ///   is `true`).
-/// * `backup_dir` — directory where the backup file will be written.
+/// * `backup_dir` - directory where the backup file will be written.
 ///
 /// # Returns
 ///

@@ -1,4 +1,4 @@
-//! DNS endpoints — `GET /dns/config` and `POST /dns/config`.
+//! DNS endpoints - `GET /dns/config` and `POST /dns/config`.
 //!
 //! # GET /dns/config
 //!

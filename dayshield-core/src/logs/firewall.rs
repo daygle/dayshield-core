@@ -1,4 +1,4 @@
-//! Firewall (nftables) log parser — reads from journald via
+//! Firewall (nftables) log parser - reads from journald via
 //! `systemd-journal-gateway` or the `/run/log/journal` socket.
 //!
 //! Because linking against `libsystemd` is undesirable in a portable crate,
@@ -72,14 +72,14 @@ pub async fn stream_firewall(tx: Sender<LogEvent>) {
                 Ok(Some(line)) => {
                     if let Some(event) = parse_journald_firewall_line(&line) {
                         if tx.send(event).await.is_err() {
-                            // Receiver dropped — shut down.
+                            // Receiver dropped - shut down.
                             let _ = child.kill().await;
                             return;
                         }
                     }
                 }
                 Ok(None) => {
-                    // Process ended — restart.
+                    // Process ended - restart.
                     info!("firewall: journalctl exited, restarting");
                     break;
                 }

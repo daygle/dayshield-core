@@ -1,9 +1,9 @@
 //! Metrics REST API handlers.
 //!
 //! Endpoints:
-//! - `GET /metrics`                — returns the latest [`MetricsSnapshot`]
-//! - `GET /metrics/history?seconds=N` — returns the last N seconds of history
-//! - `GET /metrics/ws`             — WebSocket upgrade for live streaming
+//! - `GET /metrics`                - returns the latest [`MetricsSnapshot`]
+//! - `GET /metrics/history?seconds=N` - returns the last N seconds of history
+//! - `GET /metrics/ws`             - WebSocket upgrade for live streaming
 
 use std::sync::Arc;
 

@@ -25,12 +25,12 @@ use super::verify::verify_sha256;
 ///
 /// # Parameters
 ///
-/// * `store` — the config store to write restored config into.
-/// * `payload` — raw bytes of the backup file (either a plain TAR archive or
+/// * `store` - the config store to write restored config into.
+/// * `payload` - raw bytes of the backup file (either a plain TAR archive or
 ///   an AES-256-GCM encrypted blob, depending on `BackupMetadata.encrypted`).
-/// * `passphrase` — decryption passphrase, required when the backup is
+/// * `passphrase` - decryption passphrase, required when the backup is
 ///   encrypted.
-/// * `subsystems_filter` — when `Some`, only the listed subsystems are
+/// * `subsystems_filter` - when `Some`, only the listed subsystems are
 ///   restored; all others are left untouched.  `None` restores all subsystems
 ///   present in the backup.
 ///
@@ -159,7 +159,7 @@ fn try_decode_payload(payload: &[u8], passphrase: Option<&str>) -> Result<Vec<u8
         return Ok(payload.to_vec());
     }
 
-    // Not obviously a TAR — attempt decryption.
+    // Not obviously a TAR - attempt decryption.
     let phrase = passphrase.ok_or_else(|| {
         anyhow::anyhow!(
             "backup does not appear to be a plain TAR archive and no passphrase was provided"
@@ -173,7 +173,7 @@ fn try_decode_payload(payload: &[u8], passphrase: Option<&str>) -> Result<Vec<u8
 ///
 /// A TAR archive begins with a 512-byte header.  A GNU/ustar header has the
 /// magic bytes `"ustar"` at offset 257.  A v7/POSIX archive can be detected
-/// by checking that the checksum field is plausible — but a simple heuristic
+/// by checking that the checksum field is plausible - but a simple heuristic
 /// (non-empty name at offset 0) is sufficient here.
 fn is_valid_tar(data: &[u8]) -> bool {
     if data.len() < 512 {

@@ -43,7 +43,7 @@ pub async fn start_metrics_collector(state: Arc<AppState>) {
     });
 }
 
-/// Inner collection loop — runs forever.
+/// Inner collection loop - runs forever.
 async fn run_collector(state: Arc<AppState>) {
     info!("metrics/collector: starting");
 

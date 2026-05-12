@@ -13,8 +13,8 @@
 //! | Claim | Type   | Description                         |
 //! |-------|--------|-------------------------------------|
 //! | `sub` | string | Username                            |
-//! | `iat` | number | Unix timestamp — issued at          |
-//! | `exp` | number | Unix timestamp — expires at (+8 h)  |
+//! | `iat` | number | Unix timestamp - issued at          |
+//! | `exp` | number | Unix timestamp - expires at (+8 h)  |
 
 use std::fs;
 use std::os::unix::fs::OpenOptionsExt;
@@ -46,7 +46,7 @@ const KEY_BYTES: usize = 32;
 /// JWT claims embedded in every session token.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionClaims {
-    /// Username (`sub` — subject).
+    /// Username (`sub` - subject).
     pub sub: String,
     /// Unix timestamp at which the token was issued.
     pub iat: u64,

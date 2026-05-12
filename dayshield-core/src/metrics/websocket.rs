@@ -44,7 +44,7 @@ pub async fn metrics_websocket(mut ws: WebSocket, state: Arc<AppState>) {
                         }
                     },
                     None => {
-                        // Buffer is empty on startup — send a minimal placeholder.
+                        // Buffer is empty on startup - send a minimal placeholder.
                         r#"{"error":"no data yet"}"#.to_string()
                     }
                 };

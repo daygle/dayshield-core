@@ -1,4 +1,4 @@
-//! User storage — persist the admin account to `/etc/dayshield/admin.json`.
+//! User storage - persist the admin account to `/etc/dayshield/admin.json`.
 //!
 //! # Guarantees
 //!

@@ -1,4 +1,4 @@
-//! Metrics module — real-time system and service metrics.
+//! Metrics module - real-time system and service metrics.
 //!
 //! Provides data models, a background collector, an in-memory ring buffer,
 //! REST API handlers, and a WebSocket streaming endpoint.

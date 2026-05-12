@@ -1,4 +1,4 @@
-//! DHCP engine — manages the Kea DHCPv4 server.
+//! DHCP engine - manages the Kea DHCPv4 server.
 //!
 //! # Overview
 //!
@@ -147,7 +147,7 @@ pub async fn apply_config(config: &DhcpConfig) -> Result<()> {
     );
 
     if !config.enabled {
-        info!("dhcp: service disabled — stopping kea-dhcp4-server");
+        info!("dhcp: service disabled - stopping kea-dhcp4-server");
         let _ = Command::new("systemctl")
             .args(["stop", "kea-dhcp4-server"])
             .output()

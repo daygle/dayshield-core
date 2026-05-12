@@ -1,15 +1,15 @@
-//! ACME engine — automatic TLS certificate issuance and renewal.
+//! ACME engine - automatic TLS certificate issuance and renewal.
 //!
 //! This module implements the full ACME (RFC 8555) certificate lifecycle:
 //!
-//! - [`AcmeEngine`] — holds configuration; drives account and order management.
-//! - [`AcmeEngine::ensure_account`] — creates or loads the ACME account keypair
+//! - [`AcmeEngine`] - holds configuration; drives account and order management.
+//! - [`AcmeEngine::ensure_account`] - creates or loads the ACME account keypair
 //!   and registers it with the directory server.
-//! - [`AcmeEngine::order_certificate`] — submits a new order, completes HTTP-01
+//! - [`AcmeEngine::order_certificate`] - submits a new order, completes HTTP-01
 //!   challenges by temporarily binding port 80, finalises with a CSR generated
 //!   by `rcgen`, and writes the certificate + private key to
 //!   `cert_storage_path`.
-//! - [`AcmeEngine::renewal_check`] — returns `true` when the stored certificate
+//! - [`AcmeEngine::renewal_check`] - returns `true` when the stored certificate
 //!   is absent or has been on disk for more than 60 days (heuristic for
 //!   Let's Encrypt 90-day certs).
 //!
@@ -427,7 +427,7 @@ impl AcmeEngine {
         let cert_path = self.cert_path(primary);
 
         if !cert_path.exists() {
-            info!(domain = %primary, "acme: no certificate on disk — renewal required");
+            info!(domain = %primary, "acme: no certificate on disk - renewal required");
             return Ok(true);
         }
 
@@ -583,7 +583,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // renewal_check — no cert on disk
+    // renewal_check - no cert on disk
     // -----------------------------------------------------------------------
 
     #[tokio::test]

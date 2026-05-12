@@ -216,7 +216,7 @@ mod tests {
   ]
 }"#;
         let hits = parse_nft_json_hits(json);
-        // Rule exists but has no counter — still emitted with packets=0.
+        // Rule exists but has no counter - still emitted with packets=0.
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].packets, 0);
     }

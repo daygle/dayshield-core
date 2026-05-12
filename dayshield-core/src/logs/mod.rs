@@ -1,9 +1,9 @@
 //! Live Logs subsystem.
 //!
 //! This module provides real-time streaming of log events from three sources:
-//! - **Suricata** (`/var/log/suricata/eve.json`) — IDS/IPS alerts.
-//! - **Firewall** (journald, `SYSLOG_IDENTIFIER=nftables`) — nftables events.
-//! - **System** (journald, `PRIORITY<=4`) — warnings and errors.
+//! - **Suricata** (`/var/log/suricata/eve.json`) - IDS/IPS alerts.
+//! - **Firewall** (journald, `SYSLOG_IDENTIFIER=nftables`) - nftables events.
+//! - **System** (journald, `PRIORITY<=4`) - warnings and errors.
 //!
 //! All three streams are merged and forwarded to connected WebSocket clients
 //! via [`websocket::logs_websocket`].

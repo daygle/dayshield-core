@@ -144,7 +144,7 @@ mod tests {
 
     #[test]
     fn test_parse_alert_missing_optional_fields() {
-        // Minimal alert — all optional fields absent → defaults used.
+        // Minimal alert - all optional fields absent → defaults used.
         let line = r#"{"event_type":"alert","alert":{"signature":"test"}}"#;
         let event = parse_eve_line(line).expect("should parse minimal alert");
         match event {

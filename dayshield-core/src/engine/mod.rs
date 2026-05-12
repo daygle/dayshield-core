@@ -1,4 +1,4 @@
-//! Engine module — sub-modules that generate and apply system configurations.
+//! Engine module - sub-modules that generate and apply system configurations.
 //!
 //! Each sub-module corresponds to one external system or service managed by
 //! DayShield Core:

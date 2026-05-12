@@ -98,7 +98,7 @@ pub async fn update_config(
         enabled = req.enabled,
         serve_clients = req.serve_clients,
         upstream_count = req.upstream_servers.len(),
-        "NTP config updated via API — applying to system"
+        "NTP config updated via API - applying to system"
     );
 
     apply_ntp_config(&req).await.map_err(NtpApiError::from)?;

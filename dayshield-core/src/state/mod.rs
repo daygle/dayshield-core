@@ -1,4 +1,4 @@
-//! State module — shared application state and service health tracking.
+//! State module - shared application state and service health tracking.
 //!
 //! [`AppState`] is the single source of truth for in-memory runtime data.
 //! It is created once at startup, wrapped in an [`Arc`], and injected into

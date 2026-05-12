@@ -1,4 +1,4 @@
-//! VPN engine — manages WireGuard tunnels.
+//! VPN engine - manages WireGuard tunnels.
 //!
 //! # Overview
 //!
@@ -41,7 +41,7 @@ const WG_CONFIG_DIR: &str = "/etc/wireguard";
 pub fn generate_config(iface: &WireGuardInterface) -> String {
     let mut out = String::new();
 
-    out.push_str("# DayShield — WireGuard configuration (auto-generated; do not edit by hand)\n");
+    out.push_str("# DayShield - WireGuard configuration (auto-generated; do not edit by hand)\n");
     out.push_str("[Interface]\n");
     out.push_str(&format!("PrivateKey = {}\n", iface.private_key));
     out.push_str(&format!("ListenPort = {}\n", iface.listen_port));
@@ -104,7 +104,7 @@ pub async fn apply_interface(iface: &WireGuardInterface) -> Result<()> {
     let conf_path = format!("{}/{}.conf", WG_CONFIG_DIR, iface.name);
 
     if !iface.enabled {
-        info!(name = %iface.name, "vpn: interface disabled — bringing down");
+        info!(name = %iface.name, "vpn: interface disabled - bringing down");
         bring_down(&iface.name).await?;
         return Ok(());
     }
@@ -235,7 +235,7 @@ pub async fn generate_keypair() -> Result<(String, String)> {
 }
 
 // ---------------------------------------------------------------------------
-// Legacy stub — kept for backward compatibility
+// Legacy stub - kept for backward compatibility
 // ---------------------------------------------------------------------------
 
 /// Apply the provided VPN tunnel configuration (legacy stub).

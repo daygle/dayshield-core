@@ -1,4 +1,4 @@
-//! Notification queue — a thin wrapper around a Tokio MPSC channel.
+//! Notification queue - a thin wrapper around a Tokio MPSC channel.
 
 use tokio::sync::mpsc;
 

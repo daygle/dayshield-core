@@ -1,4 +1,4 @@
-//! System log parser — reads journald entries up to info level
+//! System log parser - reads journald entries up to info level
 //! (PRIORITY ≤ 6, i.e. emergency through info).
 //!
 //! Like [`crate::logs::firewall`] this module spawns `journalctl` as a child

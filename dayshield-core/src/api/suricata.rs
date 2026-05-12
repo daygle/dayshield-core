@@ -84,7 +84,7 @@ pub struct SuricataApiConfig {
 
 /// Request body for `POST /suricata/config`.
 ///
-/// All fields are optional — only supplied fields are updated (partial update).
+/// All fields are optional - only supplied fields are updated (partial update).
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateSuricataApiRequest {
@@ -205,7 +205,7 @@ pub async fn get_config(
 // POST /suricata/config
 // ---------------------------------------------------------------------------
 
-/// Update the Suricata configuration (partial update — only supplied fields
+/// Update the Suricata configuration (partial update - only supplied fields
 /// are changed).  Validates, persists, then applies via the engine.
 pub async fn update_config(
     State(state): State<Arc<AppState>>,

@@ -78,7 +78,7 @@ pub fn parse_crowdsec_timestamp(ts: &str) -> u64 {
 
 /// Default CrowdSec LAPI base URL.
 const DEFAULT_LAPI_URL: &str = "http://127.0.0.1:8080";
-/// Default CrowdSec bouncer API key (empty — must be configured).
+/// Default CrowdSec bouncer API key (empty - must be configured).
 const DEFAULT_API_KEY: &str = "";
 
 /// Collect [`CrowdSecMetrics`] by querying the CrowdSec LAPI.

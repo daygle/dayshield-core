@@ -1,4 +1,4 @@
-//! DNS engine — manages the Unbound recursive resolver.
+//! DNS engine - manages the Unbound recursive resolver.
 //!
 //! # Overview
 //!
@@ -38,7 +38,7 @@ const UNBOUND_CONF_PATH: &str = "/etc/unbound/unbound.conf";
 pub fn generate_config(config: &DnsConfig) -> String {
     let mut out = String::new();
 
-    out.push_str("# DayShield — Unbound configuration (auto-generated; do not edit by hand)\n\n");
+    out.push_str("# DayShield - Unbound configuration (auto-generated; do not edit by hand)\n\n");
 
     out.push_str("server:\n");
     out.push_str("    verbosity: 1\n");
@@ -92,7 +92,7 @@ pub fn generate_config(config: &DnsConfig) -> String {
         out.push('\n');
     }
 
-    // Forward zone — use the forwarder list when non-empty.
+    // Forward zone - use the forwarder list when non-empty.
     if !config.forwarders.is_empty() {
         out.push_str("forward-zone:\n");
         out.push_str("    name: \".\"\n");
@@ -126,7 +126,7 @@ pub async fn apply_config(config: &DnsConfig) -> Result<()> {
     );
 
     if !config.enabled {
-        info!("dns: service disabled — stopping Unbound");
+        info!("dns: service disabled - stopping Unbound");
         let _ = Command::new("systemctl")
             .args(["stop", "unbound"])
             .output()

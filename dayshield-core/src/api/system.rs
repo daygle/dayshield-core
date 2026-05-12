@@ -1,19 +1,19 @@
 //! System endpoints.
 //!
-//! - `GET  /system/status`   — overall health and version
-//! - `GET  /system/config`   — host-level settings (hostname, timezone, NTP…)
-//! - `PUT  /system/config`   — update host-level settings
-//! - `POST /system/reboot`   — schedule an immediate systemctl reboot
-//! - `POST /system/shutdown` — schedule an immediate systemctl poweroff
-//! - `GET  /system/updates/status`   — get artifact update status for core/ui/rootfs
-//! - `GET  /system/updates/settings` — get update settings
-//! - `PUT  /system/updates/settings` — update settings (interval/reboot policy/registry)
-//! - `POST /system/updates/check`    — force immediate update check
-//! - `POST /system/updates/apply`    — apply updates from registry artifacts
-//! - `POST /system/updates/rollback` — rollback latest applied update transaction
-//! - `POST /system/updates/validate` — validate applied update state
-//! - `POST /system/updates/appliance-rebuild-complete` — clear pending appliance rebuild status
-//! - `POST /system/updates/rootfs-live-rollback` — rollback rootfs live update from latest backup snapshot
+//! - `GET  /system/status`   - overall health and version
+//! - `GET  /system/config`   - host-level settings (hostname, timezone, NTP…)
+//! - `PUT  /system/config`   - update host-level settings
+//! - `POST /system/reboot`   - schedule an immediate systemctl reboot
+//! - `POST /system/shutdown` - schedule an immediate systemctl poweroff
+//! - `GET  /system/updates/status`   - get artifact update status for core/ui/rootfs
+//! - `GET  /system/updates/settings` - get update settings
+//! - `PUT  /system/updates/settings` - update settings (interval/reboot policy/registry)
+//! - `POST /system/updates/check`    - force immediate update check
+//! - `POST /system/updates/apply`    - apply updates from registry artifacts
+//! - `POST /system/updates/rollback` - rollback latest applied update transaction
+//! - `POST /system/updates/validate` - validate applied update state
+//! - `POST /system/updates/appliance-rebuild-complete` - clear pending appliance rebuild status
+//! - `POST /system/updates/rootfs-live-rollback` - rollback rootfs live update from latest backup snapshot
 
 use std::sync::Arc;
 

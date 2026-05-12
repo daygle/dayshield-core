@@ -1,4 +1,4 @@
-//! Interface manager — applies network interface configuration via iproute2.
+//! Interface manager - applies network interface configuration via iproute2.
 //!
 //! # Overview
 //!
@@ -434,7 +434,7 @@ async fn start_dhcp_client(name: &str) -> Result<(), InterfaceError> {
         .map_err(|e| {
             InterfaceError::ApplyFailed(format!("failed to spawn dhclient for {name}: {e}"))
         })?;
-    // Child handle dropped — dhclient runs as a background process.
+    // Child handle dropped - dhclient runs as a background process.
     Ok(())
 }
 
@@ -456,7 +456,7 @@ async fn stop_dhcp_client(name: &str) {
             info!(name = %name, "interfaces: dhclient released DHCP lease");
         }
         Ok(out) => {
-            // Not running or already released — not an error worth surfacing.
+            // Not running or already released - not an error worth surfacing.
             debug!(
                 name = %name,
                 stderr = %String::from_utf8_lossy(&out.stderr),
@@ -479,7 +479,7 @@ async fn stop_dhcp_client(name: &str) {
 /// Write PPPoE peer config and start `pppd` for `wan_iface`.
 ///
 /// Creates:
-/// - `/etc/ppp/peers/wan-<wan_iface>` — pppd config using `rp-pppoe` plugin.
+/// - `/etc/ppp/peers/wan-<wan_iface>` - pppd config using `rp-pppoe` plugin.
 /// - `/etc/ppp/chap-secrets` and `/etc/ppp/pap-secrets` with credentials.
 ///
 /// Spawns `pppd call wan-<wan_iface>` as a background process.  `ppp0` will
@@ -614,7 +614,7 @@ mod tests {
         // The command will fail before reaching the cidr validation if `ip` is
         // not available, but if `ip link set dev eth0 up` fails we get
         // ApplyFailed.  We can only assert the cidr path directly when ip is
-        // available and succeeds — so just verify the function returns *some*
+        // available and succeeds - so just verify the function returns *some*
         // Err rather than Ok.
         let result = apply_interface(&config).await;
         assert!(result.is_err());

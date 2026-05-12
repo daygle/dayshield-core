@@ -7,7 +7,7 @@
 //!
 //! # Design notes
 //!
-//! * Fully async — built on `tokio::fs` + `tokio::io::AsyncBufReadExt`.
+//! * Fully async - built on `tokio::fs` + `tokio::io::AsyncBufReadExt`.
 //! * Never blocks the Tokio runtime; all I/O is awaited.
 //! * Backpressure is handled naturally: `tx.send(line).await` will block the
 //!   tailer task when the consumer is slow, preventing unbounded buffering.
@@ -108,7 +108,7 @@ impl FileTailer {
                             let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
                             if !trimmed.is_empty() {
                                 if tx.send(trimmed.to_string()).await.is_err() {
-                                    // Receiver dropped — stop tailing.
+                                    // Receiver dropped - stop tailing.
                                     return;
                                 }
                             }

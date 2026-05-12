@@ -1,4 +1,4 @@
-//! Email template helpers — one formatter per notification category.
+//! Email template helpers - one formatter per notification category.
 
 /// Format a Suricata IDS/IPS alert email.
 ///

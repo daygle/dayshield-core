@@ -1,4 +1,4 @@
-//! Auth middleware — guards all routes that require authentication.
+//! Auth middleware - guards all routes that require authentication.
 //!
 //! # How it works
 //!

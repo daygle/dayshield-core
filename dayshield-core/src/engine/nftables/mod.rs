@@ -1,4 +1,4 @@
-//! nftables engine — compiles [`FirewallRule`] and [`NatRule`] objects into
+//! nftables engine - compiles [`FirewallRule`] and [`NatRule`] objects into
 //! nftables rulesets and applies them via the `nft` CLI.
 //!
 //! # Functions
@@ -201,9 +201,9 @@ pub fn generate_ruleset(
         out.push_str(&format!("        {}\n", mgmt_parts.join(" ")));
     }
     // ICMP is required for basic network operation regardless of user rules:
-    //   echo-request        — inbound ping (diagonstics)
-    //   destination-unreachable — PMTU discovery, port-unreachable replies
-    //   time-exceeded       — traceroute TTL expiry
+    //   echo-request        - inbound ping (diagonstics)
+    //   destination-unreachable - PMTU discovery, port-unreachable replies
+    //   time-exceeded       - traceroute TTL expiry
     // Rate-limiting prevents ICMP flood abuse.
     out.push_str("        icmp type { echo-request, destination-unreachable, time-exceeded } limit rate 20/second accept\n");
     out.push_str("        icmpv6 type { echo-request, destination-unreachable, time-exceeded, nd-neighbor-solicit, nd-neighbor-advert, mld-listener-query } accept\n");
@@ -595,12 +595,12 @@ fn format_rule(rule: &FirewallRule) -> String {
         }
     }
 
-    // Source port — only valid when a tcp/udp protocol is set.
+    // Source port - only valid when a tcp/udp protocol is set.
     if let (Some(sport), Some(p)) = (rule.source_port, proto) {
         parts.push(format!("{} sport {}", p, sport));
     }
 
-    // Destination port — only valid when a tcp/udp protocol is set.
+    // Destination port - only valid when a tcp/udp protocol is set.
     if let (Some(dport), Some(p)) = (rule.destination_port, proto) {
         parts.push(format!("{} dport {}", p, dport));
     }
@@ -842,9 +842,9 @@ fn format_nat_postrouting(nat: &crate::config::models::NatRule) -> Option<String
 /// Generate the `table ip nat { … }` block from a [`NatConfig`].
 ///
 /// Produces:
-/// - `postrouting` — auto masquerade (automatic/hybrid) + user masquerade/SNAT rules.
-/// - `prerouting`  — user DNAT rules.
-/// - `output`      — reflection DNAT rules (hairpin NAT) when enabled.
+/// - `postrouting` - auto masquerade (automatic/hybrid) + user masquerade/SNAT rules.
+/// - `prerouting`  - user DNAT rules.
+/// - `output`      - reflection DNAT rules (hairpin NAT) when enabled.
 ///
 /// Returns an empty string when no rules would be emitted.
 fn generate_nat_table(config: &NatConfig) -> String {
@@ -1105,7 +1105,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // generate_ruleset — structural checks
+    // generate_ruleset - structural checks
     // ------------------------------------------------------------------
 
     #[test]
@@ -1390,7 +1390,7 @@ mod tests {
             nat_reflection: false,
         };
         let rs = generate_ruleset(&[], Some(&nat), &[], None, &HashMap::new());
-        // Count occurrences of "chain output" — only the nat output chain should appear.
+        // Count occurrences of "chain output" - only the nat output chain should appear.
         assert!(rs.contains("hook output"), "reflection output chain missing");
     }
 
@@ -1558,7 +1558,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // apply_rules / flush_rules — graceful failure without nft
+    // apply_rules / flush_rules - graceful failure without nft
     // ------------------------------------------------------------------
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-//! API module — assembles the Axum router and registers all route handlers.
+//! API module - assembles the Axum router and registers all route handlers.
 
 mod acme;
 mod admin;
@@ -43,75 +43,75 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// Build and return the top-level Axum [`Router`] with all registered routes.
 ///
 /// Route overview:
-/// - `POST /auth/login`                                    — authenticate and receive a JWT
-/// - `POST /auth/logout`                                   — log out (client-side token drop)
-/// - `POST /auth/change-password`                          — change the admin password
-/// - `GET  /auth/status`                                   — authentication status
-/// - `GET  /system/status`                                 — overall system health and version information
-/// - `GET  /system/config`                                 — host-level settings (hostname, timezone, NTP…)
-/// - `PUT  /system/config`                                 — update host-level settings
-/// - `POST /system/reboot`                                 — trigger immediate system reboot
-/// - `POST /system/shutdown`                               — trigger immediate system shutdown
-/// - `GET  /system/updates/status`                         — get core/ui update status
-/// - `GET  /system/updates/settings`                       — get update settings
-/// - `PUT  /system/updates/settings`                       — update check interval / reboot policy / repo config
-/// - `POST /system/updates/check`                          — force update check against GitHub
-/// - `POST /system/updates/apply`                          — apply updates from GitHub repos
-/// - `POST /system/updates/rollback`                       — rollback to prior commit
-/// - `POST /system/updates/validate`                       — validate current commit matches applied state
-/// - `POST /system/updates/appliance-rebuild-complete`     — clear pending appliance rebuild status
-/// - `POST /system/updates/rootfs-live-rollback`           — rollback latest in-place rootfs live update
-/// - `GET  /interfaces`                                    — list all network interfaces
-/// - `POST /interfaces`                                    — create / update a network interface/// - `GET  /gateways`                                       — list gateways with live routing and health state
-/// - `POST /gateways`                                       — create or update a gateway
-/// - `DELETE /gateways/{name}`                              — delete a gateway/// - `GET  /firewall/rules`                                — list firewall rules
-/// - `POST /firewall/rules`                                — add a new firewall rule
-/// - `GET  /firewall/aliases`                              — list firewall aliases
-/// - `POST /firewall/aliases`                              — create a firewall alias
-/// - `DELETE /firewall/aliases/{name}`                     — delete a firewall alias
-/// - `GET  /dns/config`                                    — get DNS (Unbound) configuration
-/// - `POST /dns/config`                                    — update DNS (Unbound) configuration
-/// - `GET  /dns/overrides`                                 — list DNS host and domain overrides
-/// - `POST /dns/overrides`                                 — create a DNS override
-/// - `DELETE /dns/overrides/{hostname_or_domain}`          — delete a DNS override
-/// - `GET  /dhcp/config`                                   — get DHCP (dnsmasq) configuration
-/// - `POST /dhcp/config`                                   — update DHCP (dnsmasq) configuration
-/// - `GET  /ips/config`                                    — get Suricata IPS configuration
-/// - `POST /ips/config`                                    — update Suricata IPS configuration
-/// - `GET  /wireguard/interfaces`                          — list WireGuard interfaces
-/// - `POST /wireguard/interfaces`                          — create / update a WireGuard interface
-/// - `DELETE /wireguard/interfaces/{name}`                 — remove a WireGuard interface
-/// - `POST /wireguard/interfaces/{name}/generate-keys`     — generate a WireGuard keypair
-/// - `GET  /crowdsec/config`                               — get CrowdSec bouncer configuration
-/// - `POST /crowdsec/config`                               — update CrowdSec bouncer configuration
-/// - `GET  /crowdsec/decisions`                            — list cached CrowdSec decisions
-/// - `GET  /acme/config`                                   — get ACME certificate configuration
-/// - `POST /acme/config`                                   — update ACME certificate configuration
-/// - `POST /acme/issue`                                    — trigger certificate issuance / renewal
-/// - `GET  /acme/status`                                   — get certificate status for primary domain
-/// - `GET  /logs/ws`                                       — live log stream (WebSocket upgrade)
-/// - `GET  /logs/search?from=...&to=...`                   — historical log search by date/time range
-/// - `GET  /metrics`                                       — latest metrics snapshot (JSON)
-/// - `GET  /metrics/history?seconds=N`                     — last N seconds of metrics history
-/// - `GET  /metrics/ws`                                    — live metrics stream (WebSocket upgrade)
-/// - `POST /backup/create`                                 — create a new backup archive
-/// - `GET  /backup/list`                                   — list backup files on disk
-/// - `GET  /backup/download/{filename}`                    — download a specific backup file
-/// - `DELETE /backup/{filename}`                           — delete a specific backup file
-/// - `POST /backup/restore`                                — restore from an uploaded backup file
-/// - `GET  /backup/scheduler`                              — get the scheduler configuration
-/// - `POST /backup/scheduler`                              — update the scheduler configuration
-/// - `GET  /notify/config`                                 — get notification configuration
-/// - `POST /notify/config`                                 — update notification configuration
-/// - `POST /notify/test`                                   — send a test notification email
-/// - `GET  /notify/categories`                             — list available notification categories
-/// - `GET  /ntp/config`                                    — get NTP configuration
-/// - `POST /ntp/config`                                    — update + apply NTP configuration
-/// - `GET  /ntp/status`                                    — live NTP synchronisation status
-/// - `GET  /dashboard/system`                              — host resource usage summary
-/// - `GET  /dashboard/network`                             — WAN/LAN network overview
-/// - `GET  /dashboard/security`                            — firewall, Suricata, CrowdSec summary
-/// - `GET  /dashboard/acme`                                — ACME certificate expiry summary
+/// - `POST /auth/login`                                    - authenticate and receive a JWT
+/// - `POST /auth/logout`                                   - log out (client-side token drop)
+/// - `POST /auth/change-password`                          - change the admin password
+/// - `GET  /auth/status`                                   - authentication status
+/// - `GET  /system/status`                                 - overall system health and version information
+/// - `GET  /system/config`                                 - host-level settings (hostname, timezone, NTP…)
+/// - `PUT  /system/config`                                 - update host-level settings
+/// - `POST /system/reboot`                                 - trigger immediate system reboot
+/// - `POST /system/shutdown`                               - trigger immediate system shutdown
+/// - `GET  /system/updates/status`                         - get core/ui update status
+/// - `GET  /system/updates/settings`                       - get update settings
+/// - `PUT  /system/updates/settings`                       - update check interval / reboot policy / repo config
+/// - `POST /system/updates/check`                          - force update check against GitHub
+/// - `POST /system/updates/apply`                          - apply updates from GitHub repos
+/// - `POST /system/updates/rollback`                       - rollback to prior commit
+/// - `POST /system/updates/validate`                       - validate current commit matches applied state
+/// - `POST /system/updates/appliance-rebuild-complete`     - clear pending appliance rebuild status
+/// - `POST /system/updates/rootfs-live-rollback`           - rollback latest in-place rootfs live update
+/// - `GET  /interfaces`                                    - list all network interfaces
+/// - `POST /interfaces`                                    - create / update a network interface/// - `GET  /gateways`                                       - list gateways with live routing and health state
+/// - `POST /gateways`                                      - create or update a gateway
+/// - `DELETE /gateways/{name}`                             - delete a gateway/// - `GET  /firewall/rules`                                - list firewall rules
+/// - `POST /firewall/rules`                                - add a new firewall rule
+/// - `GET  /firewall/aliases`                              - list firewall aliases
+/// - `POST /firewall/aliases`                              - create a firewall alias
+/// - `DELETE /firewall/aliases/{name}`                     - delete a firewall alias
+/// - `GET  /dns/config`                                    - get DNS (Unbound) configuration
+/// - `POST /dns/config`                                    - update DNS (Unbound) configuration
+/// - `GET  /dns/overrides`                                 - list DNS host and domain overrides
+/// - `POST /dns/overrides`                                 - create a DNS override
+/// - `DELETE /dns/overrides/{hostname_or_domain}`          - delete a DNS override
+/// - `GET  /dhcp/config`                                   - get DHCP (dnsmasq) configuration
+/// - `POST /dhcp/config`                                   - update DHCP (dnsmasq) configuration
+/// - `GET  /ips/config`                                    - get Suricata IPS configuration
+/// - `POST /ips/config`                                    - update Suricata IPS configuration
+/// - `GET  /wireguard/interfaces`                          - list WireGuard interfaces
+/// - `POST /wireguard/interfaces`                          - create / update a WireGuard interface
+/// - `DELETE /wireguard/interfaces/{name}`                 - remove a WireGuard interface
+/// - `POST /wireguard/interfaces/{name}/generate-keys`     - generate a WireGuard keypair
+/// - `GET  /crowdsec/config`                               - get CrowdSec bouncer configuration
+/// - `POST /crowdsec/config`                               - update CrowdSec bouncer configuration
+/// - `GET  /crowdsec/decisions`                            - list cached CrowdSec decisions
+/// - `GET  /acme/config`                                   - get ACME certificate configuration
+/// - `POST /acme/config`                                   - update ACME certificate configuration
+/// - `POST /acme/issue`                                    - trigger certificate issuance / renewal
+/// - `GET  /acme/status`                                   - get certificate status for primary domain
+/// - `GET  /logs/ws`                                       - live log stream (WebSocket upgrade)
+/// - `GET  /logs/search?from=...&to=...`                   - historical log search by date/time range
+/// - `GET  /metrics`                                       - latest metrics snapshot (JSON)
+/// - `GET  /metrics/history?seconds=N`                     - last N seconds of metrics history
+/// - `GET  /metrics/ws`                                    - live metrics stream (WebSocket upgrade)
+/// - `POST /backup/create`                                 - create a new backup archive
+/// - `GET  /backup/list`                                   - list backup files on disk
+/// - `GET  /backup/download/{filename}`                    - download a specific backup file
+/// - `DELETE /backup/{filename}`                           - delete a specific backup file
+/// - `POST /backup/restore`                                - restore from an uploaded backup file
+/// - `GET  /backup/scheduler`                              - get the scheduler configuration
+/// - `POST /backup/scheduler`                              - update the scheduler configuration
+/// - `GET  /notify/config`                                 - get notification configuration
+/// - `POST /notify/config`                                 - update notification configuration
+/// - `POST /notify/test`                                   - send a test notification email
+/// - `GET  /notify/categories`                             - list available notification categories
+/// - `GET  /ntp/config`                                    - get NTP configuration
+/// - `POST /ntp/config`                                    - update + apply NTP configuration
+/// - `GET  /ntp/status`                                    - live NTP synchronisation status
+/// - `GET  /dashboard/system`                              - host resource usage summary
+/// - `GET  /dashboard/network`                             - WAN/LAN network overview
+/// - `GET  /dashboard/security`                            - firewall, Suricata, CrowdSec summary
+/// - `GET  /dashboard/acme`                                - ACME certificate expiry summary
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         // Auth

@@ -354,7 +354,7 @@ impl Default for FirewallSettings {
 
 /// Time-based schedule that gates when a firewall rule is active.
 ///
-/// All fields are optional — omitting them means "no restriction on that dimension".
+/// All fields are optional - omitting them means "no restriction on that dimension".
 /// Days use JavaScript / cron convention: 0 = Sunday, 1 = Monday, …, 6 = Saturday.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FirewallSchedule {

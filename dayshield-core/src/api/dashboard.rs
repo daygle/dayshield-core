@@ -1,9 +1,9 @@
 //! Dashboard summary endpoints.
 //!
-//! - `GET /dashboard/system`   — host resource usage (CPU, RAM, disk, uptime)
-//! - `GET /dashboard/network`  — WAN/LAN interface overview
-//! - `GET /dashboard/security` — recent Suricata alerts, CrowdSec decisions, firewall stats
-//! - `GET /dashboard/acme`     — ACME certificate expiry summary
+//! - `GET /dashboard/system`   - host resource usage (CPU, RAM, disk, uptime)
+//! - `GET /dashboard/network`  - WAN/LAN interface overview
+//! - `GET /dashboard/security` - recent Suricata alerts, CrowdSec decisions, firewall stats
+//! - `GET /dashboard/acme`     - ACME certificate expiry summary
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};

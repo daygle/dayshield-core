@@ -1,12 +1,12 @@
-//! NAT subsystem — outbound NAT, port forwards, and NAT reflection.
+//! NAT subsystem - outbound NAT, port forwards, and NAT reflection.
 //!
 //! # Overview
 //!
 //! This module provides:
-//! - [`model`]    — rich NAT types re-exported from [`crate::config::models`].
-//! - [`validate`] — validation helpers for [`NatConfig`] and [`NatRule`].
-//! - [`config`]   — thin persistence wrappers over the shared [`ConfigStore`].
-//! - [`nftables`] — deterministic nftables (`table ip nat`) generator.
+//! - [`model`]    - rich NAT types re-exported from [`crate::config::models`].
+//! - [`validate`] - validation helpers for [`NatConfig`] and [`NatRule`].
+//! - [`config`]   - thin persistence wrappers over the shared [`ConfigStore`].
+//! - [`nftables`] - deterministic nftables (`table ip nat`) generator.
 //!
 //! # Outbound modes
 //!

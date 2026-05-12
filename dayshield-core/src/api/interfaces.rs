@@ -1,10 +1,10 @@
-//! Interface endpoints — `GET /interfaces` and `POST /interfaces`.
+//! Interface endpoints - `GET /interfaces` and `POST /interfaces`.
 //!
 //! # GET /interfaces
 //!
 //! Returns a combined view of:
-//! - `configured` — the interface list persisted in config storage.
-//! - `kernel`     — live interfaces discovered via `ip -j link` / `ip -j addr`.
+//! - `configured` - the interface list persisted in config storage.
+//! - `kernel`     - live interfaces discovered via `ip -j link` / `ip -j addr`.
 //!
 //! # POST /interfaces
 //!

@@ -4,7 +4,7 @@
 //! [`logs_websocket`] is called by the Axum WebSocket upgrade handler.  It:
 //!
 //! 1. Creates a shared [`mpsc`] channel (the *merge channel*).
-//! 2. Spawns three tasks — one per log source — each of which writes to the
+//! 2. Spawns three tasks - one per log source - each of which writes to the
 //!    merge channel.
 //! 3. Reads from the merge channel in a loop, serialising each [`LogEvent`] to
 //!    JSON and sending it as a WebSocket text frame.
@@ -72,7 +72,7 @@ pub async fn logs_websocket(mut ws: WebSocket) {
                         }
                     }
                     None => {
-                        // All senders dropped — should not happen in normal operation.
+                        // All senders dropped - should not happen in normal operation.
                         info!("logs/ws: merge channel closed");
                         break;
                     }

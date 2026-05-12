@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn invalid_rule_propagates_error() {
         let bad_rule = NatRule {
-            source: Some("::1".into()), // IPv6 — invalid
+            source: Some("::1".into()), // IPv6 - invalid
             ..base_masquerade_rule()
         };
         let cfg = NatConfig {

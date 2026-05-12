@@ -9,6 +9,7 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 
 use crate::{
+    ai_engine::AiRuntime,
     config::{
         models::{CrowdSecDecision, FirewallRule, Interface},
         ConfigStore,
@@ -51,6 +52,8 @@ pub struct AppState {
     /// Reset to zero on successful login.  The inner `Option<u64>` holds the
     /// Unix timestamp at which the lockout expires; `None` means not locked.
     pub login_attempts: RwLock<HashMap<String, (u32, Option<u64>)>>,
+    /// AI runtime for threat recording and automated blocking.
+    pub ai_runtime: AiRuntime,
 }
 
 impl AppState {
@@ -78,15 +81,23 @@ impl AppState {
 
         let (notify_queue, notify_rx) = NotifyQueue::new();
 
+        let config_store = ConfigStore::new();
+        let config_dir = config_store
+            .config_path()
+            .parent()
+            .unwrap_or(std::path::Path::new("/etc/dayshield/config"))
+            .to_path_buf();
+
         let state = Self {
             services: RwLock::new(services),
             interfaces: RwLock::new(vec![]),
             firewall_rules: RwLock::new(vec![]),
             crowdsec_decisions: RwLock::new(vec![]),
-            config_store: ConfigStore::new(),
+            config_store,
             metrics_buffer: RwLock::new(MetricsBuffer::default()),
             notify_queue,
             login_attempts: RwLock::new(HashMap::new()),
+            ai_runtime: AiRuntime::new(&config_dir),
         };
         (state, notify_rx)
     }
@@ -96,6 +107,13 @@ impl AppState {
     pub fn with_config_dir(dir: impl AsRef<std::path::Path>) -> (Self, tokio::sync::mpsc::Receiver<crate::notify::model::NotifyEvent>) {
         let (mut state, rx) = Self::new();
         state.config_store = ConfigStore::with_dir(dir);
+        let config_dir = state
+            .config_store
+            .config_path()
+            .parent()
+            .unwrap_or(std::path::Path::new("/etc/dayshield/config"))
+            .to_path_buf();
+        state.ai_runtime = AiRuntime::new(&config_dir);
         (state, rx)
     }
 

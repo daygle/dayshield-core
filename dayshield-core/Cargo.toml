@@ -31,6 +31,7 @@ thiserror = "2"
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+sled = "0.34.7"
 
 # HTTP client (used for URL-table alias fetching)
 reqwest = { version = "0.13", features = ["json"] }

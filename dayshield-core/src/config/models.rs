@@ -1737,6 +1737,44 @@ pub fn validate_cloudflared_config(config: &CloudflaredConfig) -> Result<(), Str
     Ok(())
 }
 
+/// AI threat-engine policy and blocking controls.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AiEngineConfig {
+    /// Enables AI threat handling.
+    pub enabled: bool,
+    /// Allows AI-triggered automatic blocking.
+    pub automatic_blocking: bool,
+    /// Risk score threshold that triggers threat events and blocking.
+    pub risk_score_block_threshold: f64,
+    /// Window used for escalation decisions.
+    pub escalation_window_seconds: u64,
+    /// Base temporary block duration in seconds (`0` = permanent).
+    pub block_duration_seconds: u64,
+}
+
+impl Default for AiEngineConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            automatic_blocking: false,
+            risk_score_block_threshold: 0.9,
+            escalation_window_seconds: 300,
+            block_duration_seconds: 300,
+        }
+    }
+}
+
+pub fn validate_ai_engine_config(config: &AiEngineConfig) -> Result<(), String> {
+    if !(0.0..=1.0).contains(&config.risk_score_block_threshold) {
+        return Err("risk_score_block_threshold must be between 0.0 and 1.0".to_string());
+    }
+    if config.escalation_window_seconds == 0 {
+        return Err("escalation_window_seconds must be greater than 0".to_string());
+    }
+    Ok(())
+}
+
 /// Administrator account security policy.
 ///
 /// Controls session lifetime, login lockout behaviour, and password complexity
@@ -1823,6 +1861,9 @@ pub struct SystemConfig {
     /// Cloudflare Tunnel configuration.
     #[serde(default)]
     pub cloudflared: Option<CloudflaredConfig>,
+    /// AI threat-engine policy and automatic blocking settings.
+    #[serde(default)]
+    pub ai_engine: Option<AiEngineConfig>,
     /// Named upstream gateways.
     #[serde(default)]
     pub gateways: Vec<Gateway>,

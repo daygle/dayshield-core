@@ -1,6 +1,7 @@
 //! API module - assembles the Axum router and registers all route handlers.
 
 mod acme;
+mod ai;
 mod admin;
 mod aliases;
 mod auth;
@@ -305,6 +306,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/cloudflared/status", get(cloudflared::get_status))
         .route("/cloudflared/restart", post(cloudflared::restart_service))
         .route("/cloudflared/logs", get(cloudflared::get_logs))
+        // AI threat events / blocking
+        .route("/api/ai/threats", get(ai::list_threats))
+        .route("/api/ai/threats/{id}", get(ai::get_threat))
+        .route("/api/ai/unblock/{ip}", post(ai::unblock_ip))
+        .route("/api/ai/blocked", get(ai::list_blocked))
         // NAT
         .route("/nat/config", get(nat::get_config))
         .route("/nat/config", put(nat::put_config))

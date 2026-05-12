@@ -27,6 +27,10 @@ use crate::{
 
 const THREAT_EVENTS_TREE: &str = "threat_events";
 const THREAT_EVENTS_BY_ID_TREE: &str = "threat_events_by_id";
+const MAINTENANCE_INTERVAL_SECONDS: u64 = 15;
+const AI_BLOCK_RULE_PRIORITY: i32 = -32000;
+const ESCALATE_EVENT_COUNT: usize = 3;
+const QUARANTINE_EVENT_COUNT: usize = 5;
 
 fn now_unix_secs() -> u64 {
     SystemTime::now()
@@ -111,7 +115,7 @@ impl AiRuntime {
 
         let this = self.clone();
         tokio::spawn(async move {
-            let mut ticker = interval(Duration::from_secs(15));
+            let mut ticker = interval(Duration::from_secs(MAINTENANCE_INTERVAL_SECONDS));
             loop {
                 ticker.tick().await;
                 if let Err(e) = this.expire_blocks_and_reconcile(&state).await {
@@ -300,7 +304,7 @@ impl AiRuntime {
                 } else {
                     format!("AI temporary block: {}", block.ip)
                 }),
-                priority: -32000,
+                priority: AI_BLOCK_RULE_PRIORITY,
                 source: Some(source),
                 destination: None,
                 protocol: None,
@@ -363,11 +367,11 @@ pub fn compute_escalated_block(
 ) -> (Option<u64>, bool, bool) {
     let base = policy.block_duration_seconds;
 
-    if events_in_window >= 5 {
+    if events_in_window >= QUARANTINE_EVENT_COUNT {
         return (None, true, true);
     }
 
-    if events_in_window >= 3 {
+    if events_in_window >= ESCALATE_EVENT_COUNT {
         if base == 0 {
             return (None, true, false);
         }

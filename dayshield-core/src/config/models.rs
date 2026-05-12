@@ -1766,6 +1766,9 @@ impl Default for AiEngineConfig {
 }
 
 pub fn validate_ai_engine_config(config: &AiEngineConfig) -> Result<(), String> {
+    if config.automatic_blocking && !config.enabled {
+        return Err("automatic_blocking cannot be enabled when ai_engine is disabled".to_string());
+    }
     if !(0.0..=1.0).contains(&config.risk_score_block_threshold) {
         return Err("risk_score_block_threshold must be between 0.0 and 1.0".to_string());
     }

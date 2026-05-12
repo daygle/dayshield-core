@@ -18,6 +18,8 @@ use crate::{
     notify::queue::NotifyQueue,
 };
 
+const DEFAULT_CONFIG_DIR: &str = "/etc/dayshield/config";
+
 /// Known DayShield service names used as health-map keys.
 pub const SVC_NFTABLES: &str = "nftables";
 pub const SVC_SURICATA: &str = "suricata";
@@ -85,7 +87,7 @@ impl AppState {
         let config_dir = config_store
             .config_path()
             .parent()
-            .unwrap_or(std::path::Path::new("/etc/dayshield/config"))
+            .unwrap_or(std::path::Path::new(DEFAULT_CONFIG_DIR))
             .to_path_buf();
 
         let state = Self {
@@ -111,7 +113,7 @@ impl AppState {
             .config_store
             .config_path()
             .parent()
-            .unwrap_or(std::path::Path::new("/etc/dayshield/config"))
+            .unwrap_or(std::path::Path::new(DEFAULT_CONFIG_DIR))
             .to_path_buf();
         state.ai_runtime = AiRuntime::new(&config_dir);
         (state, rx)

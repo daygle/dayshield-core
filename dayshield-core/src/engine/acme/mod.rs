@@ -128,7 +128,7 @@ impl AcmeEngine {
         PathBuf::from(&self.config.cert_storage_path).join(format!("{safe}.crt"))
     }
 
-    fn key_path(&self, domain: &str) -> PathBuf {
+    pub fn key_path(&self, domain: &str) -> PathBuf {
         let safe = Self::safe_filename(domain);
         PathBuf::from(&self.config.cert_storage_path).join(format!("{safe}.key"))
     }

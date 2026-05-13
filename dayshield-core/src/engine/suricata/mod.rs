@@ -21,6 +21,7 @@ use tokio::process::Command;
 use tracing::{info, warn};
 
 use crate::config::models::SuricataConfig;
+use crate::rules::storage::RulesetStore;
 
 /// Path where the Suricata configuration file is written.
 const SURICATA_YAML_PATH: &str = "/etc/suricata/suricata.yaml";
@@ -222,9 +223,11 @@ pub fn generate_config(config: &SuricataConfig) -> String {
 /// Apply the provided Suricata configuration to the running Suricata instance.
 ///
 /// Steps:
-/// 1. Generate `suricata.yaml` via [`generate_config`].
-/// 2. Write the file atomically to [`SURICATA_YAML_PATH`].
-/// 3. If Suricata is running, send it `SIGUSR2` (live rule reload); otherwise
+/// 1. Collect paths of all enabled *managed* rulesets from the ruleset store.
+/// 2. Generate `suricata.yaml` via [`generate_config`], merging managed paths
+///    with any user-defined rule sources.
+/// 3. Write the file atomically to [`SURICATA_YAML_PATH`].
+/// 4. If Suricata is running, send it `SIGUSR2` (live rule reload); otherwise
 ///    attempt to start it with `systemctl start suricata`.
 ///
 /// # Errors
@@ -248,7 +251,28 @@ pub async fn apply_config(config: &SuricataConfig) -> Result<()> {
         return Ok(());
     }
 
-    let conf_str = generate_config(config);
+    // Merge enabled managed rulesets into a working copy of the config so
+    // that the generator sees them alongside any user-defined sources.
+    let mut effective_config = config.clone();
+    match RulesetStore::new().load() {
+        Ok(managed) => {
+            for rs in managed.iter().filter(|r| r.enabled) {
+                if let Some(path) = &rs.local_path {
+                    effective_config.rule_sources.push(crate::config::models::RuleSource {
+                        name: rs.id.clone(),
+                        enabled: true,
+                        url: None,
+                        path: Some(path.clone()),
+                    });
+                }
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "suricata: failed to load managed rulesets; continuing without them");
+        }
+    }
+
+    let conf_str = generate_config(&effective_config);
     write_config_atomic(SURICATA_YAML_PATH, &conf_str)
         .with_context(|| {
             format!(

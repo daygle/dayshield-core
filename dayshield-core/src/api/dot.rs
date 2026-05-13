@@ -147,8 +147,8 @@ pub async fn update_config(
         enabled: req.enabled,
         port: req.port,
         lan_only: req.lan_only,
-        cert_pem: req.cert_pem.trim().is_empty().then(|| None).or(Some(req.cert_pem)),
-        key_pem: req.key_pem.trim().is_empty().then(|| None).or(Some(req.key_pem)),
+        cert_pem: Some(req.cert_pem).filter(|s| !s.trim().is_empty()),
+        key_pem: Some(req.key_pem).filter(|s| !s.trim().is_empty()),
         acme_domain,
         acme_cert_storage_path: req
             .acme_cert_storage_path

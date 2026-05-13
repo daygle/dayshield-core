@@ -29,6 +29,7 @@ mod metrics;
 mod nat;
 mod notify;
 mod ntp;
+mod rules;
 mod state;
 mod update;
 mod utils;

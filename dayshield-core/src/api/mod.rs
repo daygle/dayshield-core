@@ -21,6 +21,7 @@ mod metrics;
 mod nat;
 mod notify;
 mod ntp;
+mod rulesets;
 mod suricata;
 mod system;
 mod wireguard;
@@ -84,6 +85,15 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `POST /dhcp/config`                                   - update DHCP (dnsmasq) configuration
 /// - `GET  /suricata/config`                               - get Suricata configuration
 /// - `POST /suricata/config`                               - update Suricata configuration
+/// - `GET  /rulesets/available`                            - list available (curated) rulesets
+/// - `GET  /rulesets`                                      - list installed rulesets with status
+/// - `POST /rulesets/{id}/install`                         - install a curated ruleset
+/// - `POST /rulesets/{id}/check-update`                    - check for an update to a ruleset
+/// - `POST /rulesets/check-all-updates`                    - check updates for all installed rulesets
+/// - `POST /rulesets/{id}/update`                          - apply available update
+/// - `POST /rulesets/{id}/enable`                          - enable an installed ruleset
+/// - `POST /rulesets/{id}/disable`                         - disable an installed ruleset
+/// - `DELETE /rulesets/{id}`                               - uninstall a ruleset
 /// - `GET  /wireguard/interfaces`                          - list WireGuard interfaces
 /// - `POST /wireguard/interfaces`                          - create / update a WireGuard interface
 /// - `DELETE /wireguard/interfaces/{name}`                 - remove a WireGuard interface
@@ -237,6 +247,16 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/suricata/alerts", get(suricata::list_alerts))
         .route("/interfaces/{name}/suricata", get(suricata::get_interface_suricata_config))
         .route("/interfaces/{name}/suricata", post(suricata::update_interface_suricata_config))
+        // Managed rulesets
+        .route("/rulesets/available", get(rulesets::list_available))
+        .route("/rulesets", get(rulesets::list_installed))
+        .route("/rulesets/{id}/install", post(rulesets::install_ruleset))
+        .route("/rulesets/{id}/check-update", post(rulesets::check_update))
+        .route("/rulesets/check-all-updates", post(rulesets::check_all_updates))
+        .route("/rulesets/{id}/update", post(rulesets::update_ruleset))
+        .route("/rulesets/{id}/enable", post(rulesets::enable_ruleset))
+        .route("/rulesets/{id}/disable", post(rulesets::disable_ruleset))
+        .route("/rulesets/{id}", delete(rulesets::delete_ruleset))
         // CrowdSec
         .route("/crowdsec/config", get(crowdsec::get_config))
         .route("/crowdsec/config", post(crowdsec::update_config))

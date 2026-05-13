@@ -289,7 +289,11 @@ impl ConfigStore {
         use crate::config::models::{
             is_valid_cidr, is_valid_domain, is_valid_interface_name, is_valid_ip,
             is_valid_ipv4_range, is_valid_mac, is_valid_mss, is_valid_mtu, is_valid_port,
+            is_valid_vlan_id,
         };
+
+        let interface_names: std::collections::HashSet<&str> =
+            config.interfaces.iter().map(|i| i.name.as_str()).collect();
 
         for iface in &config.interfaces {
             if !is_valid_interface_name(&iface.name) {
@@ -323,6 +327,52 @@ impl ConfigStore {
                         iface.name,
                         mss
                     );
+                }
+            }
+            match iface.vlan {
+                Some(vlan_id) => {
+                    if !is_valid_vlan_id(vlan_id) {
+                        anyhow::bail!(
+                            "Interface {:?} has invalid VLAN ID {} (must be 1-4094)",
+                            iface.name,
+                            vlan_id
+                        );
+                    }
+                    let parent = iface.parent_interface.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Interface {:?} is VLAN {} but has no parent_interface",
+                            iface.name,
+                            vlan_id
+                        )
+                    })?;
+                    if !is_valid_interface_name(parent) {
+                        anyhow::bail!(
+                            "Interface {:?} has invalid parent_interface {:?}",
+                            iface.name,
+                            parent
+                        );
+                    }
+                    if parent == iface.name {
+                        anyhow::bail!(
+                            "Interface {:?} cannot use itself as parent_interface",
+                            iface.name
+                        );
+                    }
+                    if !interface_names.contains(parent) {
+                        anyhow::bail!(
+                            "Interface {:?} references unknown parent_interface {:?}",
+                            iface.name,
+                            parent
+                        );
+                    }
+                }
+                None => {
+                    if iface.parent_interface.is_some() {
+                        anyhow::bail!(
+                            "Interface {:?} sets parent_interface but is not a VLAN interface",
+                            iface.name
+                        );
+                    }
                 }
             }
         }
@@ -1236,6 +1286,7 @@ mod tests {
             dhcp4: false,
             dhcp6: false,
             vlan: None,
+            parent_interface: None,
             wan_mode: None,
             pppoe_username: None,
             pppoe_password: None,
@@ -1359,6 +1410,7 @@ mod tests {
             dhcp4: false,
             dhcp6: false,
             vlan: None,
+            parent_interface: None,
             wan_mode: None,
             pppoe_username: None,
             pppoe_password: None,
@@ -1385,6 +1437,7 @@ mod tests {
             dhcp4: false,
             dhcp6: false,
             vlan: None,
+            parent_interface: None,
             wan_mode: None,
             pppoe_username: None,
             pppoe_password: None,
@@ -1411,12 +1464,95 @@ mod tests {
             dhcp4: false,
             dhcp6: false,
             vlan: None,
+            parent_interface: None,
             wan_mode: None,
             pppoe_username: None,
             pppoe_password: None,
             gateway: None,
         });
         assert!(store.validate(&cfg).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_vlan_without_parent() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        cfg.interfaces.push(Interface {
+            name: "eth0.100".into(),
+            description: None,
+            addresses: vec![],
+            mtu: None,
+            mss: None,
+            enabled: true,
+            dhcp4: false,
+            dhcp6: false,
+            vlan: Some(100),
+            parent_interface: None,
+            wan_mode: None,
+            pppoe_username: None,
+            pppoe_password: None,
+            gateway: None,
+        });
+        assert!(store.validate(&cfg).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_vlan_with_unknown_parent() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        cfg.interfaces.push(Interface {
+            name: "eth0.100".into(),
+            description: None,
+            addresses: vec![],
+            mtu: None,
+            mss: None,
+            enabled: true,
+            dhcp4: false,
+            dhcp6: false,
+            vlan: Some(100),
+            parent_interface: Some("eth9".into()),
+            wan_mode: None,
+            pppoe_username: None,
+            pppoe_password: None,
+            gateway: None,
+        });
+        assert!(store.validate(&cfg).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_accepts_vlan_with_known_parent() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        cfg.interfaces.push(make_interface("eth0"));
+        cfg.interfaces.push(Interface {
+            name: "eth0.100".into(),
+            description: None,
+            addresses: vec![],
+            mtu: None,
+            mss: None,
+            enabled: true,
+            dhcp4: false,
+            dhcp6: false,
+            vlan: Some(100),
+            parent_interface: Some("eth0".into()),
+            wan_mode: None,
+            pppoe_username: None,
+            pppoe_password: None,
+            gateway: None,
+        });
+        assert!(store.validate(&cfg).is_ok());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

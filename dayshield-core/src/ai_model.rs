@@ -1,11 +1,9 @@
 use std::{fs, io::Write, net::IpAddr, path::{Path, PathBuf}};
 
 use anyhow::{Context, Result};
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
-use crate::{config::models::{AiEngineConfig, AiModelType}, logs::LogEvent};
+use crate::{config::models::AiEngineConfig, logs::LogEvent};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct AiModelState {
@@ -27,17 +25,12 @@ pub struct AiContextFeatures {
     pub dns_blocklist_configured: f64,
 }
 
-/// Abstraction over AI model runtimes.
+/// Abstraction over the AI model runtime. The engine uses a self-reliant local
+/// logistic regression model; no third-party inference services are involved.
 #[derive(Debug, Clone)]
 pub struct AiModel {
-    inner: AiModelRuntime,
+    inner: LocalLogisticModel,
     training_enabled: bool,
-}
-
-#[derive(Debug, Clone)]
-enum AiModelRuntime {
-    Local(LocalLogisticModel),
-    Remote(RemoteInferenceModel),
 }
 
 #[derive(Debug, Clone)]
@@ -47,25 +40,10 @@ struct LocalLogisticModel {
     path: PathBuf,
 }
 
-#[derive(Debug, Clone)]
-struct RemoteInferenceModel {
-    client: Client,
-    url: String,
-    api_key: Option<String>,
-}
-
 impl AiModel {
     pub fn new(config_dir: &Path, config: &AiEngineConfig) -> Self {
-        let runtime = match config.model_type {
-            AiModelType::Remote => match config.remote_inference_url.clone() {
-                Some(url) => AiModelRuntime::Remote(RemoteInferenceModel::new(url, config.remote_api_key.clone())),
-                None => AiModelRuntime::Local(LocalLogisticModel::new(config_dir, config.model_learning_rate)),
-            },
-            AiModelType::Local => AiModelRuntime::Local(LocalLogisticModel::new(config_dir, config.model_learning_rate)),
-        };
-
         Self {
-            inner: runtime,
+            inner: LocalLogisticModel::new(config_dir, config.model_learning_rate),
             training_enabled: config.training_enabled,
         }
     }
@@ -82,35 +60,17 @@ impl AiModel {
         dst_port: Option<u16>,
         history: &AiContextFeatures,
     ) -> Result<(f64, Vec<String>)> {
-        match &self.inner {
-            AiModelRuntime::Local(local) => Ok(local.predict_suricata_alert(
-                signature,
-                severity,
-                category,
-                protocol,
-                src_ip,
-                dst_ip,
-                src_port,
-                dst_port,
-                history,
-            )),
-            AiModelRuntime::Remote(remote) => remote
-                .predict(
-                    "suricata",
-                    Some(signature),
-                    Some(severity),
-                    category,
-                    protocol,
-                    src_ip,
-                    dst_ip,
-                    src_port,
-                    dst_port,
-                    None,
-                    None,
-                    history,
-                )
-                .await,
-        }
+        Ok(self.inner.predict_suricata_alert(
+            signature,
+            severity,
+            category,
+            protocol,
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            history,
+        ))
     }
 
     pub async fn predict_firewall_event(
@@ -124,34 +84,16 @@ impl AiModel {
         iface: &str,
         history: &AiContextFeatures,
     ) -> Result<(f64, Vec<String>)> {
-        match &self.inner {
-            AiModelRuntime::Local(local) => Ok(local.predict_firewall_event(
-                action,
-                protocol,
-                src_ip,
-                dst_ip,
-                src_port,
-                dst_port,
-                iface,
-                history,
-            )),
-            AiModelRuntime::Remote(remote) => remote
-                .predict(
-                    "firewall",
-                    None,
-                    None,
-                    None,
-                    protocol,
-                    src_ip,
-                    dst_ip,
-                    src_port,
-                    dst_port,
-                    Some(action),
-                    Some(iface),
-                    history,
-                )
-                .await,
-        }
+        Ok(self.inner.predict_firewall_event(
+            action,
+            protocol,
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            iface,
+            history,
+        ))
     }
 
     pub async fn predict_event(&self, event: &LogEvent, history: &AiContextFeatures) -> Result<(f64, Vec<String>)> {
@@ -208,17 +150,11 @@ impl AiModel {
         if !self.training_enabled {
             return Ok(());
         }
-
-        match &mut self.inner {
-            AiModelRuntime::Local(local) => local.train_on_feedback(features, label),
-            AiModelRuntime::Remote(_) => Ok(()),
-        }
+        self.inner.train_on_feedback(features, label)
     }
 
     pub fn reset_to_default_weights(&mut self) {
-        if let AiModelRuntime::Local(local) = &mut self.inner {
-            local.reset_to_default_weights();
-        }
+        self.inner.reset_to_default_weights();
     }
 
     pub fn build_feature_vector(
@@ -533,66 +469,46 @@ impl LocalLogisticModel {
     }
 }
 
-impl RemoteInferenceModel {
-    pub fn new(url: String, api_key: Option<String>) -> Self {
-        Self {
-            client: Client::new(),
-            url,
-            api_key,
-        }
-    }
-
-    async fn predict(
-        &self,
-        event_type: &str,
-        signature: Option<&str>,
-        severity: Option<u8>,
-        category: Option<&str>,
-        protocol: &str,
-        src_ip: &str,
-        dst_ip: &str,
-        src_port: Option<u16>,
-        dst_port: Option<u16>,
-        action: Option<&str>,
-        iface: Option<&str>,
-        history: &AiContextFeatures,
-    ) -> Result<(f64, Vec<String>)> {
-        let payload = json!({
-            "event_type": event_type,
-            "signature": signature,
-            "severity": severity,
-            "category": category,
-            "protocol": protocol,
-            "src_ip": src_ip,
-            "dst_ip": dst_ip,
-            "src_port": src_port,
-            "dst_port": dst_port,
-            "action": action,
-            "iface": iface,
-            "history": history,
-        });
-
-        let mut request = self.client.post(&self.url).json(&payload);
-        if let Some(key) = &self.api_key {
-            request = request.header("Authorization", format!("Bearer {}", key));
-        }
-
-        let response = request.send().await?.error_for_status()?;
-        let inference: RemoteInferenceResponse = response.json().await?;
-        Ok((inference.risk_score, inference.reasons))
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct RemoteInferenceResponse {
-    risk_score: f64,
-    reasons: Vec<String>,
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
+
+    use crate::config::models::{validate_ai_engine_config, AiEngineConfig};
+
+    #[test]
+    fn ai_model_new_uses_local_runtime() {
+        let config = AiEngineConfig::default();
+        // Constructing AiModel must succeed with the default (local-only) config.
+        let model = AiModel::new(Path::new("/tmp"), &config);
+        assert!(model.training_enabled);
+    }
+
+    #[test]
+    fn default_config_passes_validation() {
+        let config = AiEngineConfig::default();
+        assert!(validate_ai_engine_config(&config).is_ok());
+    }
+
+    #[test]
+    fn invalid_threshold_rejected() {
+        let config = AiEngineConfig {
+            risk_score_block_threshold: 1.5,
+            ..AiEngineConfig::default()
+        };
+        assert!(validate_ai_engine_config(&config).is_err());
+    }
+
+    #[test]
+    fn automatic_blocking_without_enabled_rejected() {
+        let config = AiEngineConfig {
+            automatic_blocking: true,
+            enabled: false,
+            ..AiEngineConfig::default()
+        };
+        assert!(validate_ai_engine_config(&config).is_err());
+    }
 
     #[test]
     fn suricata_model_scores_severity_correctly() {

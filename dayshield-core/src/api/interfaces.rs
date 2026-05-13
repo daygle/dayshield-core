@@ -18,7 +18,10 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::{
-    config::models::{is_valid_cidr, is_valid_interface_name, is_valid_mss, is_valid_mtu, Interface},
+    config::models::{
+        is_valid_cidr, is_valid_interface_name, is_valid_mss, is_valid_mtu, is_valid_vlan_id,
+        Interface,
+    },
     engine::gateway::list_kernel_gateways,
     engine::interfaces::{apply_interface, list_kernel_interfaces, InterfaceError, KernelInterface},
     state::AppState,
@@ -41,6 +44,7 @@ pub struct InterfaceResponse {
     pub mtu: Option<u16>,
     pub mss: Option<u16>,
     pub vlan: Option<u16>,
+    pub parent_interface: Option<String>,
     pub wan_mode: Option<String>,      // "dhcp" or "pppoe"
     pub pppoe_username: Option<String>,
     pub ipv4_address: Option<String>,  // First address from CIDR (e.g. "192.168.1.1")
@@ -91,6 +95,7 @@ impl InterfaceResponse {
             mtu: iface.mtu,
             mss: iface.mss,
             vlan: iface.vlan,
+            parent_interface: iface.parent_interface.clone(),
             wan_mode,
             pppoe_username: iface.pppoe_username.clone(),
             ipv4_address,
@@ -121,6 +126,7 @@ pub struct InterfaceRequest {
     pub mtu: Option<u16>,
     pub mss: Option<u16>,
     pub vlan: Option<u16>,
+    pub parent_interface: Option<String>,
     pub wan_mode: Option<String>,      // "dhcp" or "pppoe"
     pub pppoe_username: Option<String>,
     pub pppoe_password: Option<String>,
@@ -155,6 +161,7 @@ impl InterfaceRequest {
             dhcp4: self.dhcp4,
             dhcp6: self.dhcp6.unwrap_or(false),
             vlan: self.vlan,
+            parent_interface: self.parent_interface,
             wan_mode,
             pppoe_username: self.pppoe_username,
             pppoe_password: self.pppoe_password,
@@ -256,6 +263,39 @@ pub async fn create_interface(
         }
     }
 
+    match iface.vlan {
+        Some(vlan_id) => {
+            if !is_valid_vlan_id(vlan_id) {
+                return Err(InterfaceError::InvalidVlanId(vlan_id));
+            }
+            let parent = iface
+                .parent_interface
+                .as_deref()
+                .ok_or_else(|| InterfaceError::MissingVlanParent(iface.name.clone()))?;
+            if !is_valid_interface_name(parent) || parent == iface.name {
+                return Err(InterfaceError::InvalidVlanParent(parent.to_string()));
+            }
+            let parent_exists = {
+                let ifaces = state.interfaces.read().await;
+                ifaces.iter().any(|i| i.name == parent)
+            };
+            let parent_exists = parent_exists || state
+                    .config_store
+                    .load_interfaces()
+                    .map_err(InterfaceError::StorageError)?
+                    .iter()
+                    .any(|i| i.name == parent);
+            if !parent_exists {
+                return Err(InterfaceError::InvalidVlanParent(parent.to_string()));
+            }
+        }
+        None => {
+            if iface.parent_interface.is_some() {
+                return Err(InterfaceError::ParentInterfaceWithoutVlan(iface.name.clone()));
+            }
+        }
+    }
+
     info!(
         name = %iface.name,
         enabled = iface.enabled,
@@ -265,21 +305,29 @@ pub async fn create_interface(
     // --- Persist -----------------------------------------------------------
 
     // Upsert in the in-memory cache (match by name).
-    {
+    let previous_ifaces = {
         let mut ifaces = state.interfaces.write().await;
+        let previous_ifaces = ifaces.clone();
         match ifaces.iter().position(|i| i.name == iface.name) {
             Some(pos) => ifaces[pos] = iface.clone(),
             None => ifaces.push(iface.clone()),
         }
-    }
+        previous_ifaces
+    };
 
     // Atomically write the updated list to disk.
-    {
+    let ifaces_to_save = {
         let ifaces = state.interfaces.read().await;
-        state
-            .config_store
-            .save_interfaces(ifaces.clone())
-            .map_err(InterfaceError::StorageError)?;
+        ifaces.clone()
+    };
+    if let Err(err) = state
+        .config_store
+        .save_interfaces(ifaces_to_save)
+        .map_err(InterfaceError::StorageError)
+    {
+        let mut in_memory = state.interfaces.write().await;
+        *in_memory = previous_ifaces;
+        return Err(err);
     }
 
     info!(name = %iface.name, "interfaces: configuration persisted");
@@ -306,31 +354,113 @@ pub async fn delete_interface(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, InterfaceError> {
     // --- Remove from in-memory cache ---------------------------------------
-    {
+    let (previous_ifaces, deleted_names) = {
         let mut ifaces = state.interfaces.write().await;
+        let previous_ifaces = ifaces.clone();
         let before = ifaces.len();
-        ifaces.retain(|i| i.name != name);
+        let mut deleted_names = vec![name.clone()];
+        ifaces.retain(|i| {
+            if i.name == name || i.parent_interface.as_deref() == Some(name.as_str()) {
+                if i.name != name {
+                    deleted_names.push(i.name.clone());
+                }
+                false
+            } else {
+                true
+            }
+        });
         if ifaces.len() == before {
             return Err(InterfaceError::NotFound(name));
         }
-    }
+        (previous_ifaces, deleted_names)
+    };
 
     // --- Persist -----------------------------------------------------------
-    {
+    let ifaces_to_save = {
         let ifaces = state.interfaces.read().await;
-        state
-            .config_store
-            .save_interfaces(ifaces.clone())
-            .map_err(InterfaceError::StorageError)?;
+        ifaces.clone()
+    };
+    if let Err(err) = state
+        .config_store
+        .save_interfaces(ifaces_to_save)
+        .map_err(InterfaceError::StorageError)
+    {
+        let mut in_memory = state.interfaces.write().await;
+        *in_memory = previous_ifaces;
+        return Err(err);
     }
 
     // --- Best-effort kernel teardown ---------------------------------------
-    let _ = tokio::process::Command::new("ip")
-        .args(["link", "set", &name, "down"])
-        .output()
-        .await;
+    for deleted in &deleted_names {
+        let _ = tokio::process::Command::new("ip")
+            .args(["link", "set", deleted, "down"])
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("ip")
+            .args(["link", "del", "dev", deleted])
+            .output()
+            .await;
+    }
 
-    info!(%name, "interfaces: deleted interface");
+    info!(%name, count = deleted_names.len(), "interfaces: deleted interface(s)");
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{InterfaceRequest, InterfaceResponse};
+    use crate::config::models::Interface;
+
+    #[test]
+    fn interface_request_to_interface_preserves_vlan_parent() {
+        let req = InterfaceRequest {
+            name: "eth0.100".into(),
+            description: Some("VLAN 100".into()),
+            r#type: Some("vlan".into()),
+            enabled: true,
+            dhcp4: false,
+            dhcp6: Some(false),
+            mtu: Some(1500),
+            mss: None,
+            vlan: Some(100),
+            parent_interface: Some("eth0".into()),
+            wan_mode: None,
+            pppoe_username: None,
+            pppoe_password: None,
+            ipv4_address: Some("192.168.100.1".into()),
+            ipv4_prefix: Some(24),
+            gateway: None,
+        };
+
+        let iface = req.to_interface();
+        assert_eq!(iface.vlan, Some(100));
+        assert_eq!(iface.parent_interface.as_deref(), Some("eth0"));
+        assert_eq!(iface.addresses, vec!["192.168.100.1/24".to_string()]);
+    }
+
+    #[test]
+    fn interface_response_from_interface_exposes_vlan_parent() {
+        let iface = Interface {
+            name: "eth0.100".into(),
+            description: Some("VLAN 100".into()),
+            addresses: vec!["192.168.100.1/24".into()],
+            mtu: Some(1500),
+            mss: None,
+            enabled: true,
+            dhcp4: false,
+            dhcp6: false,
+            vlan: Some(100),
+            parent_interface: Some("eth0".into()),
+            wan_mode: None,
+            pppoe_username: None,
+            pppoe_password: None,
+            gateway: None,
+        };
+
+        let resp = InterfaceResponse::from_interface(&iface);
+        assert_eq!(resp.r#type, "vlan");
+        assert_eq!(resp.vlan, Some(100));
+        assert_eq!(resp.parent_interface.as_deref(), Some("eth0"));
+    }
 }

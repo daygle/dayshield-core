@@ -48,6 +48,22 @@ pub enum InterfaceError {
     #[error("invalid CIDR address: {0:?}")]
     InvalidCIDR(String),
 
+    /// VLAN tag ID is outside the 802.1Q range.
+    #[error("invalid VLAN ID: {0} (must be 1-4094)")]
+    InvalidVlanId(u16),
+
+    /// VLAN interface is missing a parent/base interface.
+    #[error("VLAN interface {0:?} is missing parent interface")]
+    MissingVlanParent(String),
+
+    /// VLAN parent/base interface name is invalid.
+    #[error("invalid VLAN parent interface name: {0:?}")]
+    InvalidVlanParent(String),
+
+    /// VLAN parent was set without a VLAN ID.
+    #[error("interface {0:?} has parent_interface set but no VLAN ID")]
+    ParentInterfaceWithoutVlan(String),
+
     /// An `ip(8)` command failed or could not be spawned.
     #[error("failed to apply interface configuration: {0}")]
     ApplyFailed(String),
@@ -74,7 +90,11 @@ impl axum::response::IntoResponse for InterfaceError {
             InterfaceError::InvalidName(_)
             | InterfaceError::InvalidMtu(_)
             | InterfaceError::InvalidMss(_)
-            | InterfaceError::InvalidCIDR(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            | InterfaceError::InvalidCIDR(_)
+            | InterfaceError::InvalidVlanId(_)
+            | InterfaceError::MissingVlanParent(_)
+            | InterfaceError::InvalidVlanParent(_)
+            | InterfaceError::ParentInterfaceWithoutVlan(_) => StatusCode::UNPROCESSABLE_ENTITY,
             InterfaceError::NotFound(_) => StatusCode::NOT_FOUND,
             InterfaceError::ApplyFailed(_)
             | InterfaceError::KernelQueryFailed(_)
@@ -293,6 +313,24 @@ pub async fn apply_interface(config: &Interface) -> Result<(), InterfaceError> {
         return Err(InterfaceError::InvalidName(name.clone()));
     }
 
+    if let Some(vlan_id) = config.vlan {
+        if !(1..=4094).contains(&vlan_id) {
+            return Err(InterfaceError::InvalidVlanId(vlan_id));
+        }
+        let parent = config
+            .parent_interface
+            .as_deref()
+            .ok_or_else(|| InterfaceError::MissingVlanParent(name.clone()))?;
+        if !is_valid_interface_name(parent) {
+            return Err(InterfaceError::InvalidVlanParent(parent.to_string()));
+        }
+        if parent == name {
+            return Err(InterfaceError::InvalidVlanParent(parent.to_string()));
+        }
+    } else if config.parent_interface.is_some() {
+        return Err(InterfaceError::ParentInterfaceWithoutVlan(name.clone()));
+    }
+
     info!(
         name = %name,
         enabled = config.enabled,
@@ -302,6 +340,27 @@ pub async fn apply_interface(config: &Interface) -> Result<(), InterfaceError> {
     );
 
     if config.enabled {
+        if let Some(vlan_id) = config.vlan {
+            let parent = config
+                .parent_interface
+                .as_deref()
+                .expect("validated VLAN parent_interface to be present");
+            let _ = run_ip(&["link", "del", "dev", name]).await;
+            run_ip(&[
+                "link",
+                "add",
+                "link",
+                parent,
+                "name",
+                name,
+                "type",
+                "vlan",
+                "id",
+                &vlan_id.to_string(),
+            ])
+            .await?;
+        }
+
         run_ip(&["link", "set", "dev", name, "up"]).await?;
 
         if let Some(mtu) = config.mtu {
@@ -582,6 +641,7 @@ mod tests {
             dhcp4: false,
             dhcp6: false,
             vlan: None,
+            parent_interface: None,
             wan_mode: None,
             pppoe_username: None,
             pppoe_password: None,

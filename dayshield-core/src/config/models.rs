@@ -66,7 +66,11 @@ pub struct Interface {
     /// Obtain an IPv6 address via DHCP (reserved for future use).
     pub dhcp6: bool,
     /// VLAN tag ID (802.1Q), if this is a VLAN sub-interface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vlan: Option<u16>,
+    /// Parent/base interface name for VLAN sub-interfaces (for example `eth0`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_interface: Option<String>,
     /// WAN connection mode.  `None` means this interface is not a WAN uplink.
     /// When `Some(WanMode::Pppoe)` the `pppoe_username` / `pppoe_password`
     /// fields must also be present.
@@ -243,6 +247,11 @@ pub fn is_valid_mtu(mtu: u16) -> bool {
 /// Return `true` if `mss` is within an acceptable TCP MSS range (536–65 535).
 pub fn is_valid_mss(mss: u16) -> bool {
     mss >= 536
+}
+
+/// Return `true` if `vlan_id` is a valid IEEE 802.1Q VLAN ID (1–4094).
+pub fn is_valid_vlan_id(vlan_id: u16) -> bool {
+    (1..=4094).contains(&vlan_id)
 }
 
 /// Return `true` for any [`Action`] value.

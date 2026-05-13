@@ -1854,17 +1854,11 @@ pub fn validate_cloudflared_config(config: &CloudflaredConfig) -> Result<(), Str
     Ok(())
 }
 
-/// AI model runtime selection.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum AiModelType {
-    /// Run a local logistic regression model in-process.
-    Local,
-    /// Send feature payloads to a remote inference service.
-    Remote,
-}
-
 /// AI threat-engine policy and blocking controls.
+///
+/// The engine runs entirely in-process using a self-reliant local logistic
+/// regression model that is continually retrained from operator feedback.
+/// No third-party or remote inference services are used.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AiEngineConfig {
@@ -1878,18 +1872,10 @@ pub struct AiEngineConfig {
     pub escalation_window_seconds: u64,
     /// Base temporary block duration in seconds (`0` = permanent).
     pub block_duration_seconds: u64,
-    /// AI model runtime to use for scoring.
-    pub model_type: AiModelType,
-    /// If true, feedback-driven training updates are applied on local models.
+    /// If true, feedback-driven training updates are applied to the local model.
     pub training_enabled: bool,
     /// Learning rate for the local model update algorithm.
     pub model_learning_rate: f64,
-    /// Remote inference endpoint URL.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote_inference_url: Option<String>,
-    /// Optional API key used for remote inference requests.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote_api_key: Option<String>,
 }
 
 impl Default for AiEngineConfig {
@@ -1900,11 +1886,8 @@ impl Default for AiEngineConfig {
             risk_score_block_threshold: 0.9,
             escalation_window_seconds: 300,
             block_duration_seconds: 300,
-            model_type: AiModelType::Local,
             training_enabled: true,
             model_learning_rate: 0.25,
-            remote_inference_url: None,
-            remote_api_key: None,
         }
     }
 }
@@ -1921,9 +1904,6 @@ pub fn validate_ai_engine_config(config: &AiEngineConfig) -> Result<(), String> 
     }
     if config.model_learning_rate <= 0.0 {
         return Err("model_learning_rate must be greater than 0".to_string());
-    }
-    if config.model_type == AiModelType::Remote && config.remote_inference_url.is_none() {
-        return Err("remote_inference_url must be configured when model_type is remote".to_string());
     }
     Ok(())
 }

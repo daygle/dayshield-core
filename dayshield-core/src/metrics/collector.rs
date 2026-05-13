@@ -12,7 +12,7 @@ use tracing::{info, warn};
 
 use crate::{
     metrics::{
-        crowdsec::collect_crowdsec_default,
+        crowdsec,
         firewall::collect_firewall,
         network::{compute_throughput, read_iface_counters, IfaceCounters},
         suricata::collect_suricata,
@@ -88,7 +88,13 @@ async fn run_collector(state: Arc<AppState>) {
         let suricata = collect_suricata(now).await;
 
         // --- CrowdSec metrics ---
-        let crowdsec = collect_crowdsec_default(now).await;
+        // Only collect if CrowdSec is enabled
+        let crowdsec = match state.config_store.load_crowdsec_config() {
+            Ok(Some(cfg)) if cfg.enabled => {
+                crowdsec::collect_crowdsec(&cfg.lapi_url, &cfg.api_key, now).await
+            }
+            _ => crate::metrics::CrowdSecMetrics::default(),
+        };
 
         let snapshot = MetricsSnapshot {
             timestamp: now,

@@ -341,7 +341,10 @@ pub async fn apply_interface(config: &Interface) -> Result<(), InterfaceError> {
 
     if config.enabled {
         if let Some(vlan_id) = config.vlan {
-            let parent = config.parent_interface.as_deref().unwrap_or_default();
+            let parent = config
+                .parent_interface
+                .as_deref()
+                .expect("validated VLAN parent_interface to be present");
             let _ = run_ip(&["link", "del", "dev", name]).await;
             run_ip(&[
                 "link",

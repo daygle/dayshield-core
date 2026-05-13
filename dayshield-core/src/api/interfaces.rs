@@ -279,16 +279,12 @@ pub async fn create_interface(
                 let ifaces = state.interfaces.read().await;
                 ifaces.iter().any(|i| i.name == parent)
             };
-            let parent_exists = if parent_exists {
-                true
-            } else {
-                state
+            let parent_exists = parent_exists || state
                     .config_store
                     .load_interfaces()
                     .map_err(InterfaceError::StorageError)?
                     .iter()
-                    .any(|i| i.name == parent)
-            };
+                    .any(|i| i.name == parent);
             if !parent_exists {
                 return Err(InterfaceError::InvalidVlanParent(parent.to_string()));
             }

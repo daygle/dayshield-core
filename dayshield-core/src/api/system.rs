@@ -20,7 +20,7 @@ use std::sync::Arc;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     config::models::SystemSettings,
@@ -212,25 +212,83 @@ pub async fn check_updates(
 }
 
 /// Handler: apply updates for selected component(s).
+/// 
+/// Spawns the update process in a background task and returns immediately with
+/// 202 Accepted. The caller should poll `/system/updates/status` to monitor progress.
 pub async fn apply_updates(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateActionRequest>,
 ) -> Result<impl IntoResponse, SystemApiError> {
-    let result = update::apply_updates(&state, req.component, req.force_partial_apply)
-        .await
-        .map_err(SystemApiError::StorageError)?;
-    Ok(Json(result))
+    let component = req.component;
+    let force_partial = req.force_partial_apply;
+    let state_clone = Arc::clone(&state);
+
+    // Spawn update in background - don't wait for completion
+    tokio::spawn(async move {
+        match update::apply_updates(&state_clone, component, force_partial).await {
+            Ok(result) => {
+                info!("updates: background apply_updates completed successfully: {}", result.message);
+            }
+            Err(e) => {
+                warn!("updates: background apply_updates failed: {}", e);
+            }
+        }
+    });
+
+    // Get current status to return immediately
+    let current_status = update::get_status(&state).await;
+    
+    // Return 202 Accepted immediately with current status to prevent timeout
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "operation": "apply",
+            "success": true,
+            "message": "Update process started in background. Monitor progress via GET /system/updates/status",
+            "details": [],
+            "status": current_status
+        }))
+    ))
 }
 
 /// Handler: rollback selected component(s) to previous commit.
+/// 
+/// Spawns the rollback process in a background task and returns immediately.
+/// The caller should poll `/system/updates/status` to monitor progress.
 pub async fn rollback_updates(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateActionRequest>,
 ) -> Result<impl IntoResponse, SystemApiError> {
-    let result = update::rollback_updates(&state, req.component, req.force_partial_apply)
-        .await
-        .map_err(SystemApiError::StorageError)?;
-    Ok(Json(result))
+    let component = req.component;
+    let force_partial = req.force_partial_apply;
+    let state_clone = Arc::clone(&state);
+
+    // Spawn rollback in background - don't wait for completion
+    tokio::spawn(async move {
+        match update::rollback_updates(&state_clone, component, force_partial).await {
+            Ok(result) => {
+                info!("updates: background rollback_updates completed successfully: {}", result.message);
+            }
+            Err(e) => {
+                warn!("updates: background rollback_updates failed: {}", e);
+            }
+        }
+    });
+
+    // Get current status to return immediately
+    let current_status = update::get_status(&state).await;
+    
+    // Return 202 Accepted immediately with current status
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "operation": "rollback",
+            "success": true,
+            "message": "Rollback process started in background. Monitor progress via GET /system/updates/status",
+            "details": [],
+            "status": current_status
+        }))
+    ))
 }
 
 /// Handler: validate selected component(s) are at expected commit.

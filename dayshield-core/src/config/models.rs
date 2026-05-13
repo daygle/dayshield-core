@@ -341,6 +341,8 @@ pub struct FirewallSettings {
     pub management_allowed_sources: Vec<String>,
     /// TCP ports covered by the management anti-lockout rule.
     pub management_ports: Vec<u16>,
+    /// ACME domain whose certificate should be used by the firewall appliance.
+    pub management_tls_acme_domain: Option<String>,
 }
 
 impl Default for FirewallSettings {
@@ -357,6 +359,7 @@ impl Default for FirewallSettings {
             management_interface: None,
             management_allowed_sources: vec![],
             management_ports: vec![22, 443, 8443],
+            management_tls_acme_domain: None,
         }
     }
 }
@@ -766,10 +769,29 @@ pub struct DotConfig {
     /// TCP port to listen on.  Defaults to 853 (the IANA-assigned DoT port).
     #[serde(default = "default_dot_port")]
     pub port: u16,
+    /// If true, restrict DoT access to LAN clients only.
+    ///
+    /// This is enforced at the firewall layer; Unbound still binds the DoT
+    /// port on all interfaces so the listener remains reachable from local
+    /// and external networks as needed.
+    #[serde(default = "default_dot_lan_only")]
+    pub lan_only: bool,
     /// PEM-encoded TLS certificate chain presented to connecting clients.
-    pub cert_pem: String,
+    #[serde(default)]
+    pub cert_pem: Option<String>,
     /// PEM-encoded private key matching the certificate.
-    pub key_pem: String,
+    #[serde(default)]
+    pub key_pem: Option<String>,
+    /// ACME domain to use for DoT TLS material, if any.
+    #[serde(default)]
+    pub acme_domain: Option<String>,
+    /// Certificate storage path for the selected ACME domain.
+    #[serde(default)]
+    pub acme_cert_storage_path: Option<String>,
+}
+
+fn default_dot_lan_only() -> bool {
+    true
 }
 
 impl Default for DotConfig {
@@ -777,8 +799,11 @@ impl Default for DotConfig {
         Self {
             enabled: false,
             port: 853,
-            cert_pem: String::new(),
-            key_pem: String::new(),
+            lan_only: true,
+            cert_pem: None,
+            key_pem: None,
+            acme_domain: None,
+            acme_cert_storage_path: None,
         }
     }
 }
@@ -790,27 +815,37 @@ pub fn validate_dot_config(config: &DotConfig) -> Result<(), String> {
         return Err("DoT port must be non-zero".into());
     }
     if config.enabled {
-        if config.cert_pem.trim().is_empty() {
-            return Err("DoT cert_pem must not be empty when enabled".into());
-        }
-        if config.key_pem.trim().is_empty() {
-            return Err("DoT key_pem must not be empty when enabled".into());
-        }
-        // Basic PEM structure checks – a full crypto parse would require
-        // additional heavy dependencies; this guards against obvious mistakes.
-        if !config.cert_pem.contains("-----BEGIN CERTIFICATE-----") {
-            return Err(
-                "DoT cert_pem does not appear to be a valid PEM certificate \
-                 (expected '-----BEGIN CERTIFICATE-----' header)"
-                    .into(),
-            );
-        }
-        if !config.key_pem.contains("-----BEGIN") {
-            return Err(
-                "DoT key_pem does not appear to be a valid PEM private key \
-                 (expected '-----BEGIN' header)"
-                    .into(),
-            );
+        let use_acme = config.acme_domain.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+        let has_raw_cert = config.cert_pem.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+        let has_raw_key = config.key_pem.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+
+        if !use_acme {
+            if !has_raw_cert {
+                return Err("DoT cert_pem must not be empty when enabled".into());
+            }
+            if !has_raw_key {
+                return Err("DoT key_pem must not be empty when enabled".into());
+            }
+            // Basic PEM structure checks – a full crypto parse would require
+            // additional heavy dependencies; this guards against obvious mistakes.
+            let cert_pem = config.cert_pem.as_ref().unwrap();
+            let key_pem = config.key_pem.as_ref().unwrap();
+            if !cert_pem.contains("-----BEGIN CERTIFICATE-----") {
+                return Err(
+                    "DoT cert_pem does not appear to be a valid PEM certificate \
+                     (expected '-----BEGIN CERTIFICATE-----' header)"
+                        .into(),
+                );
+            }
+            if !key_pem.contains("-----BEGIN") {
+                return Err(
+                    "DoT key_pem does not appear to be a valid PEM private key \
+                     (expected '-----BEGIN' header)"
+                        .into(),
+                );
+            }
+        } else if config.acme_cert_storage_path.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true) {
+            return Err("DoT acme_cert_storage_path must be set when using an ACME domain".into());
         }
     }
     Ok(())
@@ -1612,6 +1647,8 @@ pub struct SystemSettings {
     /// TCP port for the DayShield web UI / REST API.
     #[serde(default = "default_web_port")]
     pub web_port: u16,
+    /// ACME domain whose certificate should be used for the management UI.
+    pub management_tls_acme_domain: Option<String>,
 }
 
 fn default_ntp_servers() -> Vec<String> {
@@ -1631,6 +1668,7 @@ impl Default for SystemSettings {
             ssh_enabled: default_ssh_enabled(),
             ssh_port:    default_ssh_port(),
             web_port:    default_web_port(),
+            management_tls_acme_domain: None,
         }
     }
 }

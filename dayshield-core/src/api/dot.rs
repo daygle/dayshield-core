@@ -68,16 +68,29 @@ pub struct UpdateDotConfigRequest {
     /// TCP port to listen on (default 853).
     #[serde(default = "default_dot_port")]
     pub port: u16,
+    /// Restrict DoT access to LAN clients only.
+    #[serde(default = "default_dot_lan_only")]
+    pub lan_only: bool,
     /// PEM-encoded TLS certificate chain.
     #[serde(default)]
     pub cert_pem: String,
     /// PEM-encoded private key matching the certificate.
     #[serde(default)]
     pub key_pem: String,
+    /// ACME domain whose issued certificate should be used for DoT.
+    #[serde(default)]
+    pub acme_domain: Option<String>,
+    /// Optional ACME certificate storage path to use for this DoT selection.
+    #[serde(default)]
+    pub acme_cert_storage_path: Option<String>,
 }
 
 fn default_dot_port() -> u16 {
     853
+}
+
+fn default_dot_lan_only() -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -113,11 +126,34 @@ pub async fn update_config(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateDotConfigRequest>,
 ) -> Result<impl IntoResponse, DotError> {
+    let acme_domain = req
+        .acme_domain
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+        .cloned();
+
+    let acme_cert_storage_path = if acme_domain.is_some() {
+        state
+            .config_store
+            .load_acme_config()
+            .map_err(DotError::StorageError)?
+            .map(|cfg| cfg.cert_storage_path)
+            .or_else(|| Some("/etc/dayshield/certs".to_string()))
+    } else {
+        None
+    };
+
     let cfg = DotConfig {
         enabled: req.enabled,
         port: req.port,
-        cert_pem: req.cert_pem,
-        key_pem: req.key_pem,
+        lan_only: req.lan_only,
+        cert_pem: req.cert_pem.trim().is_empty().then(|| None).or(Some(req.cert_pem)),
+        key_pem: req.key_pem.trim().is_empty().then(|| None).or(Some(req.key_pem)),
+        acme_domain,
+        acme_cert_storage_path: req
+            .acme_cert_storage_path
+            .filter(|s| !s.trim().is_empty())
+            .or(acme_cert_storage_path),
     };
 
     // --- Validation --------------------------------------------------------

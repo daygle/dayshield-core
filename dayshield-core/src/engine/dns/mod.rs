@@ -18,7 +18,14 @@ use anyhow::{Context, Result};
 use tokio::process::Command;
 use tracing::{info, warn};
 
-use crate::config::models::{DnsConfig, DnsLocalRecord, DotConfig};
+use crate::config::models::{
+    AcmeConfig,
+    AcmeChallengeType,
+    AcmeProvider,
+    DnsConfig,
+    DnsLocalRecord,
+    DotConfig,
+};
 
 /// Path where Unbound's configuration file is written.
 const UNBOUND_CONF_PATH: &str = "/etc/unbound/unbound.conf";
@@ -220,11 +227,49 @@ fn write_dot_tls_files(dot: &DotConfig) -> Result<()> {
     std::fs::create_dir_all(DOT_CERTS_DIR)
         .with_context(|| format!("failed to create directory {DOT_CERTS_DIR}"))?;
 
-    // Write certificate (public; world-readable is fine).
-    write_cert_file(DOT_CERT_PATH, dot.cert_pem.as_bytes())?;
+    if let Some(acme_domain) = dot.acme_domain.as_ref().filter(|s| !s.trim().is_empty()) {
+        let storage_path = dot
+            .acme_cert_storage_path
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Acme certificate storage path is required for ACME-based DoT certs"))?;
 
-    // Write private key with restricted permissions.
-    write_key_restricted(DOT_KEY_PATH, dot.key_pem.as_bytes())?;
+        let acme_cfg = AcmeConfig {
+            enabled: false,
+            directory_url: "https://acme-v02.api.letsencrypt.org/directory".into(),
+            email: String::new(),
+            domains: vec![acme_domain.clone()],
+            challenge_type: AcmeChallengeType::Http01,
+            renew_interval_hours: 24,
+            provider: AcmeProvider::Custom,
+            cert_storage_path: storage_path.clone(),
+        };
+        let acme_engine = crate::engine::acme::AcmeEngine::new(acme_cfg);
+        let cert_path = acme_engine.cert_path(acme_domain);
+        let key_path = acme_engine.key_path(acme_domain);
+
+        let cert_bytes = std::fs::read(&cert_path)
+            .with_context(|| format!("failed to read ACME cert from {cert_path:?}"))?;
+        let key_bytes = std::fs::read(&key_path)
+            .with_context(|| format!("failed to read ACME private key from {key_path:?}"))?;
+
+        write_cert_file(DOT_CERT_PATH, &cert_bytes)?;
+        write_key_restricted(DOT_KEY_PATH, &key_bytes)?;
+    } else {
+        let cert_pem = dot
+            .cert_pem
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("DoT cert_pem is missing"))?;
+        let key_pem = dot
+            .key_pem
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("DoT key_pem is missing"))?;
+
+        write_cert_file(DOT_CERT_PATH, cert_pem.as_bytes())?;
+        write_key_restricted(DOT_KEY_PATH, key_pem.as_bytes())?;
+    }
 
     info!(cert = DOT_CERT_PATH, key = DOT_KEY_PATH, "dot: TLS files written");
     Ok(())

@@ -19,8 +19,15 @@ use uuid::Uuid;
 
 use crate::{
     config::models::{
-        is_valid_domain, is_valid_interface_name, is_valid_ip, DnsBlocklistEntry, DnsConfig,
-        DnsInterfaceBlocklists, DnsLocalRecord,
+        is_valid_domain,
+        is_valid_interface_name,
+        is_valid_ip,
+        DnsBlocklistEntry,
+        DnsConfig,
+        DnsInterfaceBlocklists,
+        DnsLocalRecord,
+        DotConfig,
+        validate_dot_config,
     },
     engine::dns::apply_config,
     state::AppState,
@@ -77,6 +84,20 @@ pub struct UpdateDnsConfigRequest {
     pub local_records: Vec<DnsLocalRecord>,
     #[serde(default)]
     pub interface_blocklists: Option<Vec<DnsInterfaceBlocklists>>,
+    #[serde(default)]
+    pub dot_enabled: Option<bool>,
+    #[serde(default)]
+    pub dot_port: Option<u16>,
+    #[serde(default)]
+    pub dot_lan_only: Option<bool>,
+    #[serde(default)]
+    pub dot_certificate: Option<String>,
+    #[serde(default)]
+    pub dot_private_key: Option<String>,
+    #[serde(default)]
+    pub dot_acme_domain: Option<String>,
+    #[serde(default)]
+    pub dot_acme_cert_storage_path: Option<String>,
 }
 
 /// Request body for creating a per-interface DNS blocklist URL.
@@ -118,9 +139,33 @@ pub async fn get_config(
         .map_err(DnsError::StorageError)?
         .unwrap_or_default();
 
+    let dot_cfg = state
+        .config_store
+        .load_dot_config()
+        .map_err(DnsError::StorageError)?
+        .unwrap_or_default();
+
     info!(enabled = cfg.enabled, "dns: loaded config");
 
-    Ok(Json(serde_json::json!({ "success": true, "data": cfg })))
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "enabled": cfg.enabled,
+            "listen_addresses": cfg.listen_addresses,
+            "port": cfg.port,
+            "forwarders": cfg.forwarders,
+            "dnssec": cfg.dnssec,
+            "local_records": cfg.local_records,
+            "interface_blocklists": cfg.interface_blocklists,
+            "dot_enabled": dot_cfg.enabled,
+            "dot_port": dot_cfg.port,
+            "dot_lan_only": dot_cfg.lan_only,
+            "dot_certificate": dot_cfg.cert_pem,
+            "dot_private_key": dot_cfg.key_pem,
+            "dot_acme_domain": dot_cfg.acme_domain,
+            "dot_acme_cert_storage_path": dot_cfg.acme_cert_storage_path,
+        }
+    })))
 }
 
 /// Handler: update the DNS configuration.
@@ -242,10 +287,42 @@ pub async fn update_config(
             .unwrap_or(existing.interface_blocklists),
     };
 
+    let dot_acme_domain = req.dot_acme_domain.filter(|s| !s.trim().is_empty());
+    let dot_acme_cert_storage_path = if dot_acme_domain.is_some() {
+        if let Some(path) = req.dot_acme_cert_storage_path.filter(|s| !s.trim().is_empty()) {
+            Some(path)
+        } else {
+            state
+                .config_store
+                .load_acme_config()
+                .map_err(DnsError::StorageError)?
+                .map(|cfg| cfg.cert_storage_path)
+        }
+    } else {
+        None
+    };
+
+    let dot_cfg = DotConfig {
+        enabled: req.dot_enabled.unwrap_or(false),
+        port: req.dot_port.unwrap_or(853),
+        lan_only: req.dot_lan_only.unwrap_or(true),
+        cert_pem: req.dot_certificate.filter(|s| !s.trim().is_empty()),
+        key_pem: req.dot_private_key.filter(|s| !s.trim().is_empty()),
+        acme_domain: dot_acme_domain,
+        acme_cert_storage_path: dot_acme_cert_storage_path,
+    };
+
+    if dot_cfg.enabled {
+        if let Err(msg) = validate_dot_config(&dot_cfg) {
+            return Err(DnsError::ValidationFailed(msg));
+        }
+    }
+
     info!(
         enabled = cfg.enabled,
         port = cfg.port,
         dnssec = cfg.dnssec,
+        dot_enabled = dot_cfg.enabled,
         "dns: received update config request"
     );
 
@@ -254,6 +331,11 @@ pub async fn update_config(
     state
         .config_store
         .save_dns_config(cfg.clone())
+        .map_err(DnsError::StorageError)?;
+
+    state
+        .config_store
+        .save_dot_config(dot_cfg.clone())
         .map_err(DnsError::StorageError)?;
 
     info!("dns: config persisted");

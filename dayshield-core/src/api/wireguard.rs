@@ -85,6 +85,7 @@ pub struct PeerRequest {
 #[derive(Deserialize)]
 pub struct CreateWireGuardInterfaceRequest {
     pub name: String,
+    pub description: Option<String>,
     pub private_key: String,
     pub public_key: String,
     pub listen_port: u16,
@@ -212,6 +213,7 @@ pub async fn create_interface(
 
     let iface = WireGuardInterface {
         name: req.name,
+        description: req.description.filter(|value| !value.trim().is_empty()),
         private_key: req.private_key,
         public_key: req.public_key,
         listen_port: req.listen_port,

@@ -1392,6 +1392,8 @@ pub fn validate_dns_domain(domain: &str) -> bool {
 pub struct WireGuardInterface {
     /// OS-level interface name, e.g. `wg0`.
     pub name: String,
+    /// Optional friendly name for this VPN interface shown in the UI.
+    pub description: Option<String>,
     /// Interface private key (base64-encoded).
     pub private_key: String,
     /// Interface public key (base64-encoded, derived from private key).

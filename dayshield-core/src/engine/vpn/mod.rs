@@ -343,6 +343,7 @@ mod tests {
     fn make_iface() -> WireGuardInterface {
         WireGuardInterface {
             name: "wg0".into(),
+            description: Some("Remote Access".into()),
             private_key: dummy_key(0),
             public_key: dummy_key(1),
             listen_port: 51820,

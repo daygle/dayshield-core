@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use chrono::{Datelike, Local, NaiveTime, Timelike, Utc};
+use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveTime, Timelike, Utc};
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderValue, USER_AGENT, HeaderName};
 use serde::{Deserialize, Serialize};
 use tokio::{process::Command, sync::Mutex};
@@ -123,14 +123,28 @@ fn parse_auto_check_time(value: &str) -> Option<NaiveTime> {
 }
 
 fn normalize_auto_check_month_days(days: Vec<u8>) -> Vec<u8> {
-    let mut days: Vec<u8> = days.into_iter().filter(|day| (1..=31).contains(day)).collect();
-    days.sort_unstable();
-    days.dedup();
-    if days.is_empty() {
-        default_auto_check_month_days()
+    let has_first = days.contains(&1);
+    let has_last = days.contains(&31);
+
+    if has_last {
+        vec![31]
+    } else if has_first {
+        vec![1]
     } else {
-        days
+        default_auto_check_month_days()
     }
+}
+
+fn last_day_of_month(year: i32, month: u32) -> Option<u32> {
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+
+    let first_of_next_month = chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1)?;
+    let last_of_month = first_of_next_month - ChronoDuration::days(1);
+    Some(last_of_month.day())
 }
 
 fn normalize_auto_check_time(value: &str) -> String {
@@ -2299,10 +2313,21 @@ pub async fn start_update_checker(state: std::sync::Arc<AppState>) {
                 }
                 UpdateAutoCheckFrequency::Monthly => {
                     let day = now.day() as u8;
-                    if !settings.auto_check_month_days.contains(&day) {
+                    let is_first_day = settings.auto_check_month_days.contains(&1) && day == 1;
+                    let is_last_day = settings.auto_check_month_days.contains(&31)
+                        && last_day_of_month(now.year(), now.month())
+                            .map(|last_day| day as u32 == last_day)
+                            .unwrap_or(false);
+
+                    if !is_first_day && !is_last_day {
                         continue;
                     }
-                    format!("{:04}-{:02}-{:02}", now.year(), now.month(), now.day())
+
+                    if is_last_day {
+                        format!("{:04}-{:02}-last", now.year(), now.month())
+                    } else {
+                        format!("{:04}-{:02}-01", now.year(), now.month())
+                    }
                 }
             };
 

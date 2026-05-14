@@ -5,7 +5,7 @@
 //! - `PUT  /system/config`   - update host-level settings
 //! - `POST /system/reboot`   - schedule an immediate systemctl reboot
 //! - `POST /system/shutdown` - schedule an immediate systemctl poweroff
-//! - `GET  /system/updates/status`   - get artifact update status for core/ui/rootfs
+//! - `GET  /system/updates/status`   - get artifact update status for core/ui
 //! - `GET  /system/updates/settings` - get update settings
 //! - `PUT  /system/updates/settings` - update settings (interval/reboot policy/registry)
 //! - `POST /system/updates/check`    - force immediate update check
@@ -178,7 +178,7 @@ fn default_update_component() -> UpdateComponent {
     UpdateComponent::Both
 }
 
-/// Handler: return software-update status for core, UI, and rootfs artifacts.
+/// Handler: return software-update status for core and UI artifacts.
 pub async fn get_updates_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, SystemApiError> {
@@ -220,6 +220,18 @@ pub async fn apply_updates(
     Json(req): Json<UpdateActionRequest>,
 ) -> Result<impl IntoResponse, SystemApiError> {
     let component = req.component;
+    if matches!(component, UpdateComponent::Rootfs) {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "operation": "apply",
+                "success": false,
+                "message": "rootfs updates are not supported on a running appliance; rebuild and publish appliance artifacts instead",
+                "details": [],
+                "status": update::get_status(&state).await
+            })),
+        ));
+    }
     let force_partial = req.force_partial_apply;
     let state_clone = Arc::clone(&state);
 
@@ -260,6 +272,18 @@ pub async fn rollback_updates(
     Json(req): Json<UpdateActionRequest>,
 ) -> Result<impl IntoResponse, SystemApiError> {
     let component = req.component;
+    if matches!(component, UpdateComponent::Rootfs) {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "operation": "rollback",
+                "success": false,
+                "message": "rootfs rollback is not supported in artifact update flow; use /system/updates/rootfs-live-rollback for runtime rollback",
+                "details": [],
+                "status": update::get_status(&state).await
+            })),
+        ));
+    }
     let force_partial = req.force_partial_apply;
     let state_clone = Arc::clone(&state);
 
@@ -296,10 +320,23 @@ pub async fn validate_updates(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UpdateActionRequest>,
 ) -> Result<impl IntoResponse, SystemApiError> {
+    if matches!(req.component, UpdateComponent::Rootfs) {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "operation": "validate",
+                "success": false,
+                "message": "rootfs validation is not supported in artifact update flow; use /system/updates/rootfs-live-rollback for runtime rollback checks",
+                "details": [],
+                "status": update::get_status(&state).await
+            })),
+        ));
+    }
+
     let result = update::validate_updates(&state, req.component, req.force_partial_apply)
         .await
         .map_err(SystemApiError::StorageError)?;
-    Ok(Json(result))
+    Ok((StatusCode::OK, Json(serde_json::json!(result))))
 }
 
 /// Handler: mark the appliance rebuild workflow as completed after rebuilding artifacts.

@@ -45,13 +45,6 @@ jobs:
           path: deps/dayshield-ui
           ref: main
 
-      - name: Checkout dayshield-rootfs
-        uses: actions/checkout@v5
-        with:
-          repository: daygle/dayshield-rootfs
-          path: deps/dayshield-rootfs
-          ref: main
-
       # Build core binary
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -112,29 +105,6 @@ jobs:
           tar --zstd -cf release-artifacts/ui-${{ steps.version.outputs.VERSION }}.tar.zst -C deps/dayshield-ui dist/
           ls -lh release-artifacts/ui-*.tar.zst
 
-      # Build rootfs bundle
-      - name: Setup rootfs build environment
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y mmdebstrap debian-archive-keyring gnupg ca-certificates
-
-      - name: Build rootfs bundle
-        run: |
-          mkdir -p release-artifacts
-          cp target/x86_64-unknown-linux-musl/release/dayshield-core deps/dayshield-rootfs/dayshield-core
-          cd deps/dayshield-rootfs
-          # Build rootfs with live-update support.
-          # Use bookworm in CI to avoid trixie keyring mismatches on ubuntu-latest runners.
-          sudo ./scripts/build-rootfs.sh \
-            --suite bookworm \
-            --ui-dir ../dayshield-ui/dist \
-            --core-repo-dir ../.. \
-            --ui-repo-dir ../dayshield-ui \
-            --rootfs-repo-dir . \
-            --output ../../release-artifacts/rootfs-${{ steps.version.outputs.VERSION }}.tar.zst
-          cd ../..
-          ls -lh release-artifacts/rootfs-*.tar.zst
-
       # Generate checksums
       - name: Generate checksums
         run: |
@@ -150,7 +120,6 @@ jobs:
           files: |
             release-artifacts/core-*.tar.zst
             release-artifacts/ui-*.tar.zst
-            release-artifacts/rootfs-*.tar.zst
             release-artifacts/checksums.txt
           generate_release_notes: true
         env:

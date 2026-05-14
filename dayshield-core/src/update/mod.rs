@@ -23,7 +23,6 @@ const DEFAULT_ROOTFS_URL: &str = "https://github.com/daygle/dayshield-rootfs";
 const RUNTIME_MARKER_DIR: &str = "/var/lib/dayshield/update";
 const DEFAULT_TRUSTED_SIGNERS_FILE: &str = "/etc/dayshield/update_trusted_signers";
 const ROOTFS_LIVE_REPORT_FILE: &str = "/var/lib/dayshield/rootfs-live-update/last-run.json";
-const ARTIFACT_CACHE_DIR: &str = "/var/lib/dayshield/artifact-cache";
 const ARTIFACT_STAGING_DIR: &str = "/var/lib/dayshield/update-staging";
 /// GitHub Releases repository: https://github.com/daygle/dayshield-core
 /// Artifacts are attached to releases as: core-v1.2.3.tar.zst, ui-v1.2.3.tar.zst, etc.
@@ -306,9 +305,22 @@ impl RepoComponent {
             UpdateComponent::Core => vec![Self::Core],
             UpdateComponent::Ui => vec![Self::Ui],
             UpdateComponent::Rootfs => vec![Self::Rootfs],
-            UpdateComponent::Both => vec![Self::Core, Self::Ui, Self::Rootfs],
+            UpdateComponent::Both => vec![Self::Core, Self::Ui],
         }
     }
+}
+
+fn ensure_registry_updatable_selection(selected_components: &[RepoComponent]) -> Result<()> {
+    if selected_components
+        .iter()
+        .any(|c| matches!(c, RepoComponent::Rootfs))
+    {
+        anyhow::bail!(
+            "rootfs artifact updates are not supported on a running appliance; rebuild and publish appliance artifacts instead"
+        );
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -419,13 +431,6 @@ struct RootfsLiveUpdateReport {
     pub rollback_available: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct RootfsLiveUpdatePolicy {
-    pub require_rebuild: Option<bool>,
-    pub reason: Option<String>,
-}
-
 // ============================================================================
 // NEW: Artifact Registry Types
 // ============================================================================
@@ -439,35 +444,6 @@ pub struct ArtifactMetadata {
     pub checksum_sha256: String,
     #[serde(default)]
     pub signature_url: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AvailableUpdates {
-    pub core: Option<ArtifactMetadata>,
-    pub ui: Option<ArtifactMetadata>,
-    pub rootfs: Option<ArtifactMetadata>,
-    pub checked_at: String,
-}
-
-#[derive(Debug, Clone)]
-struct DownloadedArtifact {
-    pub component: String,
-    pub version: String,
-    pub local_path: PathBuf,
-    pub checksum_sha256: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UpdateTransaction {
-    pub transaction_id: String,
-    pub initiated_at: String,
-    pub core_backup: Option<String>,
-    pub ui_backup: Option<String>,
-    pub rootfs_backup: Option<String>,
-    pub downloaded_artifacts: Vec<String>,
-    pub status: String, // "pending", "in_progress", "completed", "rolled_back"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -586,7 +562,7 @@ fn component_config(settings: &UpdateSettings, component: RepoComponent) -> (Str
 }
 
 fn component_supports_runtime_deploy(component: RepoComponent) -> bool {
-    matches!(component, RepoComponent::Core | RepoComponent::Ui | RepoComponent::Rootfs)
+    matches!(component, RepoComponent::Core | RepoComponent::Ui)
 }
 
 fn runtime_marker_path(component: RepoComponent) -> PathBuf {
@@ -610,68 +586,6 @@ fn load_runtime_marker(component: RepoComponent) -> Option<String> {
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
-}
-
-fn ensure_parent_writable(path: &Path) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("invalid path {}", path.display()))?;
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create {}", parent.display()))?;
-
-    let probe = parent.join(format!(".dayshield-write-probe-{}", unique_suffix()));
-    std::fs::write(&probe, b"probe")
-        .with_context(|| format!("path is not writable: {}", parent.display()))?;
-    let _ = std::fs::remove_file(&probe);
-    Ok(())
-}
-
-async fn preflight_component(settings: &UpdateSettings, component: RepoComponent) -> Result<(String, String)> {
-    let (repo_path, remote_url, branch) = component_config(settings, component);
-
-    if matches!(component, RepoComponent::Rootfs) {
-        ensure_rootfs_repo_bootstrapped(settings).await?;
-    }
-
-    ensure_repo_writable(&repo_path)
-        .with_context(|| format!("{}: repo preflight failed", component.as_str()))?;
-
-    let (current, remote, dirty) = inspect_repo(&repo_path, &remote_url, &branch)
-        .await
-        .with_context(|| format!("{}: inspect preflight failed", component.as_str()))?;
-
-    if dirty {
-        anyhow::bail!(
-            "{}: repository has local changes; aborting update to avoid destructive reset",
-            component.as_str()
-        );
-    }
-
-    if settings.deploy_runtime_after_apply && component_supports_runtime_deploy(component) {
-        match component {
-            RepoComponent::Core => {
-                ensure_parent_writable(Path::new("/usr/local/sbin/dayshield-core"))?;
-            }
-            RepoComponent::Ui => {
-                ensure_parent_writable(Path::new("/usr/local/share/dayshield-ui"))?;
-            }
-            RepoComponent::Rootfs => {
-                ensure_command_available("sh").await?;
-                if settings.verify_rootfs_manifest {
-                    ensure_command_available("sha256sum").await?;
-                }
-                let apply_script = Path::new(&repo_path).join("scripts/apply-live-update.sh");
-                if !apply_script.is_file() {
-                    anyhow::bail!(
-                        "rootfs live update script is missing at {}",
-                        apply_script.display()
-                    );
-                }
-            }
-        }
-    }
-
-    Ok((current, remote))
 }
 
 async fn reset_and_optionally_deploy(
@@ -698,10 +612,6 @@ async fn reset_and_optionally_deploy(
     let entry = ensure_component_state(state_file, component);
 
     if deploy_runtime && component_supports_runtime_deploy(component) {
-        if matches!(component, RepoComponent::Rootfs) && settings.verify_rootfs_manifest {
-            verify_rootfs_manifest(&repo_path).await?;
-            details.push("rootfs: manifest verification passed".to_string());
-        }
         deploy_component_runtime(component, &repo_path).await?;
         save_runtime_marker(component, &head)?;
         entry.deployed_commit = Some(head.clone());
@@ -787,52 +697,6 @@ async fn is_command_available(program: &str) -> bool {
         .is_ok()
 }
 
-async fn ensure_rootfs_repo_bootstrapped(settings: &UpdateSettings) -> Result<()> {
-    let repo_path = Path::new(&settings.rootfs_repo_path);
-    if repo_path.join(".git").exists() {
-        return Ok(());
-    }
-
-    if !settings.bootstrap_missing_rootfs_repo {
-        anyhow::bail!(
-            "rootfs repository is missing at {} and bootstrap is disabled",
-            settings.rootfs_repo_path
-        );
-    }
-
-    ensure_command_available("git").await?;
-
-    if let Some(parent) = repo_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-
-    let output = Command::new("git")
-        .arg("clone")
-        .arg("--branch")
-        .arg(&settings.rootfs_branch)
-        .arg("--single-branch")
-        .arg(&settings.rootfs_repo_url)
-        .arg(&settings.rootfs_repo_path)
-        .output()
-        .await
-        .with_context(|| {
-            format!(
-                "failed to bootstrap rootfs repo into {}",
-                settings.rootfs_repo_path
-            )
-        })?;
-
-    if !output.status.success() {
-        anyhow::bail!(
-            "failed to bootstrap rootfs repo: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    Ok(())
-}
-
 async fn verify_commit_signature(repo_path: &str, commit: &str, trusted_signers_file: &str) -> Result<()> {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(repo_path);
@@ -853,61 +717,6 @@ async fn verify_commit_signature(repo_path: &str, commit: &str, trusted_signers_
             short_sha(commit),
             String::from_utf8_lossy(&output.stderr).trim()
         );
-    }
-
-    Ok(())
-}
-
-async fn load_rootfs_live_update_policy(repo_path: &str, commit: &str) -> Result<RootfsLiveUpdatePolicy> {
-    let spec = format!("{}:{}", commit, "config/live-update-policy.json");
-    match run_git(repo_path, &["show", &spec]).await {
-        Ok(raw) => Ok(serde_json::from_str::<RootfsLiveUpdatePolicy>(&raw)
-            .with_context(|| "invalid config/live-update-policy.json")?),
-        Err(_) => Ok(RootfsLiveUpdatePolicy::default()),
-    }
-}
-
-async fn verify_rootfs_manifest(repo_path: &str) -> Result<()> {
-    ensure_command_available("sha256sum").await?;
-    let manifest_path = Path::new(repo_path).join("config/live-update-manifest.sha256");
-    if !manifest_path.is_file() {
-        anyhow::bail!(
-            "missing rootfs manifest {}",
-            manifest_path.display()
-        );
-    }
-
-    let raw = fs::read_to_string(&manifest_path)
-        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-
-        let mut parts = trimmed.split_whitespace();
-        let expected = parts
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("invalid manifest line: {}", trimmed))?;
-        let rel_path = parts
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("invalid manifest line: {}", trimmed))?;
-
-        let out = run_command_in(repo_path, "sha256sum", &[rel_path]).await?;
-        let actual = out
-            .split_whitespace()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("invalid sha256sum output for {}", rel_path))?;
-
-        if actual != expected {
-            anyhow::bail!(
-                "manifest mismatch for {} (expected {}, got {})",
-                rel_path,
-                expected,
-                actual
-            );
-        }
     }
 
     Ok(())
@@ -1132,11 +941,7 @@ async fn deploy_component_runtime(component: RepoComponent, repo_path: &str) -> 
 
             install_dir_atomic(&dist_dir, Path::new("/usr/local/share/dayshield-ui"))?;
         }
-        RepoComponent::Rootfs => {
-            ensure_command_available("sh").await?;
-            run_command_in(repo_path, "sh", &["scripts/apply-live-update.sh", "--non-interactive"]).await?;
-            ensure_critical_services_healthy().await?;
-        }
+        RepoComponent::Rootfs => anyhow::bail!("rootfs runtime deployment is not supported in update flow"),
     }
 
     Ok(())
@@ -1244,12 +1049,6 @@ fn append_operation_log(
         let drop_count = state_file.operation_logs.len() - MAX_LOG_ENTRIES;
         state_file.operation_logs.drain(0..drop_count);
     }
-}
-
-fn mark_appliance_rebuild_required(state_file: &mut UpdateStateFile, reason: impl Into<String>) {
-    state_file.pending_appliance_rebuild = true;
-    state_file.appliance_rebuild_reason = Some(reason.into());
-    state_file.appliance_rebuild_marked_at = Some(Utc::now().to_rfc3339());
 }
 
 fn clear_appliance_rebuild_required(state_file: &mut UpdateStateFile) {
@@ -1417,7 +1216,7 @@ async fn query_github_releases(
 
     // Parse assets into ArtifactMetadata
     let mut components = Vec::new();
-    let component_names = ["core", "ui", "rootfs"];
+    let component_names = ["core", "ui"];
 
     for comp_name in &component_names {
         // Find asset matching pattern: {component}-v*.tar.zst
@@ -1744,16 +1543,8 @@ pub async fn get_status(state: &AppState) -> UpdatesStatus {
         RepoComponent::Ui,
     )
     .await;
-    let rootfs = build_component_status(
-        &settings,
-        &state_file,
-        registry_manifest.as_ref(),
-        registry_error.as_deref(),
-        RepoComponent::Rootfs,
-    )
-    .await;
 
-    let components = vec![core, ui, rootfs];
+    let components = vec![core, ui];
     let available_update_count = components.iter().filter(|c| c.update_available).count();
 
     UpdatesStatus {
@@ -1831,7 +1622,6 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
                 let comp = match artifact.component.as_str() {
                     "core" => RepoComponent::Core,
                     "ui" => RepoComponent::Ui,
-                    "rootfs" => RepoComponent::Rootfs,
                     _ => continue,
                 };
                 
@@ -1901,7 +1691,7 @@ async fn apply_updates_registry(
             match comp {
                 RepoComponent::Core => a.component == "core",
                 RepoComponent::Ui => a.component == "ui",
-                RepoComponent::Rootfs => a.component == "rootfs",
+                RepoComponent::Rootfs => false,
             }
         });
         
@@ -1924,16 +1714,6 @@ async fn apply_updates_registry(
     }
     
     // Step 3: Backup current versions
-    let mut transaction = UpdateTransaction {
-        transaction_id: transaction_id.clone(),
-        initiated_at: Utc::now().to_rfc3339(),
-        core_backup: None,
-        ui_backup: None,
-        rootfs_backup: None,
-        downloaded_artifacts: downloads.iter().map(|(c, v, _)| format!("{}-{}", c, v)).collect(),
-        status: "in_progress".to_string(),
-    };
-    
     // Create backups of current deployments
     // (In a production system, you'd backup actual files here)
     details.push("created backup snapshots".to_string());
@@ -1950,7 +1730,6 @@ async fn apply_updates_registry(
         let comp = match component_name.as_str() {
             "core" => RepoComponent::Core,
             "ui" => RepoComponent::Ui,
-            "rootfs" => RepoComponent::Rootfs,
             _ => continue,
         };
         
@@ -1970,7 +1749,6 @@ async fn apply_updates_registry(
                 );
             },
             Err(err) => {
-                transaction.status = "rolled_back".to_string();
                 details.push(format!("FAILED to deploy {}: {}", component_name, err));
                 append_operation_log(
                     &mut state_file,
@@ -1995,7 +1773,6 @@ async fn apply_updates_registry(
     // Step 5: Always verify deployment health after applying updates
     if !downloads.is_empty() {
         if let Err(err) = ensure_critical_services_healthy().await {
-            transaction.status = "rolled_back".to_string();
             details.push(format!("post-apply service health check failed: {}", err));
             append_operation_log(
                 &mut state_file,
@@ -2025,22 +1802,7 @@ async fn apply_updates_registry(
     }
     
     // Step 6: Mark transaction complete
-    transaction.status = "completed".to_string();
     state_file.last_applied_at = Some(Utc::now().to_rfc3339());
-    
-    // Enforce reboot requirement: always reboot if rootfs was updated, skip for core/ui only
-    let rootfs_included = components_to_update.iter().any(|c| matches!(c, RepoComponent::Rootfs));
-    if rootfs_included {
-        state_file.pending_reboot = true;
-        details.push("rootfs update requires system reboot".to_string());
-        append_operation_log(
-            &mut state_file,
-            "apply",
-            "info",
-            "RootFS update requires reboot",
-            Some("rootfs"),
-        );
-    }
 
     append_operation_log(
         &mut state_file,
@@ -2107,273 +1869,18 @@ async fn check_atomicity_constraint(
 pub async fn apply_updates(
     state: &AppState,
     component: UpdateComponent,
-    _force_partial_apply: bool,
+    force_partial_apply: bool,
 ) -> Result<UpdatesActionResult> {
     let _guard = op_lock().lock().await;
 
-    // Registry-based update application (artifact distribution)
     let selected = RepoComponent::from_update_component(component);
-    apply_updates_registry(state, selected).await
-}
-
-// Git-based apply (legacy - kept for reference but no longer called)
-async fn _apply_updates_git_legacy(
-    state: &AppState,
-    component: UpdateComponent,
-    force_partial_apply: bool,
-) -> Result<UpdatesActionResult> {
-    let mut state_file = load_state(state);
-    let settings = load_settings(state);
-    let selected = RepoComponent::from_update_component(component);
+    ensure_registry_updatable_selection(&selected)?;
 
     // Check atomicity constraint before proceeding
     check_atomicity_constraint(state, &selected, force_partial_apply).await?;
 
-    let mut details = Vec::new();
-    let mut any_applied = false;
-    let mut core_updated = false;
-    let mut core_runtime_deployed = false;
-    let mut rootfs_updated = false;
-    let mut rootfs_runtime_deployed = false;
-
-    info!(
-        component = ?component,
-        deploy_runtime = settings.deploy_runtime_after_apply,
-        "updates: apply started"
-    );
-
-    // Preflight all selected components before making any changes.
-    let mut baselines: Vec<(RepoComponent, String, String)> = Vec::new();
-    for comp in &selected {
-        match preflight_component(&settings, *comp).await {
-            Ok((current, remote)) => {
-                baselines.push((*comp, current, remote));
-            }
-            Err(err) => {
-                let msg = format!("{}: preflight failed ({err})", comp.as_str());
-                let entry = ensure_component_state(&mut state_file, *comp);
-                entry.last_error = Some(msg.clone());
-                save_state(state, &state_file)?;
-                warn!(component = %comp.as_str(), error = %err, "updates: apply preflight failed");
-                let status = get_status(state).await;
-                return Ok(UpdatesActionResult {
-                    operation: "apply".to_string(),
-                    success: false,
-                    message: "update preflight failed".to_string(),
-                    details: vec![msg],
-                    status,
-                });
-            }
-        }
-    }
-
-    let mut progressed: Vec<(RepoComponent, String)> = Vec::new();
-
-    for (comp, current, remote) in baselines {
-        let (repo_path, remote_url, branch) = component_config(&settings, comp);
-
-        if current == remote {
-            details.push(format!("{}: already up to date", comp.as_str()));
-            continue;
-        }
-
-        {
-            let entry = ensure_component_state(&mut state_file, comp);
-            entry.rollback_commit = Some(current.clone());
-            entry.last_error = None;
-        }
-
-        info!(component = %comp.as_str(), branch = %branch, "updates: applying component");
-
-        let mut deploy_runtime_for_component = settings.deploy_runtime_after_apply;
-
-        let apply_result: Result<()> = async {
-            ensure_origin(&repo_path, &remote_url).await?;
-            run_git(&repo_path, &["fetch", "--quiet", "origin", &branch]).await?;
-            let target_ref = format!("origin/{branch}");
-            let target_commit = run_git(&repo_path, &["rev-parse", &target_ref]).await?;
-
-            if settings.require_signed_commits {
-                verify_commit_signature(&repo_path, &target_commit, &settings.trusted_signers_file).await?;
-                details.push(format!(
-                    "{}: commit signature verified ({})",
-                    comp.as_str(),
-                    short_sha(&target_commit)
-                ));
-            }
-
-            if matches!(comp, RepoComponent::Rootfs) {
-                let policy = load_rootfs_live_update_policy(&repo_path, &target_commit).await?;
-                if policy.require_rebuild.unwrap_or(false) {
-                    deploy_runtime_for_component = false;
-                    mark_appliance_rebuild_required(
-                        &mut state_file,
-                        policy.reason.unwrap_or_else(|| {
-                            "rootfs policy requires appliance rebuild for this update".to_string()
-                        }),
-                    );
-                    details.push(
-                        "rootfs: live update blocked by policy; appliance rebuild required".to_string(),
-                    );
-                }
-            }
-
-            if deploy_runtime_for_component {
-                match comp {
-                    RepoComponent::Core => {
-                        if !is_command_available("cargo").await {
-                            deploy_runtime_for_component = false;
-                            mark_appliance_rebuild_required(
-                                &mut state_file,
-                                "core repository changed but cargo is unavailable on this system; rebuild appliance artifacts to deploy updated core runtime",
-                            );
-                            details.push(
-                                "core: runtime deployment skipped because cargo is unavailable; appliance rebuild required".to_string(),
-                            );
-                        }
-                    }
-                    RepoComponent::Ui => {
-                        let ui_dist_ready = Path::new(&repo_path).join("dist/index.html").exists();
-                        if !is_command_available("npm").await && !ui_dist_ready {
-                            deploy_runtime_for_component = false;
-                            mark_appliance_rebuild_required(
-                                &mut state_file,
-                                "ui repository changed but neither npm nor prebuilt UI dist assets are available; rebuild appliance artifacts to deploy updated UI runtime",
-                            );
-                            details.push(
-                                "ui: runtime deployment skipped because npm is unavailable and dist/index.html is missing; appliance rebuild required".to_string(),
-                            );
-                        } else if !is_command_available("npm").await && ui_dist_ready {
-                            details.push(
-                                "ui: npm unavailable, using prebuilt dist assets for runtime deployment".to_string(),
-                            );
-                        }
-                    }
-                    RepoComponent::Rootfs => {}
-                }
-            }
-
-            reset_and_optionally_deploy(
-                &settings,
-                &mut state_file,
-                comp,
-                &target_commit,
-                deploy_runtime_for_component,
-                &mut details,
-            )
-            .await?;
-            Ok(())
-        }
-        .await;
-
-        if let Err(err) = apply_result {
-            let msg = format!("{}: apply failed ({err})", comp.as_str());
-            {
-                let entry = ensure_component_state(&mut state_file, comp);
-                entry.last_error = Some(msg.clone());
-            }
-            warn!(component = %comp.as_str(), error = %err, "updates: apply failed; attempting transactional rollback");
-
-            // Roll back current component first.
-            let _ = reset_and_optionally_deploy(
-                &settings,
-                &mut state_file,
-                comp,
-                &current,
-                settings.deploy_runtime_after_apply,
-                &mut details,
-            )
-            .await;
-
-            // Roll back previously applied components.
-            for (done_comp, done_commit) in progressed.iter().rev() {
-                let _ = reset_and_optionally_deploy(
-                    &settings,
-                    &mut state_file,
-                    *done_comp,
-                    done_commit,
-                    settings.deploy_runtime_after_apply,
-                    &mut details,
-                )
-                .await;
-            }
-
-            save_state(state, &state_file)?;
-            let status = get_status(state).await;
-            return Ok(UpdatesActionResult {
-                operation: "apply".to_string(),
-                success: false,
-                message: "update apply failed and transactional rollback was attempted".to_string(),
-                details: vec![msg],
-                status,
-            });
-        }
-
-        any_applied = true;
-        progressed.push((comp, current));
-        if matches!(comp, RepoComponent::Core) {
-            core_updated = true;
-            if deploy_runtime_for_component {
-                core_runtime_deployed = true;
-            }
-        }
-        if matches!(comp, RepoComponent::Rootfs) {
-            rootfs_updated = true;
-            if deploy_runtime_for_component {
-                rootfs_runtime_deployed = true;
-            }
-        }
-    }
-
-    if any_applied {
-        state_file.last_applied_at = Some(Utc::now().to_rfc3339());
-        if settings.reboot_required_after_apply || core_runtime_deployed {
-            state_file.pending_reboot = true;
-        }
-        if rootfs_updated {
-            if rootfs_runtime_deployed {
-                clear_appliance_rebuild_required(&mut state_file);
-                state_file.pending_reboot = true;
-                details.push(
-                    "rootfs: live runtime update applied; existing /etc and /var settings were preserved".to_string(),
-                );
-            } else {
-                mark_appliance_rebuild_required(
-                    &mut state_file,
-                    "rootfs repository changed; runtime deployment is disabled, so rebuild appliance artifacts before shipping this rootfs update",
-                );
-                details.push(
-                    "rootfs: runtime deployment disabled, appliance rebuild required for rootfs.tar.zst and installer ISO".to_string(),
-                );
-            }
-        }
-
-        if core_runtime_deployed || rootfs_runtime_deployed {
-            ensure_critical_services_healthy().await?;
-            details.push("post-apply health check passed for critical services".to_string());
-        }
-    }
-    save_state(state, &state_file)?;
-
-    info!(
-        applied = any_applied,
-        core_updated,
-        pending_reboot = state_file.pending_reboot,
-        "updates: apply completed"
-    );
-
-    let status = get_status(state).await;
-    Ok(UpdatesActionResult {
-        operation: "apply".to_string(),
-        success: true,
-        message: if any_applied {
-            "updates applied successfully".to_string()
-        } else {
-            "no updates were required".to_string()
-        },
-        details,
-        status,
-    })
+    // Registry-based update application (artifact distribution)
+    apply_updates_registry(state, selected).await
 }
 
 pub async fn rollback_updates(
@@ -2386,12 +1893,12 @@ pub async fn rollback_updates(
     let settings = load_settings(state);
     let mut state_file = load_state(state);
     let selected = RepoComponent::from_update_component(component);
+    ensure_registry_updatable_selection(&selected)?;
 
     // Check atomicity constraint before proceeding
     check_atomicity_constraint(state, &selected, force_partial_apply).await?;
 
     let mut details = Vec::new();
-    let mut rootfs_rolled_back = false;
     append_operation_log(
         &mut state_file,
         "rollback",
@@ -2478,31 +1985,10 @@ pub async fn rollback_updates(
             format!("Rolled back {}", comp.as_str()),
             Some(comp.as_str()),
         );
-
-        if matches!(comp, RepoComponent::Rootfs) {
-            rootfs_rolled_back = true;
-        }
     }
 
     state_file.last_applied_at = Some(Utc::now().to_rfc3339());
     state_file.pending_reboot = false;
-    if rootfs_rolled_back {
-        if settings.deploy_runtime_after_apply {
-            clear_appliance_rebuild_required(&mut state_file);
-            state_file.pending_reboot = true;
-            details.push(
-                "rootfs: live runtime rollback applied; existing /etc and /var settings were preserved".to_string(),
-            );
-        } else {
-            mark_appliance_rebuild_required(
-                &mut state_file,
-                "rootfs rollback completed while runtime deployment is disabled; rebuild appliance artifacts to ship rollback state",
-            );
-            details.push(
-                "rootfs: runtime deployment disabled, appliance rebuild required to ship rollback".to_string(),
-            );
-        }
-    }
     append_operation_log(
         &mut state_file,
         "rollback",
@@ -2532,6 +2018,7 @@ pub async fn validate_updates(
     let _guard = op_lock().lock().await;
 
     let selected_repos = RepoComponent::from_update_component(component);
+    ensure_registry_updatable_selection(&selected_repos)?;
 
     // Check atomicity constraint before proceeding
     check_atomicity_constraint(state, &selected_repos, force_partial_apply).await?;
@@ -2615,26 +2102,11 @@ pub async fn validate_updates(
         let repo_component = match comp.component.as_str() {
             "core" => Some(RepoComponent::Core),
             "ui" => Some(RepoComponent::Ui),
-            "rootfs" => Some(RepoComponent::Rootfs),
             _ => None,
         };
 
         if let Some(repo_component) = repo_component {
             if !component_supports_runtime_deploy(repo_component) {
-                continue;
-            }
-
-            if matches!(repo_component, RepoComponent::Rootfs) && status.pending_appliance_rebuild {
-                success = false;
-                details.push(format!(
-                    "{}: appliance rebuild pending{}",
-                    comp.component,
-                    status
-                        .appliance_rebuild_reason
-                        .as_ref()
-                        .map(|reason| format!(" ({reason})"))
-                        .unwrap_or_default()
-                ));
                 continue;
             }
 

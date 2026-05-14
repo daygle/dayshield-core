@@ -45,6 +45,13 @@ jobs:
           path: deps/dayshield-ui
           ref: main
 
+      - name: Checkout dayshield-rootfs
+        uses: actions/checkout@v5
+        with:
+          repository: daygle/dayshield-rootfs
+          path: deps/dayshield-rootfs
+          ref: main
+
       # Build core binary
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -99,6 +106,29 @@ jobs:
           npm ci --no-audit --no-fund
           npm run build
 
+      - name: Install rootfs build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mmdebstrap zstd debian-archive-keyring
+
+      - name: Build rootfs artifact
+        run: |
+          set -euo pipefail
+          cp target/x86_64-unknown-linux-musl/release/dayshield-core deps/dayshield-rootfs/dayshield-core
+          sudo make -C deps/dayshield-rootfs rootfs \
+            UI_DIR="${GITHUB_WORKSPACE}/deps/dayshield-ui/dist" \
+            CORE_REPO_DIR="${GITHUB_WORKSPACE}" \
+            UI_REPO_DIR="${GITHUB_WORKSPACE}/deps/dayshield-ui" \
+            ROOTFS_REPO_DIR="${GITHUB_WORKSPACE}/deps/dayshield-rootfs"
+          sudo chown "$(id -u):$(id -g)" deps/dayshield-rootfs/rootfs.tar.zst
+
+      - name: Package rootfs artifact
+        run: |
+          mkdir -p release-artifacts
+          cp deps/dayshield-rootfs/rootfs.tar.zst release-artifacts/rootfs-${{ steps.version.outputs.VERSION }}.tar.zst
+          ls -lh release-artifacts/rootfs-*.tar.zst
+
       - name: Package UI artifact
         run: |
           mkdir -p release-artifacts
@@ -120,6 +150,7 @@ jobs:
           files: |
             release-artifacts/core-*.tar.zst
             release-artifacts/ui-*.tar.zst
+            release-artifacts/rootfs-*.tar.zst
             release-artifacts/checksums.txt
           generate_release_notes: true
         env:

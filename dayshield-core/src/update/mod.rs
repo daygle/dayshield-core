@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{Datelike, Local, NaiveTime, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::{process::Command, sync::Mutex};
 use tracing::{info, warn};
@@ -98,8 +98,94 @@ fn default_update_mode() -> String {
     env::var("DAYSHIELD_UPDATE_MODE").unwrap_or_else(|_| DEFAULT_UPDATE_MODE.to_string())
 }
 
+fn default_auto_check_frequency() -> UpdateAutoCheckFrequency {
+    UpdateAutoCheckFrequency::Daily
+}
+
+fn default_auto_check_time() -> String {
+    "03:00".to_string()
+}
+
+fn default_auto_check_weekday() -> UpdateWeekday {
+    UpdateWeekday::Monday
+}
+
+fn default_auto_check_month_days() -> Vec<u8> {
+    vec![1]
+}
+
 fn default_verify_artifact_signatures() -> bool {
     true
+}
+
+fn parse_auto_check_time(value: &str) -> Option<NaiveTime> {
+    NaiveTime::parse_from_str(value.trim(), "%H:%M").ok()
+}
+
+fn normalize_auto_check_month_days(days: Vec<u8>) -> Vec<u8> {
+    let mut days: Vec<u8> = days.into_iter().filter(|day| (1..=31).contains(day)).collect();
+    days.sort_unstable();
+    days.dedup();
+    if days.is_empty() {
+        default_auto_check_month_days()
+    } else {
+        days
+    }
+}
+
+fn normalize_auto_check_time(value: &str) -> String {
+    if parse_auto_check_time(value).is_some() {
+        value.trim().to_string()
+    } else {
+        default_auto_check_time()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateAutoCheckFrequency {
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateWeekday {
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+    Sunday,
+}
+
+impl UpdateWeekday {
+    fn matches(self, weekday: chrono::Weekday) -> bool {
+        matches!(
+            (self, weekday),
+            (UpdateWeekday::Monday, chrono::Weekday::Mon)
+                | (UpdateWeekday::Tuesday, chrono::Weekday::Tue)
+                | (UpdateWeekday::Wednesday, chrono::Weekday::Wed)
+                | (UpdateWeekday::Thursday, chrono::Weekday::Thu)
+                | (UpdateWeekday::Friday, chrono::Weekday::Fri)
+                | (UpdateWeekday::Saturday, chrono::Weekday::Sat)
+                | (UpdateWeekday::Sunday, chrono::Weekday::Sun)
+        )
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            UpdateWeekday::Monday => "monday",
+            UpdateWeekday::Tuesday => "tuesday",
+            UpdateWeekday::Wednesday => "wednesday",
+            UpdateWeekday::Thursday => "thursday",
+            UpdateWeekday::Friday => "friday",
+            UpdateWeekday::Saturday => "saturday",
+            UpdateWeekday::Sunday => "sunday",
+        }
+    }
 }
 
 fn op_lock() -> &'static Mutex<()> {
@@ -112,8 +198,14 @@ fn op_lock() -> &'static Mutex<()> {
 pub struct UpdateSettings {
     #[serde(default = "default_auto_check_enabled")]
     pub auto_check_enabled: bool,
-    #[serde(default = "default_check_interval_minutes")]
-    pub check_interval_minutes: u64,
+    #[serde(default = "default_auto_check_frequency")]
+    pub auto_check_frequency: UpdateAutoCheckFrequency,
+    #[serde(default = "default_auto_check_time")]
+    pub auto_check_time: String,
+    #[serde(default = "default_auto_check_weekday")]
+    pub auto_check_weekday: UpdateWeekday,
+    #[serde(default = "default_auto_check_month_days")]
+    pub auto_check_month_days: Vec<u8>,
     #[serde(default = "default_reboot_required_after_apply")]
     pub reboot_required_after_apply: bool,
     #[serde(default = "default_deploy_runtime_after_apply")]
@@ -157,7 +249,10 @@ impl Default for UpdateSettings {
     fn default() -> Self {
         Self {
             auto_check_enabled: default_auto_check_enabled(),
-            check_interval_minutes: default_check_interval_minutes(),
+            auto_check_frequency: default_auto_check_frequency(),
+            auto_check_time: default_auto_check_time(),
+            auto_check_weekday: default_auto_check_weekday(),
+            auto_check_month_days: default_auto_check_month_days(),
             reboot_required_after_apply: default_reboot_required_after_apply(),
             deploy_runtime_after_apply: default_deploy_runtime_after_apply(),
             require_signed_commits: default_require_signed_commits(),
@@ -232,6 +327,7 @@ pub struct ComponentState {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateStateFile {
     pub last_checked_at: Option<String>,
+    pub last_auto_check_run: Option<String>,
     pub last_applied_at: Option<String>,
     pub pending_reboot: bool,
     pub pending_appliance_rebuild: bool,
@@ -1102,9 +1198,8 @@ pub fn load_settings(state: &AppState) -> UpdateSettings {
 
 pub fn save_settings(state: &AppState, settings: &UpdateSettings) -> Result<()> {
     let mut value = settings.clone();
-    if value.check_interval_minutes == 0 {
-        value.check_interval_minutes = 1;
-    }
+    value.auto_check_time = normalize_auto_check_time(&value.auto_check_time);
+    value.auto_check_month_days = normalize_auto_check_month_days(value.auto_check_month_days);
     if value.core_branch.trim().is_empty() {
         value.core_branch = default_branch();
     }
@@ -2640,8 +2735,6 @@ pub async fn start_update_checker(state: std::sync::Arc<AppState>) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(60));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        let mut last_run: Option<Instant> = None;
         info!("updates: periodic checker started");
 
         loop {
@@ -2652,11 +2745,48 @@ pub async fn start_update_checker(state: std::sync::Arc<AppState>) {
                 continue;
             }
 
-            let interval = Duration::from_secs(settings.check_interval_minutes.max(1) * 60);
-            if let Some(prev) = last_run {
-                if prev.elapsed() < interval {
-                    continue;
+            let now = Local::now();
+            let scheduled_time = match parse_auto_check_time(&settings.auto_check_time) {
+                Some(time) => time,
+                None => continue,
+            };
+
+            if now.time().hour() < scheduled_time.hour()
+                || (now.time().hour() == scheduled_time.hour() && now.time().minute() < scheduled_time.minute())
+            {
+                continue;
+            }
+
+            let occurrence_key = match settings.auto_check_frequency {
+                UpdateAutoCheckFrequency::Daily => now.format("%Y-%m-%d").to_string(),
+                UpdateAutoCheckFrequency::Weekly => {
+                    if !settings.auto_check_weekday.matches(now.weekday()) {
+                        continue;
+                    }
+                    format!(
+                        "{}-w{:02}-{}",
+                        now.iso_week().year(),
+                        now.iso_week().week(),
+                        settings.auto_check_weekday.as_str()
+                    )
                 }
+                UpdateAutoCheckFrequency::Monthly => {
+                    let day = now.day() as u8;
+                    if !settings.auto_check_month_days.contains(&day) {
+                        continue;
+                    }
+                    format!("{:04}-{:02}-{:02}", now.year(), now.month(), now.day())
+                }
+            };
+
+            let mut state_file = load_state(&state);
+            if state_file.last_auto_check_run.as_deref() == Some(occurrence_key.as_str()) {
+                continue;
+            }
+            state_file.last_auto_check_run = Some(occurrence_key.clone());
+            if let Err(err) = save_state(&state, &state_file) {
+                warn!(error = %err, "updates: failed to persist auto-check schedule state");
+                continue;
             }
 
             match check_for_updates(&state).await {
@@ -2668,8 +2798,6 @@ pub async fn start_update_checker(state: std::sync::Arc<AppState>) {
                     warn!(error = %err, "updates: periodic check failed");
                 }
             }
-
-            last_run = Some(Instant::now());
         }
     });
 }

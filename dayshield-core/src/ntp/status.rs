@@ -5,7 +5,8 @@
 //! # Daemon selection
 //!
 //! 1. If `chrony` is active (`systemctl is-active chrony`), parse `chronyc tracking`.
-//! 2. Otherwise fall back to `timedatectl show-timesync --no-pager`.
+//! 2. Otherwise fall back to `timedatectl show-timesync --no-pager` plus
+//!    `timedatectl show --property=SystemClockSynchronized --value`.
 //!
 //! Both paths populate the same [`NtpStatus`] struct so callers do not need
 //! to know which daemon is running.
@@ -59,6 +60,7 @@ async fn chrony_status() -> NtpStatus {
         server: None,
         offset_ms: 0.0,
         jitter_ms: 0.0,
+        stratum: 0,
         last_sync: None,
         daemon: "chrony".into(),
     };
@@ -94,6 +96,12 @@ fn parse_chronyc_tracking(text: &str, status: &mut NtpStatus) {
                 let host = rest[open + 1..close].trim().to_string();
                 if !host.is_empty() && host != "0.0.0.0" {
                     status.server = Some(host);
+                }
+            }
+        } else if line.starts_with("Stratum") {
+            if let Some(raw) = line.split(':').nth(1) {
+                if let Ok(stratum) = raw.trim().parse::<u8>() {
+                    status.stratum = stratum;
                 }
             }
         } else if line.starts_with("System time") {
@@ -160,6 +168,7 @@ async fn timesyncd_status() -> NtpStatus {
         server: None,
         offset_ms: 0.0,
         jitter_ms: 0.0,
+        stratum: 0,
         last_sync: None,
         daemon: "systemd-timesyncd".into(),
     };
@@ -178,7 +187,34 @@ async fn timesyncd_status() -> NtpStatus {
 
     let text = String::from_utf8_lossy(&output.stdout);
     parse_timedatectl_timesync(&text, &mut status);
+
+    if !status.synchronized {
+        refresh_timedatectl_system_sync_state(&mut status).await;
+    }
+
     status
+}
+
+async fn refresh_timedatectl_system_sync_state(status: &mut NtpStatus) {
+    let output = match Command::new("timedatectl")
+        .args(["show", "--property=SystemClockSynchronized", "--value"])
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            debug!(error = %e, "Failed to run timedatectl show for sync state");
+            return;
+        }
+    };
+
+    let value = String::from_utf8_lossy(&output.stdout);
+    if value.trim().eq_ignore_ascii_case("yes") {
+        status.synchronized = true;
+        if status.last_sync.is_none() {
+            status.last_sync = Some(Utc::now().to_rfc3339());
+        }
+    }
 }
 
 /// Parse the key=value output of `timedatectl show-timesync`.
@@ -211,6 +247,11 @@ fn parse_timedatectl_timesync(text: &str, status: &mut NtpStatus) {
                     let digits: String = val.chars().take_while(|c| c.is_ascii_digit()).collect();
                     if let Ok(us) = digits.parse::<u64>() {
                         status.jitter_ms = us as f64 / 1000.0;
+                    }
+                }
+                "Stratum" => {
+                    if let Ok(stratum) = val.trim().parse::<u8>() {
+                        status.stratum = stratum;
                     }
                 }
                 "Synchronized" => {
@@ -252,6 +293,7 @@ mod tests {
             server: None,
             offset_ms: 0.0,
             jitter_ms: 0.0,
+            stratum: 0,
             last_sync: None,
             daemon: "chrony".into(),
         }
@@ -278,6 +320,7 @@ Leap status     : Normal\n";
         parse_chronyc_tracking(text, &mut s);
 
         assert_eq!(s.server.as_deref(), Some("192.0.1.1"));
+        assert_eq!(s.stratum, 2);
         assert!(s.synchronized);
         // offset should be negative (slow = behind)
         assert!(s.offset_ms < 0.0, "offset_ms should be negative for 'slow'");
@@ -310,6 +353,7 @@ Leap status     : Not synchronised\n";
     fn parse_timedatectl_basic() {
         let text = "\
 ServerName=0.pool.ntp.org\n\
+Stratum=3\n\
 TimeOffsetUSec=1234us\n\
 NTPSynchronized=yes\n\
 LastSyncTime=2024-01-01T00:00:00Z\n";
@@ -319,6 +363,7 @@ LastSyncTime=2024-01-01T00:00:00Z\n";
             server: None,
             offset_ms: 0.0,
             jitter_ms: 0.0,
+            stratum: 0,
             last_sync: None,
             daemon: "systemd-timesyncd".into(),
         };
@@ -326,6 +371,7 @@ LastSyncTime=2024-01-01T00:00:00Z\n";
 
         assert!(s.synchronized);
         assert_eq!(s.server.as_deref(), Some("0.pool.ntp.org"));
+        assert_eq!(s.stratum, 3);
         assert!((s.offset_ms - 1.234).abs() < 0.001);
         assert_eq!(s.last_sync.as_deref(), Some("2024-01-01T00:00:00Z"));
     }

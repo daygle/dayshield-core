@@ -24,6 +24,8 @@ pub struct NtpStatus {
     pub offset_ms: f64,
     /// RMS jitter of recent clock offsets in milliseconds.
     pub jitter_ms: f64,
+    /// NTP stratum reported by the active daemon, or 0 when unavailable.
+    pub stratum: u8,
     /// ISO 8601 timestamp of the last successful synchronisation,
     /// or `None` when the clock has never been synchronised.
     pub last_sync: Option<String>,

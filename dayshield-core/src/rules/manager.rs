@@ -322,6 +322,13 @@ impl RulesetManager {
         source: &CuratedSource,
         dest: &Path,
     ) -> Result<Option<String>> {
+        if is_blocked_suricata_ruleset_url(&source.url) {
+            bail!(
+                "ruleset source '{}' is incompatible: Suricata 7.0 feeds are not supported on this appliance",
+                source.url
+            );
+        }
+
         let client = reqwest::Client::builder()
             .user_agent("dayshield-core/1.0")
             .timeout(std::time::Duration::from_secs(300))
@@ -553,11 +560,25 @@ fn parse_rules(content: &str, disabled_set: &std::collections::HashSet<String>) 
 
 // ---------------------------------------------------------------------------
 
+/// Return true when the URL clearly targets a Suricata 7.x feed.
+fn is_blocked_suricata_ruleset_url(url: &str) -> bool {
+    let u = url.to_ascii_lowercase();
+    u.contains("suricata-7.0") || u.contains("/suricata-7/") || u.contains("suricata-7.")
+}
+
+// ---------------------------------------------------------------------------
+
 /// Find a curated source by id.
 fn find_source(id: &str) -> Result<CuratedSource> {
+    let normalized_id = match id {
+        // Backward compatibility: older installs may have used this curated id.
+        "et-open-6" => "et-open",
+        other => other,
+    };
+
     curated_sources()
         .into_iter()
-        .find(|s| s.id == id)
+        .find(|s| s.id == normalized_id)
         .with_context(|| format!("unknown curated ruleset source: '{id}'"))
 }
 
@@ -780,7 +801,22 @@ mod tests {
     }
 
     #[test]
+    fn find_source_maps_legacy_et_open_6_to_et_open() {
+        let src = find_source("et-open-6").unwrap();
+        assert_eq!(src.id, "et-open");
+        assert!(src.url.contains("suricata-6.0"));
+    }
+
+    #[test]
     fn find_source_returns_error_for_unknown() {
         assert!(find_source("nonexistent").is_err());
+    }
+
+    #[test]
+    fn blocked_url_detection_matches_suricata_7_feeds() {
+        assert!(is_blocked_suricata_ruleset_url("https://rules.emergingthreats.net/open/suricata-7.0/emerging.rules.tar.gz"));
+        assert!(is_blocked_suricata_ruleset_url("https://example.com/suricata-7.1/foo.rules"));
+        assert!(!is_blocked_suricata_ruleset_url("https://rules.emergingthreats.net/open/suricata-6.0/emerging.rules.tar.gz"));
+        assert!(!is_blocked_suricata_ruleset_url("https://openinfosecfoundation.org/rules/trafficid/trafficid.rules"));
     }
 }

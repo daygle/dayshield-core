@@ -16,17 +16,9 @@ pub fn curated_sources() -> Vec<CuratedSource> {
             description: "Community ruleset from Proofpoint's Emerging Threats project, \
                 covering a wide range of network threats including malware, \
                 exploit kits, botnets, and scanning activity. \
+                This DayShield build tracks the Suricata 6.x compatible feed. \
                 Freely available under the BSD license."
                 .to_string(),
-            url: "https://rules.emergingthreats.net/open/suricata-7.0/emerging.rules.tar.gz"
-                .to_string(),
-            license: "BSD".to_string(),
-            vendor: "Proofpoint / Emerging Threats".to_string(),
-        },
-        CuratedSource {
-            id: "et-open-6".to_string(),
-            display_name: "Emerging Threats Open (Suricata 6.x)".to_string(),
-            description: "Emerging Threats Open ruleset compatible with Suricata 6.x.".to_string(),
             url: "https://rules.emergingthreats.net/open/suricata-6.0/emerging.rules.tar.gz"
                 .to_string(),
             license: "BSD".to_string(),

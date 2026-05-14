@@ -31,7 +31,7 @@ use uuid::Uuid;
 
 use crate::{
     config::models::{
-        is_valid_cidr, is_valid_interface_name, is_valid_port, Action, FirewallRule,
+        is_valid_cidr, is_valid_interface_name, is_valid_port, Action, FirewallDirection, FirewallRule,
         FirewallSchedule, FirewallSettings, Protocol,
     },
     engine::nftables::{apply_rules, get_rule_stats, NftError},
@@ -158,6 +158,8 @@ pub struct CreateRuleRequest {
     pub source_port: Option<u16>,
     pub destination_port: Option<u16>,
     pub action: Action,
+    #[serde(default = "default_direction")]
+    pub direction: FirewallDirection,
     pub interface: Option<String>,
     pub log: bool,
     #[serde(default = "default_true")]
@@ -166,6 +168,8 @@ pub struct CreateRuleRequest {
 }
 
 fn default_true() -> bool { true }
+
+fn default_direction() -> FirewallDirection { FirewallDirection::Forward }
 
 /// Handler: create a new firewall rule.
 ///
@@ -235,6 +239,7 @@ pub async fn create_rule(
         source_port: req.source_port,
         destination_port: req.destination_port,
         action: req.action,
+        direction: req.direction,
         interface: req.interface,
         log: req.log,
         enabled: req.enabled,
@@ -349,6 +354,7 @@ pub async fn update_rule(
         source_port: req.source_port,
         destination_port: req.destination_port,
         action: req.action,
+        direction: req.direction,
         interface: req.interface,
         log: req.log,
         enabled: req.enabled,
@@ -515,6 +521,7 @@ pub async fn create_interface_rule(
         source_port: req.source_port,
         destination_port: req.destination_port,
         action: req.action,
+        direction: req.direction,
         interface: Some(interface_name.clone()),
         log: req.log,
         enabled: req.enabled,

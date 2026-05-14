@@ -315,6 +315,21 @@ pub enum FirewallChainPolicy {
     Accept,
 }
 
+/// Whether per-rule/default block firewall logs should be emitted before or
+/// after the rule action.
+///
+/// `After` suppresses logs for terminal drop/reject tails, which reduces noise.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogPosition {
+    Before,
+    After,
+}
+
+fn default_log_position() -> LogPosition {
+    LogPosition::After
+}
+
 /// Global firewall behavior that is not tied to individual allow/deny rules.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -343,6 +358,9 @@ pub struct FirewallSettings {
     pub management_ports: Vec<u16>,
     /// ACME domain whose certificate should be used by the firewall appliance.
     pub management_tls_acme_domain: Option<String>,
+    /// Whether to log before or after the rule action.
+    #[serde(default = "default_log_position")]
+    pub log_position: LogPosition,
 }
 
 impl Default for FirewallSettings {
@@ -360,6 +378,7 @@ impl Default for FirewallSettings {
             management_allowed_sources: vec![],
             management_ports: vec![22, 443, 8443],
             management_tls_acme_domain: None,
+            log_position: default_log_position(),
         }
     }
 }
@@ -384,6 +403,19 @@ pub struct FirewallSchedule {
     pub date_end: Option<String>,
 }
 
+/// Which nftables filter chain a firewall rule should target.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FirewallDirection {
+    Input,
+    Forward,
+    Output,
+}
+
+fn default_firewall_direction() -> FirewallDirection {
+    FirewallDirection::Forward
+}
+
 /// A single stateless firewall rule that will be compiled into nftables.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FirewallRule {
@@ -405,7 +437,10 @@ pub struct FirewallRule {
     pub destination_port: Option<u16>,
     /// Action to take when the rule matches.
     pub action: Action,
-    /// Optional interface filter (ingress).
+    /// Which chain the rule is emitted into.
+    #[serde(default = "default_firewall_direction")]
+    pub direction: FirewallDirection,
+    /// Optional interface filter. Input/forward rules match ingress; output rules match egress.
     pub interface: Option<String>,
     /// Whether to emit a log statement before applying the action.
     pub log: bool,

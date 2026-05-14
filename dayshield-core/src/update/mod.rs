@@ -1436,7 +1436,37 @@ async fn extract_and_deploy_artifact(
             
             // The rootfs bundle should be applied via the existing live-update mechanism
             ensure_command_available("sh").await?;
-            run_command_in(&tmp_dir.to_string_lossy(), "sh", &["apply-live-update.sh", "--non-interactive"]).await?;
+            let script_candidates = [
+                tmp_dir.join("apply-live-update.sh"),
+                tmp_dir.join("scripts").join("apply-live-update.sh"),
+                tmp_dir
+                    .join("opt")
+                    .join("dayshield-rootfs")
+                    .join("scripts")
+                    .join("apply-live-update.sh"),
+            ];
+            let apply_script = script_candidates
+                .iter()
+                .find(|p| p.is_file())
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "rootfs live update script not found in extracted artifact (checked: {})",
+                        script_candidates
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<String>>()
+                            .join(", ")
+                    )
+                })?;
+
+            let apply_script_str = apply_script.to_string_lossy().to_string();
+            run_command_in(
+                &tmp_dir.to_string_lossy(),
+                "sh",
+                &[apply_script_str.as_str(), "--non-interactive"],
+            )
+            .await?;
             let _ = fs::remove_dir_all(&tmp_dir);
         },
     }

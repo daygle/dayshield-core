@@ -179,6 +179,11 @@ fn map_severity(level: u64) -> &'static str {
     }
 }
 
+fn is_blocked_suricata_ruleset_url(url: &str) -> bool {
+    let u = url.to_ascii_lowercase();
+    u.contains("suricata-7.0") || u.contains("/suricata-7/") || u.contains("suricata-7.")
+}
+
 // ---------------------------------------------------------------------------
 // GET /suricata/config
 // ---------------------------------------------------------------------------
@@ -328,6 +333,13 @@ pub async fn create_ruleset(
         return Err(SuricataError::ValidationFailed(
             "only one of 'url' or 'path' should be provided".into(),
         ));
+    }
+    if let Some(url) = req.url.as_deref() {
+        if is_blocked_suricata_ruleset_url(url) {
+            return Err(SuricataError::ValidationFailed(
+                "Suricata 7.x ruleset feeds are not supported on this appliance (Suricata 6.x)".into(),
+            ));
+        }
     }
 
     let mut cfg = state

@@ -18,12 +18,19 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::models::{
-    Action, AliasType, FirewallAlias, FirewallChainPolicy, FirewallRule, FirewallSchedule,
-    FirewallSettings, NatConfig, NatProtocol, NatRuleType, OutboundMode, Protocol,
+    Action, AliasType, FirewallAlias, FirewallChainPolicy, FirewallDirection, FirewallRule, FirewallSchedule,
+    FirewallSettings, LogPosition, NatConfig, NatProtocol, NatRuleType, OutboundMode, Protocol,
 };
 
 const DEFAULT_BLOCK_LOG_RATE_PER_SECOND: u32 = 10;
 const DEFAULT_BLOCK_LOG_BURST_PACKETS: u32 = 20;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FilterChain {
+    Input,
+    Forward,
+    Output,
+}
 
 // ---------------------------------------------------------------------------
 // Stats
@@ -208,13 +215,20 @@ pub fn generate_ruleset(
     out.push_str("        icmp type { echo-request, destination-unreachable, time-exceeded } limit rate 20/second accept\n");
     out.push_str("        icmpv6 type { echo-request, destination-unreachable, time-exceeded, nd-neighbor-solicit, nd-neighbor-advert, mld-listener-query } accept\n");
     for rule in &sorted {
-        out.push_str(&format!("        {}\n", format_rule(rule)));
+        if rule_targets_chain(rule, FilterChain::Input) {
+            out.push_str(&format!(
+                "        {}\n",
+                format_rule(rule, FilterChain::Input, &settings.log_position)
+            ));
+        }
     }
     if matches!(settings.input_policy, FirewallChainPolicy::Drop) {
-        out.push_str(&format!(
-            "        limit rate {}/second burst {} packets log prefix \"DEFAULT-BLOCK INPUT \"\n",
-            DEFAULT_BLOCK_LOG_RATE_PER_SECOND, DEFAULT_BLOCK_LOG_BURST_PACKETS
-        ));
+        if matches!(settings.log_position, LogPosition::Before) {
+            out.push_str(&format!(
+                "        limit rate {}/second burst {} packets log prefix \"DEFAULT-BLOCK INPUT \"\n",
+                DEFAULT_BLOCK_LOG_RATE_PER_SECOND, DEFAULT_BLOCK_LOG_BURST_PACKETS
+            ));
+        }
         out.push_str("        drop\n");
     }
     out.push_str("    }\n\n");
@@ -244,13 +258,20 @@ pub fn generate_ruleset(
         }
     }
     for rule in &sorted {
-        out.push_str(&format!("        {}\n", format_rule(rule)));
+        if rule_targets_chain(rule, FilterChain::Forward) {
+            out.push_str(&format!(
+                "        {}\n",
+                format_rule(rule, FilterChain::Forward, &settings.log_position)
+            ));
+        }
     }
     if matches!(settings.forward_policy, FirewallChainPolicy::Drop) {
-        out.push_str(&format!(
-            "        limit rate {}/second burst {} packets log prefix \"DEFAULT-BLOCK FORWARD \"\n",
-            DEFAULT_BLOCK_LOG_RATE_PER_SECOND, DEFAULT_BLOCK_LOG_BURST_PACKETS
-        ));
+        if matches!(settings.log_position, LogPosition::Before) {
+            out.push_str(&format!(
+                "        limit rate {}/second burst {} packets log prefix \"DEFAULT-BLOCK FORWARD \"\n",
+                DEFAULT_BLOCK_LOG_RATE_PER_SECOND, DEFAULT_BLOCK_LOG_BURST_PACKETS
+            ));
+        }
         out.push_str("        drop\n");
     }
     out.push_str("    }\n\n");
@@ -261,6 +282,18 @@ pub fn generate_ruleset(
         "        type filter hook output priority 0; policy {};\n",
         chain_policy_str(&settings.output_policy)
     ));
+    out.push_str("        ct state established,related accept\n");
+    if settings.drop_invalid_state {
+        out.push_str("        ct state invalid drop\n");
+    }
+    for rule in &sorted {
+        if rule_targets_chain(rule, FilterChain::Output) {
+            out.push_str(&format!(
+                "        {}\n",
+                format_rule(rule, FilterChain::Output, &settings.log_position)
+            ));
+        }
+    }
     out.push_str("    }\n");
 
     out.push_str("}\n");
@@ -269,7 +302,7 @@ pub fn generate_ruleset(
     // ip nat table (IPv4 only; only emitted when NAT is configured)
     // ------------------------------------------------------------------
     if let Some(nat) = nat_config {
-        out.push_str(&generate_nat_table(nat));
+        out.push_str(&generate_nat_table(nat, &settings.log_position));
     }
 
     info!(
@@ -551,12 +584,16 @@ fn chain_policy_str(policy: &FirewallChainPolicy) -> &'static str {
 }
 
 /// Translate a single [`FirewallRule`] into an nftables rule statement.
-fn format_rule(rule: &FirewallRule) -> String {
+fn format_rule(rule: &FirewallRule, chain: FilterChain, log_position: &LogPosition) -> String {
     let mut parts: Vec<String> = Vec::new();
 
-    // Interface ingress match (name-based so it survives reboots).
+    // Interface match (name-based so it survives reboots).
     if let Some(iif) = &rule.interface {
-        parts.push(format!("iifname \"{}\"", iif));
+        let matcher = match chain {
+            FilterChain::Output => "oifname",
+            FilterChain::Input | FilterChain::Forward => "iifname",
+        };
+        parts.push(format!("{} \"{}\"", matcher, iif));
     }
 
     // Resolve the l4 protocol string (None for "any").
@@ -606,7 +643,7 @@ fn format_rule(rule: &FirewallRule) -> String {
     }
 
     // Optional log statement before the verdict.
-    if rule.log {
+    if rule.log && matches!(log_position, LogPosition::Before) {
         parts.push(format!("log prefix \"dayshield[{}]: \"", rule.id));
     }
 
@@ -627,6 +664,14 @@ fn format_rule(rule: &FirewallRule) -> String {
     parts.push(action.to_string());
 
     parts.join(" ")
+}
+
+fn rule_targets_chain(rule: &FirewallRule, chain: FilterChain) -> bool {
+    match rule.direction {
+        FirewallDirection::Input => chain == FilterChain::Input,
+        FirewallDirection::Forward => chain == FilterChain::Forward,
+        FirewallDirection::Output => chain == FilterChain::Output,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -847,7 +892,7 @@ fn format_nat_postrouting(nat: &crate::config::models::NatRule) -> Option<String
 /// - `output`      - reflection DNAT rules (hairpin NAT) when enabled.
 ///
 /// Returns an empty string when no rules would be emitted.
-fn generate_nat_table(config: &NatConfig) -> String {
+fn generate_nat_table(config: &NatConfig, log_position: &LogPosition) -> String {
     // Sort user rules deterministically by priority.
     let mut sorted: Vec<&crate::config::models::NatRule> =
         config.rules.iter().filter(|r| r.enabled).collect();
@@ -907,7 +952,7 @@ fn generate_nat_table(config: &NatConfig) -> String {
         // User masquerade / SNAT rules (hybrid or manual mode).
         if emit_user_postrouting {
             for rule in &user_postrouting {
-                if rule.log {
+                if rule.log && matches!(log_position, LogPosition::Before) {
                     out.push_str(&format!(
                         "        log prefix \"dayshield-nat[{}]: \"\n",
                         rule.id
@@ -928,7 +973,7 @@ fn generate_nat_table(config: &NatConfig) -> String {
             "        type nat hook prerouting priority dstnat; policy accept;\n",
         );
         for rule in &prerouting_rules {
-            if rule.log {
+            if rule.log && matches!(log_position, LogPosition::Before) {
                 out.push_str(&format!(
                     "        log prefix \"dayshield-nat[{}]: \"\n",
                     rule.id
@@ -1034,8 +1079,8 @@ pub async fn get_rule_stats() -> Vec<RuleStats> {
 mod tests {
     use super::*;
     use crate::config::models::{
-        Action, AddressFamily, FirewallRule, NatConfig, NatProtocol, NatRule, NatRuleType,
-        NatTranslation, OutboundMode, Protocol,
+        Action, AddressFamily, FirewallDirection, FirewallRule, NatConfig, NatProtocol,
+        NatRule, NatRuleType, NatTranslation, OutboundMode, Protocol,
     };
     use uuid::Uuid;
 
@@ -1051,6 +1096,7 @@ mod tests {
             source_port: None,
             destination_port: None,
             action,
+            direction: FirewallDirection::Forward,
             interface: None,
             log: false,
             enabled: true,
@@ -1127,8 +1173,19 @@ mod tests {
     }
 
     #[test]
-    fn default_drop_policy_adds_logged_tail_rules_for_input_and_forward() {
+    fn default_drop_policy_omits_logged_tail_rules_when_log_position_is_after() {
         let rs = generate_ruleset(&[], None, &[], None, &HashMap::new());
+        assert!(!rs.contains("log prefix \"DEFAULT-BLOCK INPUT \""));
+        assert!(!rs.contains("log prefix \"DEFAULT-BLOCK FORWARD \""));
+    }
+
+    #[test]
+    fn before_log_position_adds_logged_tail_rules_for_input_and_forward() {
+        let settings = FirewallSettings {
+            log_position: LogPosition::Before,
+            ..FirewallSettings::default()
+        };
+        let rs = generate_ruleset(&[], None, &[], Some(&settings), &HashMap::new());
         assert!(rs.contains("log prefix \"DEFAULT-BLOCK INPUT \""));
         assert!(rs.contains("log prefix \"DEFAULT-BLOCK FORWARD \""));
         assert!(rs.contains("limit rate 10/second burst 20 packets"));
@@ -1202,6 +1259,37 @@ mod tests {
     }
 
     #[test]
+    fn output_rule_uses_output_chain_and_oifname() {
+        let rule = FirewallRule {
+            direction: FirewallDirection::Output,
+            interface: Some("wan0".into()),
+            protocol: Some(Protocol::Tcp),
+            destination_port: Some(443),
+            ..base_rule(0, Action::Accept)
+        };
+        let rs = generate_ruleset(&[rule], None, &[], None, &HashMap::new());
+        assert!(rs.contains("oifname \"wan0\" tcp dport 443"));
+        assert!(!rs.contains("iifname \"wan0\" tcp dport 443"));
+    }
+
+    #[test]
+    fn input_rule_is_not_rendered_in_forward_chain() {
+        let rule = FirewallRule {
+            direction: FirewallDirection::Input,
+            source: Some("192.168.1.0/24".into()),
+            ..base_rule(0, Action::Accept)
+        };
+        let rs = generate_ruleset(&[rule], None, &[], None, &HashMap::new());
+        let forward_section = rs
+            .split("    chain forward {\n")
+            .nth(1)
+            .and_then(|section| section.split("\n    }\n\n    chain output").next())
+            .unwrap_or_default();
+        assert!(rs.contains("ip saddr 192.168.1.0/24 accept"));
+        assert!(!forward_section.contains("ip saddr 192.168.1.0/24 accept"));
+    }
+
+    #[test]
     fn reject_rule() {
         let rule = base_rule(0, Action::Reject);
         let rs = generate_ruleset(&[rule], None, &[], None, &HashMap::new());
@@ -1209,13 +1297,27 @@ mod tests {
     }
 
     #[test]
-    fn log_flag_adds_log_prefix() {
+    fn log_flag_adds_log_prefix_when_log_position_is_before() {
+        let rule = FirewallRule {
+            log: true,
+            ..base_rule(0, Action::Accept)
+        };
+        let settings = FirewallSettings {
+            log_position: LogPosition::Before,
+            ..FirewallSettings::default()
+        };
+        let rs = generate_ruleset(&[rule], None, &[], Some(&settings), &HashMap::new());
+        assert!(rs.contains("log prefix"), "log prefix must appear");
+    }
+
+    #[test]
+    fn log_flag_omits_log_prefix_when_log_position_is_after() {
         let rule = FirewallRule {
             log: true,
             ..base_rule(0, Action::Accept)
         };
         let rs = generate_ruleset(&[rule], None, &[], None, &HashMap::new());
-        assert!(rs.contains("log prefix"), "log prefix must appear");
+        assert!(!rs.contains("log prefix \"dayshield["));
     }
 
     #[test]

@@ -244,7 +244,7 @@ pub async fn apply_updates(
         Json(serde_json::json!({
             "operation": "apply",
             "success": true,
-            "message": "Update process started in background. Monitor progress via GET /system/updates/status",
+            "message": "Update process started. Progress is available in update status logs.",
             "details": [],
             "status": current_status
         }))
@@ -284,7 +284,7 @@ pub async fn rollback_updates(
         Json(serde_json::json!({
             "operation": "rollback",
             "success": true,
-            "message": "Rollback process started in background. Monitor progress via GET /system/updates/status",
+            "message": "Rollback process started. Progress is available in update status logs.",
             "details": [],
             "status": current_status
         }))

@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use chrono::{Datelike, Local, NaiveTime, Timelike, Utc};
+use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderValue, USER_AGENT, HeaderName};
 use serde::{Deserialize, Serialize};
 use tokio::{process::Command, sync::Mutex};
 use tracing::{info, warn};
@@ -1374,19 +1375,38 @@ async fn query_github_releases(
         format!("{}/releases/latest", github_api_url)
     };
 
-    let response = client
+    let mut request = client
         .get(&releases_url)
-        .header("Accept", "application/vnd.github.v3+json")
-        .header("User-Agent", "dayshield-core/1.0")
+        .header(ACCEPT, HeaderValue::from_static("application/vnd.github+json"))
+        .header(USER_AGENT, HeaderValue::from_static("dayshield-core/1.0"))
+        .header(HeaderName::from_static("x-github-api-version"), HeaderValue::from_static("2022-11-28"));
+
+    if let Ok(token) = env::var("DAYSHIELD_GITHUB_TOKEN").or_else(|_| env::var("GITHUB_TOKEN")).or_else(|_| env::var("GH_TOKEN")) {
+        let token = token.trim();
+        if !token.is_empty() {
+            let value = HeaderValue::from_str(&format!("Bearer {}", token))
+                .context("invalid GitHub token value")?;
+            request = request.header(AUTHORIZATION, value);
+        }
+    }
+
+    let response = request
         .send()
         .await
         .with_context(|| format!("failed to query GitHub releases from {}", releases_url))?;
 
     if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
         anyhow::bail!(
-            "GitHub releases query failed: HTTP {} from {}",
-            response.status(),
-            releases_url
+            "GitHub releases query failed: HTTP {} from {}{}",
+            status,
+            releases_url,
+            if body.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", body.trim())
+            }
         );
     }
 
@@ -1572,6 +1592,7 @@ async fn extract_and_deploy_artifact(
 async fn build_component_status(
     settings: &UpdateSettings,
     state_file: &UpdateStateFile,
+    registry_manifest: Option<&RegistryManifest>,
     component: RepoComponent,
 ) -> ComponentUpdateStatus {
     let (repo_path, remote_url, branch) = component_config(settings, component);
@@ -1579,8 +1600,8 @@ async fn build_component_status(
 
     // Registry mode: compare installed tracked version to latest registry version.
     if settings.update_mode == "registry" {
-        return match query_registry(&settings.registry_url).await {
-            Ok(manifest) => {
+        return match registry_manifest {
+            Some(manifest) => {
                 if let Some(artifact) = manifest
                     .components
                     .iter()
@@ -1632,7 +1653,7 @@ async fn build_component_status(
                     }
                 }
             }
-            Err(err) => ComponentUpdateStatus {
+            None => ComponentUpdateStatus {
                 component: component.as_str().to_string(),
                 repo_path,
                 branch,
@@ -1646,7 +1667,7 @@ async fn build_component_status(
                 rollback_commit: saved.and_then(|s| s.rollback_commit.clone()),
                 last_applied_commit: None,
                 last_applied_version: saved.and_then(|s| s.last_applied_version.clone()),
-                last_error: Some(format!("failed to query registry: {err}")),
+                last_error: Some("failed to query registry: missing manifest".to_string()),
             },
         };
     }
@@ -1694,9 +1715,15 @@ pub async fn get_status(state: &AppState) -> UpdatesStatus {
     let settings = load_settings(state);
     let state_file = load_state(state);
 
-    let core = build_component_status(&settings, &state_file, RepoComponent::Core).await;
-    let ui = build_component_status(&settings, &state_file, RepoComponent::Ui).await;
-    let rootfs = build_component_status(&settings, &state_file, RepoComponent::Rootfs).await;
+    let registry_manifest = if settings.update_mode == "registry" {
+        query_registry(&settings.registry_url).await.ok()
+    } else {
+        None
+    };
+
+    let core = build_component_status(&settings, &state_file, registry_manifest.as_ref(), RepoComponent::Core).await;
+    let ui = build_component_status(&settings, &state_file, registry_manifest.as_ref(), RepoComponent::Ui).await;
+    let rootfs = build_component_status(&settings, &state_file, registry_manifest.as_ref(), RepoComponent::Rootfs).await;
 
     let components = vec![core, ui, rootfs];
     let available_update_count = components.iter().filter(|c| c.update_available).count();

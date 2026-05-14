@@ -218,6 +218,17 @@ impl ConfigStore {
         }
 
         let config = migrate_config(versioned.config, versioned.schema_version)?;
+
+        if versioned.schema_version < CURRENT_SCHEMA_VERSION {
+            if let Err(err) = self.save(&config) {
+                warn!(
+                    path = %self.config_path.display(),
+                    error = %err,
+                    "Failed to persist migrated config schema"
+                );
+            }
+        }
+
         Ok(config)
     }
 
@@ -2149,6 +2160,9 @@ mod tests {
 
         let cfg = store.load().unwrap();
         assert_eq!(cfg.hostname, "legacy-fw");
+
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(store.config_path()).unwrap()).unwrap();
+        assert_eq!(saved["schema_version"].as_u64(), Some(CURRENT_SCHEMA_VERSION as u64));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

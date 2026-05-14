@@ -239,6 +239,19 @@ pub struct UpdateStateFile {
     pub appliance_rebuild_marked_at: Option<String>,
     #[serde(default)]
     pub components: Vec<ComponentState>,
+    #[serde(default)]
+    pub operation_logs: Vec<UpdateLogEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateLogEntry {
+    pub timestamp: String,
+    pub operation: String,
+    pub level: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -275,6 +288,8 @@ pub struct UpdatesStatus {
     /// Number of components with available updates (computed server-side)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub available_update_count: Option<usize>,
+    #[serde(default)]
+    pub operation_logs: Vec<UpdateLogEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1113,6 +1128,28 @@ fn save_state(state: &AppState, value: &UpdateStateFile) -> Result<()> {
     write_json_atomic(&state_path(state), value)
 }
 
+fn append_operation_log(
+    state_file: &mut UpdateStateFile,
+    operation: &str,
+    level: &str,
+    message: impl Into<String>,
+    component: Option<&str>,
+) {
+    state_file.operation_logs.push(UpdateLogEntry {
+        timestamp: Utc::now().to_rfc3339(),
+        operation: operation.to_string(),
+        level: level.to_string(),
+        message: message.into(),
+        component: component.map(|v| v.to_string()),
+    });
+
+    const MAX_LOG_ENTRIES: usize = 250;
+    if state_file.operation_logs.len() > MAX_LOG_ENTRIES {
+        let drop_count = state_file.operation_logs.len() - MAX_LOG_ENTRIES;
+        state_file.operation_logs.drain(0..drop_count);
+    }
+}
+
 fn mark_appliance_rebuild_required(state_file: &mut UpdateStateFile, reason: impl Into<String>) {
     state_file.pending_appliance_rebuild = true;
     state_file.appliance_rebuild_reason = Some(reason.into());
@@ -1554,6 +1591,7 @@ pub async fn get_status(state: &AppState) -> UpdatesStatus {
         } else {
             None
         },
+        operation_logs: state_file.operation_logs,
     }
 }
 
@@ -1563,10 +1601,38 @@ pub async fn check_for_updates(state: &AppState) -> Result<UpdatesStatus> {
     let now = Utc::now().to_rfc3339();
     let mut state_file = load_state(state);
     state_file.last_checked_at = Some(now.clone());
+    append_operation_log(
+        &mut state_file,
+        "check",
+        "info",
+        "Update check started",
+        None,
+    );
     save_state(state, &state_file)?;
 
     // Registry-based update checking (artifact distribution)
-    check_for_updates_registry(state).await?;
+    if let Err(err) = check_for_updates_registry(state).await {
+        let mut failed_state = load_state(state);
+        append_operation_log(
+            &mut failed_state,
+            "check",
+            "error",
+            format!("Update check failed: {err}"),
+            None,
+        );
+        save_state(state, &failed_state)?;
+        return Err(err);
+    }
+
+    let mut done_state = load_state(state);
+    append_operation_log(
+        &mut done_state,
+        "check",
+        "success",
+        "Update check completed",
+        None,
+    );
+    save_state(state, &done_state)?;
     info!("updates: registry check completed successfully");
 
     Ok(get_status(state).await)
@@ -1628,6 +1694,14 @@ async fn apply_updates_registry(
     let settings = load_settings(state);
     let mut state_file = load_state(state);
     let mut details = Vec::new();
+    append_operation_log(
+        &mut state_file,
+        "apply",
+        "info",
+        "Artifact update apply started",
+        None,
+    );
+    save_state(state, &state_file)?;
     
     // Step 1: Query registry for latest versions
     let manifest = query_registry(&settings.registry_url).await?;
@@ -1659,6 +1733,13 @@ async fn apply_updates_registry(
             
             downloads.push((artifact.component.clone(), artifact.version.clone(), dest));
             details.push(format!("downloaded and verified {}-{}", &artifact.component, &artifact.version));
+            append_operation_log(
+                &mut state_file,
+                "apply",
+                "info",
+                format!("Downloaded and verified {}-{}", &artifact.component, &artifact.version),
+                Some(&artifact.component),
+            );
         }
     }
     
@@ -1676,6 +1757,13 @@ async fn apply_updates_registry(
     // Create backups of current deployments
     // (In a production system, you'd backup actual files here)
     details.push("created backup snapshots".to_string());
+    append_operation_log(
+        &mut state_file,
+        "apply",
+        "info",
+        "Created backup snapshots",
+        None,
+    );
     
     // Step 4: Apply artifacts atomically
     for (component_name, version, artifact_path) in &downloads {
@@ -1693,10 +1781,24 @@ async fn apply_updates_registry(
                 entry.last_applied_version = Some(version.clone());
                 entry.last_error = None;
                 details.push(format!("deployed {}-{}", component_name, version));
+                append_operation_log(
+                    &mut state_file,
+                    "apply",
+                    "success",
+                    format!("Deployed {}-{}", component_name, version),
+                    Some(component_name),
+                );
             },
             Err(err) => {
                 transaction.status = "rolled_back".to_string();
                 details.push(format!("FAILED to deploy {}: {}", component_name, err));
+                append_operation_log(
+                    &mut state_file,
+                    "apply",
+                    "error",
+                    format!("Failed to deploy {}: {}", component_name, err),
+                    Some(component_name),
+                );
                 save_state(state, &state_file)?;
                 
                 return Ok(UpdatesActionResult {
@@ -1715,6 +1817,13 @@ async fn apply_updates_registry(
         if let Err(err) = ensure_critical_services_healthy().await {
             transaction.status = "rolled_back".to_string();
             details.push(format!("post-apply service health check failed: {}", err));
+            append_operation_log(
+                &mut state_file,
+                "apply",
+                "error",
+                format!("Post-apply service health check failed: {}", err),
+                None,
+            );
             save_state(state, &state_file)?;
             
             return Ok(UpdatesActionResult {
@@ -1726,6 +1835,13 @@ async fn apply_updates_registry(
             });
         }
         details.push("post-apply service health check passed".to_string());
+        append_operation_log(
+            &mut state_file,
+            "apply",
+            "success",
+            "Post-apply service health check passed",
+            None,
+        );
     }
     
     // Step 6: Mark transaction complete
@@ -1737,7 +1853,22 @@ async fn apply_updates_registry(
     if rootfs_included {
         state_file.pending_reboot = true;
         details.push("rootfs update requires system reboot".to_string());
+        append_operation_log(
+            &mut state_file,
+            "apply",
+            "info",
+            "RootFS update requires reboot",
+            Some("rootfs"),
+        );
     }
+
+    append_operation_log(
+        &mut state_file,
+        "apply",
+        "success",
+        "Artifact update apply completed",
+        None,
+    );
     
     save_state(state, &state_file)?;
     
@@ -2081,6 +2212,13 @@ pub async fn rollback_updates(
 
     let mut details = Vec::new();
     let mut rootfs_rolled_back = false;
+    append_operation_log(
+        &mut state_file,
+        "rollback",
+        "info",
+        "Rollback started",
+        None,
+    );
 
     info!(component = ?component, "updates: rollback started");
 
@@ -2096,6 +2234,7 @@ pub async fn rollback_updates(
                 let entry = ensure_component_state(&mut state_file, comp);
                 entry.last_error = Some(msg.clone());
             }
+            append_operation_log(&mut state_file, "rollback", "error", msg.clone(), Some(comp.as_str()));
             save_state(state, &state_file)?;
             let status = get_status(state).await;
             return Ok(UpdatesActionResult {
@@ -2135,6 +2274,7 @@ pub async fn rollback_updates(
                 let entry = ensure_component_state(&mut state_file, comp);
                 entry.last_error = Some(msg.clone());
             }
+            append_operation_log(&mut state_file, "rollback", "error", msg.clone(), Some(comp.as_str()));
             save_state(state, &state_file)?;
             let status = get_status(state).await;
             return Ok(UpdatesActionResult {
@@ -2151,6 +2291,13 @@ pub async fn rollback_updates(
             entry.rollback_commit = Some(current);
             entry.last_error = None;
         }
+        append_operation_log(
+            &mut state_file,
+            "rollback",
+            "success",
+            format!("Rolled back {}", comp.as_str()),
+            Some(comp.as_str()),
+        );
 
         if matches!(comp, RepoComponent::Rootfs) {
             rootfs_rolled_back = true;
@@ -2176,6 +2323,13 @@ pub async fn rollback_updates(
             );
         }
     }
+    append_operation_log(
+        &mut state_file,
+        "rollback",
+        "success",
+        "Rollback completed",
+        None,
+    );
     save_state(state, &state_file)?;
 
     info!("updates: rollback completed");
@@ -2347,6 +2501,20 @@ pub async fn validate_updates(
 
     info!(success, "updates: validation completed");
 
+    let mut state_file = load_state(state);
+    append_operation_log(
+        &mut state_file,
+        "validate",
+        if success { "success" } else { "error" },
+        if success {
+            "Validation completed successfully".to_string()
+        } else {
+            "Validation failed".to_string()
+        },
+        None,
+    );
+    save_state(state, &state_file)?;
+
     Ok(UpdatesActionResult {
         operation: "validate".to_string(),
         success,
@@ -2368,6 +2536,13 @@ pub async fn rollback_rootfs_live_update(state: &AppState) -> Result<UpdatesActi
     let settings = load_settings(state);
     let mut state_file = load_state(state);
     let mut details = Vec::new();
+    append_operation_log(
+        &mut state_file,
+        "rootfs-live-rollback",
+        "info",
+        "RootFS live rollback started",
+        Some("rootfs"),
+    );
 
     let (repo_path, _url, _branch) = component_config(&settings, RepoComponent::Rootfs);
     ensure_repo_writable(&repo_path)?;
@@ -2386,6 +2561,13 @@ pub async fn rollback_rootfs_live_update(state: &AppState) -> Result<UpdatesActi
     save_state(state, &state_file)?;
 
     details.push("rootfs: live rollback completed from latest runtime backup snapshot".to_string());
+    append_operation_log(
+        &mut state_file,
+        "rootfs-live-rollback",
+        "success",
+        "RootFS live rollback completed",
+        Some("rootfs"),
+    );
 
     let status = get_status(state).await;
     Ok(UpdatesActionResult {

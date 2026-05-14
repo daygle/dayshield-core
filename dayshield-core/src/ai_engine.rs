@@ -19,7 +19,7 @@ use uuid::Uuid;
 use crate::{
     ai_model::AiModel,
     config::models::{
-        Action, AiEngineConfig, FirewallRule, NotifyCategory,
+        Action, AiEngineConfig, FirewallDirection, FirewallRule, NotifyCategory,
     },
     engine::nftables::apply_rules,
     notify::model::NotifyEvent,
@@ -816,6 +816,7 @@ impl AiRuntime {
                 source_port: None,
                 destination_port: None,
                 action: Action::Drop,
+                direction: FirewallDirection::Input,
                 interface: None,
                 log: true,
                 enabled: true,

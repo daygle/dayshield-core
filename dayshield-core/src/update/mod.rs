@@ -1593,6 +1593,7 @@ async fn build_component_status(
     settings: &UpdateSettings,
     state_file: &UpdateStateFile,
     registry_manifest: Option<&RegistryManifest>,
+    registry_error: Option<&str>,
     component: RepoComponent,
 ) -> ComponentUpdateStatus {
     let (repo_path, remote_url, branch) = component_config(settings, component);
@@ -1667,7 +1668,10 @@ async fn build_component_status(
                 rollback_commit: saved.and_then(|s| s.rollback_commit.clone()),
                 last_applied_commit: None,
                 last_applied_version: saved.and_then(|s| s.last_applied_version.clone()),
-                last_error: Some("failed to query registry: missing manifest".to_string()),
+                last_error: Some(format!(
+                    "failed to query registry: {}",
+                    registry_error.unwrap_or("missing manifest")
+                )),
             },
         };
     }
@@ -1715,15 +1719,39 @@ pub async fn get_status(state: &AppState) -> UpdatesStatus {
     let settings = load_settings(state);
     let state_file = load_state(state);
 
-    let registry_manifest = if settings.update_mode == "registry" {
-        query_registry(&settings.registry_url).await.ok()
+    let (registry_manifest, registry_error) = if settings.update_mode == "registry" {
+        match query_registry(&settings.registry_url).await {
+            Ok(manifest) => (Some(manifest), None),
+            Err(err) => (None, Some(err.to_string())),
+        }
     } else {
-        None
+        (None, None)
     };
 
-    let core = build_component_status(&settings, &state_file, registry_manifest.as_ref(), RepoComponent::Core).await;
-    let ui = build_component_status(&settings, &state_file, registry_manifest.as_ref(), RepoComponent::Ui).await;
-    let rootfs = build_component_status(&settings, &state_file, registry_manifest.as_ref(), RepoComponent::Rootfs).await;
+    let core = build_component_status(
+        &settings,
+        &state_file,
+        registry_manifest.as_ref(),
+        registry_error.as_deref(),
+        RepoComponent::Core,
+    )
+    .await;
+    let ui = build_component_status(
+        &settings,
+        &state_file,
+        registry_manifest.as_ref(),
+        registry_error.as_deref(),
+        RepoComponent::Ui,
+    )
+    .await;
+    let rootfs = build_component_status(
+        &settings,
+        &state_file,
+        registry_manifest.as_ref(),
+        registry_error.as_deref(),
+        RepoComponent::Rootfs,
+    )
+    .await;
 
     let components = vec![core, ui, rootfs];
     let available_update_count = components.iter().filter(|c| c.update_available).count();

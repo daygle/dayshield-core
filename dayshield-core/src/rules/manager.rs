@@ -382,7 +382,98 @@ impl RulesetManager {
     /// The `apply_config` function in [`crate::engine::suricata`] automatically
     /// reads all enabled managed rulesets and includes their paths in the
     /// generated `suricata.yaml`.
-    async fn apply_suricata_config(&self) -> Result<()> {
+    /// List all rules in a ruleset with their enabled/disabled state.
+    pub fn list_rules(&self, id: &str) -> Result<Vec<crate::rules::models::Rule>> {
+        let rules_path = self.store.rules_file(id);
+        if !rules_path.exists() {
+            bail!("ruleset '{}' rules file not found", id);
+        }
+
+        let content = std::fs::read_to_string(&rules_path)
+            .context("failed to read rules file")?;
+
+        let disabled = self.load_disabled_rules(id)?;
+        let disabled_set: std::collections::HashSet<_> = disabled.ids.into_iter().collect();
+
+        let rules = parse_rules(&content, &disabled_set);
+        Ok(rules)
+    }
+
+    /// Load the set of disabled rule IDs for a ruleset.
+    pub fn load_disabled_rules(&self, id: &str) -> Result<crate::rules::models::DisabledRules> {
+        let disabled_path = self.store.ruleset_dir(id).join("disabled-rules.json");
+        if !disabled_path.exists() {
+            return Ok(crate::rules::models::DisabledRules::default());
+        }
+
+        let content = std::fs::read_to_string(&disabled_path)
+            .context("failed to read disabled-rules.json")?;
+        let disabled = serde_json::from_str(&content)
+            .context("failed to parse disabled-rules.json")?;
+        Ok(disabled)
+    }
+
+    /// Save the set of disabled rule IDs for a ruleset.
+    pub fn save_disabled_rules(&self, id: &str, disabled: &crate::rules::models::DisabledRules) -> Result<()> {
+        let disabled_path = self.store.ruleset_dir(id).join("disabled-rules.json");
+        std::fs::create_dir_all(disabled_path.parent().unwrap())?;
+        let json = serde_json::to_string_pretty(disabled)?;
+        std::fs::write(&disabled_path, json)
+            .context("failed to write disabled-rules.json")?;
+        Ok(())
+    }
+
+    /// Regenerate the effective rules file, filtering out disabled rules.
+    /// This updates the main rules file that Suricata uses.
+    pub fn regenerate_effective_rules(&self, id: &str) -> Result<()> {
+        let rules_path = self.store.rules_file(id);
+        if !rules_path.exists() {
+            return Ok(());
+        }
+
+        // Read the original rules file
+        let original_content = std::fs::read_to_string(&rules_path)
+            .context("failed to read rules file")?;
+
+        // Load disabled rules
+        let disabled = self.load_disabled_rules(id)?;
+        let disabled_set: std::collections::HashSet<_> = disabled.ids.into_iter().collect();
+
+        // Filter rules: keep only those that are not disabled
+        let filtered_lines: Vec<&str> = original_content
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                
+                // Always keep empty lines, comments, and file headers
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    return true;
+                }
+
+                // Check if this rule is disabled
+                if let Some(sid_start) = trimmed.find("sid:") {
+                    let after_sid = &trimmed[sid_start + 4..];
+                    if let Some(sid_end) = after_sid.find(|c| !char::is_numeric(c)) {
+                        let rule_id = &after_sid[..sid_end];
+                        if disabled_set.contains(rule_id) {
+                            return false; // Exclude this disabled rule
+                        }
+                    }
+                }
+
+                true
+            })
+            .collect();
+
+        // Write the filtered content back
+        let filtered_content = filtered_lines.join("\n");
+        std::fs::write(&rules_path, filtered_content)
+            .context("failed to write filtered rules file")?;
+
+        Ok(())
+    }
+
+    pub async fn apply_suricata_config(&self) -> Result<()> {
         let cs = ConfigStore::with_dir(&self.config_dir);
         let cfg = cs
             .load_suricata_config()
@@ -408,6 +499,58 @@ impl RulesetManager {
 
 // ---------------------------------------------------------------------------
 // Free helpers
+// ---------------------------------------------------------------------------
+
+/// Parse individual rules from a rules file content.
+/// Returns rules with enabled flag based on disabled_set.
+fn parse_rules(content: &str, disabled_set: &std::collections::HashSet<String>) -> Vec<crate::rules::models::Rule> {
+    let mut rules = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        
+        // Skip empty lines and comments
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        // Try to parse Suricata rule
+        // Format: action proto src_ip src_port -> dst_ip dst_port (options...)
+        if let Some((action, rest)) = trimmed.split_once(' ') {
+            // Extract rule ID from the options section
+            if let Some(sid_start) = rest.find("sid:") {
+                let after_sid = &rest[sid_start + 4..];
+                if let Some(sid_end) = after_sid.find(|c| !char::is_numeric(c)) {
+                    let rule_id = after_sid[..sid_end].to_string();
+                    let is_enabled = !disabled_set.contains(&rule_id);
+
+                    // Extract signature/message from msg: field
+                    let signature = if let Some(msg_start) = rest.find("msg:\"") {
+                        let after_msg = &rest[msg_start + 5..];
+                        if let Some(msg_end) = after_msg.find('"') {
+                            after_msg[..msg_end].to_string()
+                        } else {
+                            rule_id.clone()
+                        }
+                    } else {
+                        rule_id.clone()
+                    };
+
+                    rules.push(crate::rules::models::Rule {
+                        id: rule_id,
+                        action: action.to_string(),
+                        signature,
+                        enabled: is_enabled,
+                        raw: trimmed.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    rules
+}
+
 // ---------------------------------------------------------------------------
 
 /// Find a curated source by id.

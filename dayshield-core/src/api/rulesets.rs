@@ -11,6 +11,8 @@
 //! | POST   | `/rulesets/:id/enable`             | Enable an installed ruleset          |
 //! | POST   | `/rulesets/:id/disable`            | Disable an installed ruleset         |
 //! | DELETE | `/rulesets/:id`                    | Uninstall a ruleset                  |
+//! | GET    | `/rulesets/:id/rules`              | List all rules in a ruleset          |
+//! | POST   | `/rulesets/:id/disabled-rules`     | Update set of disabled rule IDs      |
 
 use std::sync::Arc;
 
@@ -99,6 +101,22 @@ pub struct InstalledRulesetResponse {
     pub last_updated: Option<String>,
     pub local_path: Option<String>,
     pub update_available: bool,
+}
+
+/// Wire-format for a single rule in a ruleset.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleResponse {
+    pub id: String,
+    pub action: String,
+    pub signature: String,
+    pub enabled: bool,
+}
+
+/// Request body for updating disabled rules.
+#[derive(serde::Deserialize)]
+pub struct UpdateDisabledRulesRequest {
+    pub ids: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -322,5 +340,64 @@ pub async fn delete_ruleset(
     Ok(Json(serde_json::json!({
         "success": true,
         "message": format!("Ruleset '{id}' uninstalled")
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// GET /rulesets/:id/rules
+// ---------------------------------------------------------------------------
+
+/// List all rules in an installed ruleset with their enabled/disabled state.
+pub async fn list_ruleset_rules(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, RulesetError> {
+    let manager = make_manager(&state);
+    let rules = manager.list_rules(&id)?;
+    
+    let response: Vec<RuleResponse> = rules.iter().map(|r| RuleResponse {
+        id: r.id.clone(),
+        action: r.action.clone(),
+        signature: r.signature.clone(),
+        enabled: r.enabled,
+    }).collect();
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": response
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// POST /rulesets/:id/disabled-rules
+// ---------------------------------------------------------------------------
+
+/// Update the set of disabled rule IDs for a ruleset.
+pub async fn update_disabled_rules(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateDisabledRulesRequest>,
+) -> Result<impl IntoResponse, RulesetError> {
+    let manager = make_manager(&state);
+    
+    // Validate ruleset exists
+    let rulesets = RulesetStore::new().load().unwrap_or_default();
+    let _ruleset = rulesets.iter()
+        .find(|r| r.id == id)
+        .ok_or_else(|| RulesetError::NotFound(format!("Ruleset '{}' not found", id)))?;
+    
+    // Save disabled rules
+    let disabled = crate::rules::models::DisabledRules { ids: req.ids };
+    manager.save_disabled_rules(&id, &disabled)?;
+    
+    // Regenerate rules file to filter out disabled rules
+    manager.regenerate_effective_rules(&id)?;
+    
+    // Regenerate Suricata config to apply changes
+    manager.apply_suricata_config().await?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": format!("Disabled rules updated for '{id}'")
     })))
 }

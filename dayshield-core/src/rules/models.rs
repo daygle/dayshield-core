@@ -86,3 +86,33 @@ pub struct CuratedSource {
     /// Vendor / maintainer name.
     pub vendor: String,
 }
+
+// ---------------------------------------------------------------------------
+// Rule
+// ---------------------------------------------------------------------------
+
+/// A single Suricata rule parsed from a .rules file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Rule {
+    /// Unique rule ID (e.g., "1000001")
+    pub id: String,
+    /// Rule action: alert, drop, pass, etc.
+    pub action: String,
+    /// Rule signature/description text
+    pub signature: String,
+    /// Whether this rule is currently enabled (not disabled)
+    pub enabled: bool,
+    /// Raw rule line for reference
+    pub raw: String,
+}
+
+// ---------------------------------------------------------------------------
+// DisabledRules
+// ---------------------------------------------------------------------------
+
+/// Set of disabled rule IDs for a ruleset.
+/// Persisted as JSON in `rulesets/{id}/disabled-rules.json`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DisabledRules {
+    pub ids: Vec<String>,
+}

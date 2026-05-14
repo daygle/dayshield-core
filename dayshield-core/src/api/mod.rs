@@ -94,6 +94,8 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `POST /rulesets/{id}/enable`                          - enable an installed ruleset
 /// - `POST /rulesets/{id}/disable`                         - disable an installed ruleset
 /// - `DELETE /rulesets/{id}`                               - uninstall a ruleset
+/// - `GET  /rulesets/{id}/rules`                           - list all rules in a ruleset
+/// - `POST /rulesets/{id}/disabled-rules`                  - update set of disabled rule IDs
 /// - `GET  /wireguard/interfaces`                          - list WireGuard interfaces
 /// - `POST /wireguard/interfaces`                          - create / update a WireGuard interface
 /// - `DELETE /wireguard/interfaces/{name}`                 - remove a WireGuard interface
@@ -257,6 +259,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/rulesets/{id}/enable", post(rulesets::enable_ruleset))
         .route("/rulesets/{id}/disable", post(rulesets::disable_ruleset))
         .route("/rulesets/{id}", delete(rulesets::delete_ruleset))
+        .route("/rulesets/{id}/rules", get(rulesets::list_ruleset_rules))
+        .route("/rulesets/{id}/disabled-rules", post(rulesets::update_disabled_rules))
         // CrowdSec
         .route("/crowdsec/config", get(crowdsec::get_config))
         .route("/crowdsec/config", post(crowdsec::update_config))

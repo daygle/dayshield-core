@@ -59,9 +59,21 @@ pub async fn apply_ntp_config(cfg: &NtpConfig) -> Result<(), NtpError> {
                 "serve_clients requires chrony to be installed (missing chrony.service/chronyd.service)"
                     .into(),
         })?;
-        apply_chrony(cfg, chrony_unit).await
-    } else {
+        return apply_chrony(cfg, chrony_unit, true).await;
+    }
+
+    if has_timesyncd_unit() {
         apply_timesyncd(cfg).await
+    } else if let Some(chrony_unit) = detect_chrony_unit() {
+        // Some images intentionally install chrony as the only time daemon.
+        // In that case, run chrony in client-only mode for upstream sync.
+        apply_chrony(cfg, chrony_unit, false).await
+    } else {
+        Err(NtpError::ServiceCommand {
+            service: "ntp".into(),
+            message: "no supported NTP daemon installed (expected systemd-timesyncd or chrony)"
+                .into(),
+        })
     }
 }
 
@@ -107,7 +119,11 @@ async fn apply_timesyncd(cfg: &NtpConfig) -> Result<(), NtpError> {
 
 const CHRONY_CONF: &str = "/etc/chrony/chrony.conf";
 
-async fn apply_chrony(cfg: &NtpConfig, chrony_unit: &'static str) -> Result<(), NtpError> {
+async fn apply_chrony(
+    cfg: &NtpConfig,
+    chrony_unit: &'static str,
+    serve_clients: bool,
+) -> Result<(), NtpError> {
     let mut lines: Vec<String> = vec![
         "# Managed by DayShield - do not edit manually".into(),
         String::new(),
@@ -125,17 +141,23 @@ async fn apply_chrony(cfg: &NtpConfig, chrony_unit: &'static str) -> Result<(), 
     lines.push("rtcsync".into());
     lines.push(String::new());
 
-    if !cfg.listen_interfaces.is_empty() {
-        lines.push("# Listen interfaces for LAN clients".into());
-        for iface in &cfg.listen_interfaces {
-            lines.push(format!("binddevice {iface}"));
+    if serve_clients {
+        if !cfg.listen_interfaces.is_empty() {
+            lines.push("# Listen interfaces for LAN clients".into());
+            for iface in &cfg.listen_interfaces {
+                lines.push(format!("binddevice {iface}"));
+            }
+            lines.push(String::new());
         }
+
+        lines.push("# Allow NTP queries from all LAN clients".into());
+        lines.push("allow 0/0".into());
+        lines.push(String::new());
+    } else {
+        lines.push("# Client-only mode (do not serve NTP to network clients)".into());
+        lines.push("port 0".into());
         lines.push(String::new());
     }
-
-    lines.push("# Allow NTP queries from all LAN clients".into());
-    lines.push("allow 0/0".into());
-    lines.push(String::new());
     lines.push("# Logging".into());
     lines.push("logdir /var/log/chrony".into());
 
@@ -179,6 +201,16 @@ fn detect_chrony_unit() -> Option<&'static str> {
         }
     }
     None
+}
+
+fn has_timesyncd_unit() -> bool {
+    const UNIT_DIRS: [&str; 3] = ["/etc/systemd/system", "/lib/systemd/system", "/usr/lib/systemd/system"];
+    for dir in UNIT_DIRS {
+        if Path::new(dir).join("systemd-timesyncd.service").exists() {
+            return true;
+        }
+    }
+    false
 }
 
 async fn stop_chrony_services() {

@@ -131,20 +131,38 @@ pub async fn resync() -> impl IntoResponse {
         .output()
         .await;
 
-    let message = match chrony {
-        Ok(out) if out.status.success() => "NTP resync triggered via chronyc",
-        _ => {
-            let _ = tokio::process::Command::new("systemctl")
-                .args(["restart", "systemd-timesyncd"])
-                .output()
-                .await;
-            "NTP resync triggered via systemd-timesyncd"
+    if let Ok(out) = chrony {
+        if out.status.success() {
+            return Json(serde_json::json!({
+                "success": true,
+                "data": { "message": "NTP resync triggered via chronyc" }
+            }));
         }
-    };
+    }
+
+    async fn restart_unit(unit: &str) -> bool {
+        match tokio::process::Command::new("systemctl")
+            .args(["restart", unit])
+            .output()
+            .await
+        {
+            Ok(out) if out.status.success() => true,
+            _ => false,
+        }
+    }
+
+    for unit in ["chronyd", "chrony", "systemd-timesyncd"] {
+        if restart_unit(unit).await {
+            return Json(serde_json::json!({
+                "success": true,
+                "data": { "message": format!("NTP resync triggered via systemctl restart {unit}") }
+            }));
+        }
+    }
 
     Json(serde_json::json!({
-        "success": true,
-        "data": { "message": message }
+        "success": false,
+        "error": "NTP resync failed: no available NTP daemon restart path succeeded"
     }))
 }
 

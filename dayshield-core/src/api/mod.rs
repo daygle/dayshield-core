@@ -63,7 +63,6 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `POST /system/updates/rollback`                       - rollback to prior commit
 /// - `POST /system/updates/validate`                       - validate current commit matches applied state
 /// - `POST /system/updates/appliance-rebuild-complete`     - clear pending appliance rebuild status
-/// - `POST /system/updates/rootfs-live-rollback`           - rollback latest in-place rootfs live update
 /// - `GET  /interfaces`                                    - list all network interfaces
 /// - `POST /interfaces`                                    - create or update a network interface
 /// - `GET  /gateways`                                      - list gateways with live routing and health state
@@ -164,10 +163,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/system/updates/apply", post(system::apply_updates))
         .route("/system/updates/rollback", post(system::rollback_updates))
         .route("/system/updates/validate", post(system::validate_updates))
-        .route(
-            "/system/updates/rootfs-live-rollback",
-            post(system::rollback_rootfs_live_update),
-        )
         .route(
             "/system/updates/appliance-rebuild-complete",
             post(system::mark_appliance_rebuild_complete),

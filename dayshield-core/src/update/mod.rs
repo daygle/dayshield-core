@@ -22,7 +22,6 @@ const DEFAULT_UI_URL: &str = "https://github.com/daygle/dayshield-ui";
 const DEFAULT_ROOTFS_URL: &str = "https://github.com/daygle/dayshield-rootfs";
 const RUNTIME_MARKER_DIR: &str = "/var/lib/dayshield/update";
 const DEFAULT_TRUSTED_SIGNERS_FILE: &str = "/etc/dayshield/update_trusted_signers";
-const ROOTFS_LIVE_REPORT_FILE: &str = "/var/lib/dayshield/rootfs-live-update/last-run.json";
 const ARTIFACT_STAGING_DIR: &str = "/var/lib/dayshield/update-staging";
 /// GitHub Releases repository: https://github.com/daygle/dayshield-core
 /// Artifacts are attached to releases as: core-v1.2.3.tar.zst, ui-v1.2.3.tar.zst, etc.
@@ -406,43 +405,12 @@ pub struct UpdatesStatus {
     pub pending_appliance_rebuild: bool,
     pub appliance_rebuild_reason: Option<String>,
     pub appliance_rebuild_marked_at: Option<String>,
-    pub rootfs_live_update: Option<RootfsLiveUpdateSummary>,
     pub components: Vec<ComponentUpdateStatus>,
     /// Number of components with available updates (computed server-side)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub available_update_count: Option<usize>,
     #[serde(default)]
     pub operation_logs: Vec<UpdateLogEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct RootfsLiveUpdateSummary {
-    pub report_timestamp: Option<String>,
-    pub report_commit: Option<String>,
-    #[serde(default)]
-    pub staged_files: Vec<String>,
-    pub backup_dir: Option<String>,
-    #[serde(default)]
-    pub changed_units: Vec<String>,
-    pub migration_from_version: Option<u64>,
-    pub migration_to_version: Option<u64>,
-    pub rollback_available: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct RootfsLiveUpdateReport {
-    pub timestamp: Option<String>,
-    pub commit: Option<String>,
-    #[serde(default)]
-    pub staged_files: Vec<String>,
-    pub backup_dir: Option<String>,
-    #[serde(default)]
-    pub changed_units: Vec<String>,
-    pub migration_from_version: Option<u64>,
-    pub migration_to_version: Option<u64>,
-    pub rollback_available: Option<bool>,
 }
 
 // ============================================================================
@@ -711,48 +679,6 @@ async fn is_command_available(program: &str) -> bool {
         .is_ok()
 }
 
-async fn verify_commit_signature(repo_path: &str, commit: &str, trusted_signers_file: &str) -> Result<()> {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(repo_path);
-    if !trusted_signers_file.trim().is_empty() {
-        cmd.arg("-c")
-            .arg(format!("gpg.ssh.allowedSignersFile={}", trusted_signers_file));
-    }
-    cmd.arg("verify-commit").arg(commit);
-
-    let output = cmd
-        .output()
-        .await
-        .with_context(|| format!("failed to verify commit signature for {}", commit))?;
-
-    if !output.status.success() {
-        anyhow::bail!(
-            "commit signature verification failed for {}: {}",
-            short_sha(commit),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    Ok(())
-}
-
-fn load_rootfs_live_update_summary() -> Option<RootfsLiveUpdateSummary> {
-    let report = fs::read_to_string(ROOTFS_LIVE_REPORT_FILE)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<RootfsLiveUpdateReport>(&raw).ok())?;
-
-    Some(RootfsLiveUpdateSummary {
-        report_timestamp: report.timestamp,
-        report_commit: report.commit,
-        staged_files: report.staged_files,
-        backup_dir: report.backup_dir,
-        changed_units: report.changed_units,
-        migration_from_version: report.migration_from_version,
-        migration_to_version: report.migration_to_version,
-        rollback_available: report.rollback_available.unwrap_or(false),
-    })
-}
-
 async fn ensure_critical_services_healthy() -> Result<()> {
     ensure_command_available("systemctl").await?;
     let critical = ["dayshield.service", "nftables.service", "unbound.service"];
@@ -781,15 +707,28 @@ async fn ensure_critical_services_healthy() -> Result<()> {
     Ok(())
 }
 
-async fn rollback_rootfs_live_update_runtime(repo_path: &str) -> Result<()> {
-    ensure_command_available("sh").await?;
-    run_command_in(
-        repo_path,
-        "sh",
-        &["scripts/apply-live-update.sh", "--rollback-latest", "--non-interactive"],
-    )
-    .await?;
-    ensure_critical_services_healthy().await?;
+async fn verify_commit_signature(repo_path: &str, commit: &str, trusted_signers_file: &str) -> Result<()> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(repo_path);
+    if !trusted_signers_file.trim().is_empty() {
+        cmd.arg("-c")
+            .arg(format!("gpg.ssh.allowedSignersFile={}", trusted_signers_file));
+    }
+    cmd.arg("verify-commit").arg(commit);
+
+    let output = cmd
+        .output()
+        .await
+        .with_context(|| format!("failed to verify commit signature for {}", commit))?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "commit signature verification failed for {}: {}",
+            short_sha(commit),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
     Ok(())
 }
 
@@ -1356,46 +1295,9 @@ async fn extract_and_deploy_artifact(
             let _ = fs::remove_dir_all(&tmp_dir);
         },
         RepoComponent::Rootfs => {
-            // For rootfs, we pass the artifact to the live-update script
-            let tmp_dir = PathBuf::from("/tmp/dayshield-rootfs-deploy");
-            fs::create_dir_all(&tmp_dir)?;
-            archive.unpack(&tmp_dir)
-                .with_context(|| format!("failed to extract rootfs artifact"))?;
-            
-            // The rootfs bundle should be applied via the existing live-update mechanism
-            ensure_command_available("sh").await?;
-            let script_candidates = [
-                tmp_dir.join("apply-live-update.sh"),
-                tmp_dir.join("scripts").join("apply-live-update.sh"),
-                tmp_dir
-                    .join("opt")
-                    .join("dayshield-rootfs")
-                    .join("scripts")
-                    .join("apply-live-update.sh"),
-            ];
-            let apply_script = script_candidates
-                .iter()
-                .find(|p| p.is_file())
-                .cloned()
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "rootfs live update script not found in extracted artifact (checked: {})",
-                        script_candidates
-                            .iter()
-                            .map(|p| p.display().to_string())
-                            .collect::<Vec<String>>()
-                            .join(", ")
-                    )
-                })?;
-
-            let apply_script_str = apply_script.to_string_lossy().to_string();
-            run_command_in(
-                &tmp_dir.to_string_lossy(),
-                "sh",
-                &[apply_script_str.as_str(), "--non-interactive"],
-            )
-            .await?;
-            let _ = fs::remove_dir_all(&tmp_dir);
+            anyhow::bail!(
+                "rootfs artifact updates are not supported on a running appliance; rebuild and publish appliance artifacts instead"
+            );
         },
     }
 
@@ -1569,7 +1471,6 @@ pub async fn get_status(state: &AppState) -> UpdatesStatus {
         pending_appliance_rebuild: state_file.pending_appliance_rebuild,
         appliance_rebuild_reason: state_file.appliance_rebuild_reason,
         appliance_rebuild_marked_at: state_file.appliance_rebuild_marked_at,
-        rootfs_live_update: load_rootfs_live_update_summary(),
         components,
         available_update_count: if available_update_count > 0 {
             Some(available_update_count)
@@ -2155,16 +2056,6 @@ pub async fn validate_updates(
         }
     }
 
-    if let Some(rootfs_live) = &status.rootfs_live_update {
-        if !rootfs_live.staged_files.is_empty() {
-            warning_count += 1;
-            details.push(format!(
-                "rootfs: {} staged config delta file(s) pending merge",
-                rootfs_live.staged_files.len()
-            ));
-        }
-    }
-
     info!(success, "updates: validation completed");
 
     let mut state_file = load_state(state);
@@ -2191,55 +2082,6 @@ pub async fn validate_updates(
         } else {
             "validation failed".to_string()
         },
-        details,
-        status,
-    })
-}
-
-pub async fn rollback_rootfs_live_update(state: &AppState) -> Result<UpdatesActionResult> {
-    let _guard = op_lock().lock().await;
-
-    let settings = load_settings(state);
-    let mut state_file = load_state(state);
-    let mut details = Vec::new();
-    append_operation_log(
-        &mut state_file,
-        "rootfs-live-rollback",
-        "info",
-        "RootFS live rollback started",
-        Some("rootfs"),
-    );
-
-    let (repo_path, _url, _branch) = component_config(&settings, RepoComponent::Rootfs);
-    ensure_repo_writable(&repo_path)?;
-    rollback_rootfs_live_update_runtime(&repo_path).await?;
-    let head = run_git(&repo_path, &["rev-parse", "HEAD"]).await?;
-    save_runtime_marker(RepoComponent::Rootfs, &head)?;
-
-    let entry = ensure_component_state(&mut state_file, RepoComponent::Rootfs);
-    entry.deployed_commit = Some(head.clone());
-    entry.last_applied_commit = Some(head.clone());
-    entry.last_error = None;
-
-    state_file.last_applied_at = Some(Utc::now().to_rfc3339());
-    state_file.pending_reboot = true;
-    clear_appliance_rebuild_required(&mut state_file);
-    save_state(state, &state_file)?;
-
-    details.push("rootfs: live rollback completed from latest runtime backup snapshot".to_string());
-    append_operation_log(
-        &mut state_file,
-        "rootfs-live-rollback",
-        "success",
-        "RootFS live rollback completed",
-        Some("rootfs"),
-    );
-
-    let status = get_status(state).await;
-    Ok(UpdatesActionResult {
-        operation: "rootfs-live-rollback".to_string(),
-        success: true,
-        message: "rootfs live rollback completed".to_string(),
         details,
         status,
     })

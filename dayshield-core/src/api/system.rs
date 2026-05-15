@@ -13,7 +13,6 @@
 //! - `POST /system/updates/rollback` - rollback latest applied update transaction
 //! - `POST /system/updates/validate` - validate applied update state
 //! - `POST /system/updates/appliance-rebuild-complete` - clear pending appliance rebuild status
-//! - `POST /system/updates/rootfs-live-rollback` - rollback rootfs live update from latest backup snapshot
 
 use std::sync::Arc;
 
@@ -278,7 +277,7 @@ pub async fn rollback_updates(
             Json(serde_json::json!({
                 "operation": "rollback",
                 "success": false,
-                "message": "rootfs rollback is not supported in artifact update flow; use /system/updates/rootfs-live-rollback for runtime rollback",
+                "message": "rootfs rollback is not supported on a running appliance; rebuild and publish appliance artifacts instead",
                 "details": [],
                 "status": update::get_status(&state).await
             })),
@@ -326,7 +325,7 @@ pub async fn validate_updates(
             Json(serde_json::json!({
                 "operation": "validate",
                 "success": false,
-                "message": "rootfs validation is not supported in artifact update flow; use /system/updates/rootfs-live-rollback for runtime rollback checks",
+                "message": "rootfs validation is not supported on a running appliance; rebuild and publish appliance artifacts instead",
                 "details": [],
                 "status": update::get_status(&state).await
             })),
@@ -345,14 +344,4 @@ pub async fn mark_appliance_rebuild_complete(
 ) -> Result<impl IntoResponse, SystemApiError> {
     update::mark_appliance_rebuild_complete(&state).map_err(SystemApiError::StorageError)?;
     Ok(Json(update::get_status(&state).await))
-}
-
-/// Handler: rollback rootfs live update using the latest snapshot backup.
-pub async fn rollback_rootfs_live_update(
-    State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, SystemApiError> {
-    let result = update::rollback_rootfs_live_update(&state)
-        .await
-        .map_err(SystemApiError::StorageError)?;
-    Ok(Json(result))
 }

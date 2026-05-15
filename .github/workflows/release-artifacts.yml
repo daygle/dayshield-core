@@ -101,6 +101,8 @@ jobs:
           UI_DIR: deps/dayshield-ui
 
       - name: Build UI
+        env:
+          GITHUB_RELEASE_TAG: ${{ steps.version.outputs.VERSION }}
         run: |
           cd deps/dayshield-ui
           npm ci --no-audit --no-fund

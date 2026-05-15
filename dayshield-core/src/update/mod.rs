@@ -347,6 +347,9 @@ pub struct ComponentState {
     // New: Version tracking for artifact-based updates
     pub current_version: Option<String>,
     pub last_applied_version: Option<String>,
+    pub remote_version: Option<String>,
+    #[serde(default)]
+    pub update_available: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1307,87 +1310,31 @@ async fn extract_and_deploy_artifact(
 async fn build_component_status(
     settings: &UpdateSettings,
     state_file: &UpdateStateFile,
-    registry_manifest: Option<&RegistryManifest>,
-    registry_error: Option<&str>,
     component: RepoComponent,
 ) -> ComponentUpdateStatus {
     let (repo_path, remote_url, branch) = component_config(settings, component);
     let saved = find_component_state(state_file, component);
 
-    // Registry mode: compare installed tracked version to latest registry version.
+    // Registry mode reads cached state from the most recent explicit check
+    // (manual or scheduled) and does not query the registry during status polls.
     if settings.update_mode == "registry" {
-        return match registry_manifest {
-            Some(manifest) => {
-                if let Some(artifact) = manifest
-                    .components
-                    .iter()
-                    .find(|a| a.component == component.as_str())
-                {
-                    let current_version = saved
-                        .and_then(|s| s.current_version.clone())
-                        .or_else(|| saved.and_then(|s| s.last_applied_version.clone()));
-                    let update_available = match &current_version {
-                        Some(v) => v != &artifact.version,
-                        None => false,
-                    };
-
-                    ComponentUpdateStatus {
-                        component: component.as_str().to_string(),
-                        repo_path,
-                        branch,
-                        valid_repo: true,
-                        dirty_worktree: false,
-                        current_commit: None,
-                        remote_commit: None,
-                        current_version,
-                        remote_version: Some(artifact.version.clone()),
-                        update_available,
-                        rollback_commit: saved.and_then(|s| s.rollback_commit.clone()),
-                        last_applied_commit: None,
-                        last_applied_version: saved.and_then(|s| s.last_applied_version.clone()),
-                        last_error: saved.and_then(|s| s.last_error.clone()),
-                    }
-                } else {
-                    ComponentUpdateStatus {
-                        component: component.as_str().to_string(),
-                        repo_path,
-                        branch,
-                        valid_repo: true,
-                        dirty_worktree: false,
-                        update_available: false,
-                        current_commit: None,
-                        remote_commit: None,
-                        current_version: saved.and_then(|s| s.current_version.clone()),
-                        remote_version: None,
-                        rollback_commit: saved.and_then(|s| s.rollback_commit.clone()),
-                        last_applied_commit: None,
-                        last_applied_version: saved.and_then(|s| s.last_applied_version.clone()),
-                        last_error: Some(format!(
-                            "component '{}' missing from registry manifest",
-                            component.as_str()
-                        )),
-                    }
-                }
-            }
-            None => ComponentUpdateStatus {
-                component: component.as_str().to_string(),
-                repo_path,
-                branch,
-                valid_repo: false,
-                dirty_worktree: false,
-                update_available: false,
-                current_commit: None,
-                remote_commit: None,
-                current_version: saved.and_then(|s| s.current_version.clone()),
-                remote_version: None,
-                rollback_commit: saved.and_then(|s| s.rollback_commit.clone()),
-                last_applied_commit: None,
-                last_applied_version: saved.and_then(|s| s.last_applied_version.clone()),
-                last_error: Some(format!(
-                    "failed to query registry: {}",
-                    registry_error.unwrap_or("missing manifest")
-                )),
-            },
+        return ComponentUpdateStatus {
+            component: component.as_str().to_string(),
+            repo_path,
+            branch,
+            valid_repo: true,
+            dirty_worktree: false,
+            current_commit: None,
+            remote_commit: None,
+            current_version: saved
+                .and_then(|s| s.current_version.clone())
+                .or_else(|| saved.and_then(|s| s.last_applied_version.clone())),
+            remote_version: saved.and_then(|s| s.remote_version.clone()),
+            update_available: saved.map(|s| s.update_available).unwrap_or(false),
+            rollback_commit: saved.and_then(|s| s.rollback_commit.clone()),
+            last_applied_commit: None,
+            last_applied_version: saved.and_then(|s| s.last_applied_version.clone()),
+            last_error: saved.and_then(|s| s.last_error.clone()),
         };
     }
 
@@ -1434,28 +1381,15 @@ pub async fn get_status(state: &AppState) -> UpdatesStatus {
     let settings = load_settings(state);
     let state_file = load_state(state);
 
-    let (registry_manifest, registry_error) = if settings.update_mode == "registry" {
-        match query_registry(&settings.registry_url).await {
-            Ok(manifest) => (Some(manifest), None),
-            Err(err) => (None, Some(err.to_string())),
-        }
-    } else {
-        (None, None)
-    };
-
     let core = build_component_status(
         &settings,
         &state_file,
-        registry_manifest.as_ref(),
-        registry_error.as_deref(),
         RepoComponent::Core,
     )
     .await;
     let ui = build_component_status(
         &settings,
         &state_file,
-        registry_manifest.as_ref(),
-        registry_error.as_deref(),
         RepoComponent::Ui,
     )
     .await;
@@ -1481,8 +1415,30 @@ pub async fn get_status(state: &AppState) -> UpdatesStatus {
     }
 }
 
+enum CheckTrigger {
+    Manual,
+    Scheduled,
+}
+
+impl CheckTrigger {
+    fn as_str(&self) -> &'static str {
+        match self {
+            CheckTrigger::Manual => "manual",
+            CheckTrigger::Scheduled => "scheduled",
+        }
+    }
+}
+
 pub async fn check_for_updates(state: &AppState) -> Result<UpdatesStatus> {
+    check_for_updates_with_trigger(state, CheckTrigger::Manual).await
+}
+
+async fn check_for_updates_with_trigger(
+    state: &AppState,
+    trigger: CheckTrigger,
+) -> Result<UpdatesStatus> {
     let _guard = op_lock().lock().await;
+    let source = trigger.as_str();
 
     let now = Utc::now().to_rfc3339();
     let mut state_file = load_state(state);
@@ -1491,7 +1447,7 @@ pub async fn check_for_updates(state: &AppState) -> Result<UpdatesStatus> {
         &mut state_file,
         "check",
         "info",
-        "Update check started",
+        format!("{source} update check started"),
         None,
     );
     save_state(state, &state_file)?;
@@ -1503,25 +1459,46 @@ pub async fn check_for_updates(state: &AppState) -> Result<UpdatesStatus> {
             &mut failed_state,
             "check",
             "error",
-            format!("Update check failed: {err}"),
+            format!("{source} update check failed: {err}"),
             None,
         );
         save_state(state, &failed_state)?;
         return Err(err);
     }
 
+    let status = get_status(state).await;
+    let available_components: Vec<String> = status
+        .components
+        .iter()
+        .filter(|component| component.update_available)
+        .map(|component| component.component.clone())
+        .collect();
+
     let mut done_state = load_state(state);
-    append_operation_log(
-        &mut done_state,
-        "check",
-        "success",
-        "Update check completed",
-        None,
-    );
+    if available_components.is_empty() {
+        append_operation_log(
+            &mut done_state,
+            "check",
+            "info",
+            format!("{source} update check completed: no updates found"),
+            None,
+        );
+    } else {
+        append_operation_log(
+            &mut done_state,
+            "check",
+            "success",
+            format!(
+                "{source} update check completed: updates found for {}",
+                available_components.join(", ")
+            ),
+            None,
+        );
+    }
     save_state(state, &done_state)?;
     info!("updates: registry check completed successfully");
 
-    Ok(get_status(state).await)
+    Ok(status)
 }
 
 /// Check registry for available component updates
@@ -1531,6 +1508,7 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
     
     match query_registry(&settings.registry_url).await {
         Ok(manifest) => {
+            let mut seen_components = std::collections::HashSet::new();
             // Bootstrap tracked current version once for legacy systems that
             // predate version tracking. This prevents perpetual false positives.
             for artifact in &manifest.components {
@@ -1539,6 +1517,7 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
                     "ui" => RepoComponent::Ui,
                     _ => continue,
                 };
+                seen_components.insert(comp.as_str().to_string());
                 
                 let comp_state = ensure_component_state(&mut state_file, comp);
                 if comp_state.current_version.is_none() {
@@ -1553,12 +1532,36 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
                         );
                     }
                 }
+
+                let update_available = comp_state
+                    .current_version
+                    .as_ref()
+                    .map(|current| current != &artifact.version)
+                    .unwrap_or(false);
+                comp_state.remote_version = Some(artifact.version.clone());
+                comp_state.update_available = update_available;
+                comp_state.last_error = None;
                 
                 info!(
                     component = %artifact.component,
                     version = %artifact.version,
+                    update_available,
                     "updates: registry has available version"
                 );
+            }
+
+            for component in [RepoComponent::Core, RepoComponent::Ui] {
+                if seen_components.contains(component.as_str()) {
+                    continue;
+                }
+
+                let comp_state = ensure_component_state(&mut state_file, component);
+                comp_state.remote_version = None;
+                comp_state.update_available = false;
+                comp_state.last_error = Some(format!(
+                    "component '{}' missing from registry manifest",
+                    component.as_str()
+                ));
             }
             
             save_state(state, &state_file)?;
@@ -2183,7 +2186,7 @@ pub async fn start_update_checker(state: std::sync::Arc<AppState>) {
                 continue;
             }
 
-            match check_for_updates(&state).await {
+            match check_for_updates_with_trigger(&state, CheckTrigger::Scheduled).await {
                 Ok(status) => {
                     let available = status.components.iter().filter(|c| c.update_available).count();
                     info!(available, "updates: periodic check completed");

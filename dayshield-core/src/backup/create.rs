@@ -37,7 +37,7 @@ use tracing::info;
 use crate::config::ConfigStore;
 
 use super::encrypt;
-use super::model::{BackupMetadata, Subsystem};
+use super::model::{BackupMetadata, BackupType, Subsystem};
 use super::verify::sha256_hex;
 
 // ---------------------------------------------------------------------------
@@ -94,6 +94,7 @@ pub fn create_backup(
     encrypt_backup: bool,
     passphrase: Option<&str>,
     backup_dir: &Path,
+    backup_type: BackupType,
 ) -> Result<(PathBuf, BackupMetadata)> {
     if encrypt_backup && passphrase.map(|p| p.is_empty()).unwrap_or(true) {
         anyhow::bail!("a non-empty passphrase is required when encryption is enabled");
@@ -140,6 +141,7 @@ pub fn create_backup(
         version: APP_VERSION.to_string(),
         hostname,
         subsystems: selected.clone(),
+        backup_type,
         sha256,
         encrypted: encrypt_backup,
     };
@@ -176,7 +178,14 @@ pub fn create_backup(
         .with_context(|| format!("failed to create backup directory {}", backup_dir.display()))?;
 
     let ext = if encrypt_backup { "tar.enc" } else { "tar" };
-    let filename = format!("dayshield-backup-{created_at}.{ext}");
+    let version_tag = APP_VERSION.replace('/', "-");
+    let filename = format!(
+        "dayshield-{}-backup-v{}-{}.{}",
+        backup_type.as_str(),
+        version_tag,
+        created_at,
+        ext,
+    );
     let filepath = backup_dir.join(&filename);
 
     // Atomic write: write to .tmp then rename.
@@ -252,6 +261,7 @@ fn append_entry<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backup::model::BackupType;
     use tempfile::TempDir;
 
     fn temp_store() -> (TempDir, ConfigStore) {
@@ -265,7 +275,7 @@ mod tests {
         let backup_dir = TempDir::new().unwrap();
         let (_cfg_dir, store) = temp_store();
 
-        let (path, _meta) = create_backup(&store, None, false, None, backup_dir.path()).unwrap();
+        let (path, _meta) = create_backup(&store, None, false, None, backup_dir.path(), BackupType::Manual).unwrap();
         assert!(path.exists());
         assert!(path.extension().map(|e| e == "tar").unwrap_or(false));
     }
@@ -275,7 +285,7 @@ mod tests {
         let backup_dir = TempDir::new().unwrap();
         let (_cfg_dir, store) = temp_store();
 
-        let result = create_backup(&store, None, true, None, backup_dir.path());
+        let result = create_backup(&store, None, true, None, backup_dir.path(), BackupType::Manual);
         assert!(result.is_err());
     }
 
@@ -285,7 +295,7 @@ mod tests {
         let (_cfg_dir, store) = temp_store();
 
         let (path, _meta) =
-            create_backup(&store, None, true, Some("s3cr3t"), backup_dir.path()).unwrap();
+            create_backup(&store, None, true, Some("s3cr3t"), backup_dir.path(), BackupType::Manual).unwrap();
         assert!(path.exists());
         assert!(path.to_str().unwrap().ends_with(".tar.enc"));
     }
@@ -301,6 +311,7 @@ mod tests {
             false,
             None,
             backup_dir.path(),
+            BackupType::Manual,
         )
         .unwrap();
         assert!(path.exists());

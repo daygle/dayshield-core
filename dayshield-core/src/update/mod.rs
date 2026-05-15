@@ -13,6 +13,11 @@ use serde::{Deserialize, Serialize};
 use tokio::{process::Command, sync::Mutex};
 use tracing::{info, warn};
 
+use crate::backup::{
+    create::{create_backup, DEFAULT_BACKUP_DIR},
+    model::{BackupType, Subsystem},
+    restore::restore_backup,
+};
 use crate::state::AppState;
 
 const SETTINGS_FILE: &str = "updates_settings.json";
@@ -21,8 +26,10 @@ const DEFAULT_CORE_URL: &str = "https://github.com/daygle/dayshield-core";
 const DEFAULT_UI_URL: &str = "https://github.com/daygle/dayshield-ui";
 const DEFAULT_ROOTFS_URL: &str = "https://github.com/daygle/dayshield-rootfs";
 const RUNTIME_MARKER_DIR: &str = "/var/lib/dayshield/update";
+const RUNTIME_ROLLBACK_DIR: &str = "/var/lib/dayshield/update/rollback";
 const DEFAULT_TRUSTED_SIGNERS_FILE: &str = "/etc/dayshield/update_trusted_signers";
 const ARTIFACT_STAGING_DIR: &str = "/var/lib/dayshield/update-staging";
+const UPDATE_BACKUP_KEY_FILE: &str = "update_backup_key";
 /// GitHub Releases repository: https://github.com/daygle/dayshield-core
 /// Artifacts are attached to releases as: core-v1.2.3.tar.zst, ui-v1.2.3.tar.zst, etc.
 const DEFAULT_REGISTRY_URL: &str = "https://api.github.com/repos/daygle/dayshield-core";
@@ -115,6 +122,10 @@ fn default_auto_check_month_days() -> Vec<u8> {
 
 fn default_verify_artifact_signatures() -> bool {
     true
+}
+
+fn default_encrypt_update_config_backups() -> bool {
+    false
 }
 
 fn parse_auto_check_time(value: &str) -> Option<NaiveTime> {
@@ -256,6 +267,8 @@ pub struct UpdateSettings {
     pub update_mode: String,
     #[serde(default = "default_verify_artifact_signatures")]
     pub verify_artifact_signatures: bool,
+    #[serde(default = "default_encrypt_update_config_backups")]
+    pub encrypt_update_config_backups: bool,
 }
 
 impl Default for UpdateSettings {
@@ -284,6 +297,7 @@ impl Default for UpdateSettings {
             registry_url: default_registry_url(),
             update_mode: default_update_mode(),
             verify_artifact_signatures: default_verify_artifact_signatures(),
+            encrypt_update_config_backups: default_encrypt_update_config_backups(),
         }
     }
 }
@@ -341,6 +355,7 @@ fn ensure_registry_updatable_selection(selected_components: &[RepoComponent]) ->
 pub struct ComponentState {
     pub component: String,
     pub rollback_commit: Option<String>,
+    pub rollback_version: Option<String>,
     pub last_applied_commit: Option<String>,
     pub deployed_commit: Option<String>,
     pub last_error: Option<String>,
@@ -362,6 +377,7 @@ pub struct UpdateStateFile {
     pub pending_appliance_rebuild: bool,
     pub appliance_rebuild_reason: Option<String>,
     pub appliance_rebuild_marked_at: Option<String>,
+    pub config_rollback_path: Option<String>,
     #[serde(default)]
     pub components: Vec<ComponentState>,
     #[serde(default)]
@@ -552,6 +568,163 @@ fn component_supports_runtime_deploy(component: RepoComponent) -> bool {
 
 fn runtime_marker_path(component: RepoComponent) -> PathBuf {
     Path::new(RUNTIME_MARKER_DIR).join(format!("{}_deployed_commit", component.as_str()))
+}
+
+fn update_backup_key_path(state: &AppState) -> PathBuf {
+    config_dir(state).join(UPDATE_BACKUP_KEY_FILE)
+}
+
+fn load_or_create_update_backup_key(state: &AppState) -> Result<String> {
+    let path = update_backup_key_path(state);
+    if let Ok(existing) = fs::read_to_string(&path) {
+        let trimmed = existing.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create key directory {}", parent.display()))?;
+    }
+
+    let key = uuid::Uuid::new_v4().to_string();
+    fs::write(&path, format!("{}\n", key))
+        .with_context(|| format!("failed to write update backup key {}", path.display()))?;
+    Ok(key)
+}
+
+fn snapshot_config_for_rollback(state: &AppState, encrypt: bool) -> Result<PathBuf> {
+    let passphrase = if encrypt {
+        Some(load_or_create_update_backup_key(state)?)
+    } else {
+        None
+    };
+
+    let backup_dir = PathBuf::from(DEFAULT_BACKUP_DIR);
+    let (path, _meta) = create_backup(
+        &state.config_store,
+        Some(Subsystem::all()),
+        encrypt,
+        passphrase.as_deref(),
+        &backup_dir,
+        BackupType::Update,
+    )
+    .context("failed to create rollback config backup archive")?;
+
+    Ok(path)
+}
+
+fn restore_config_from_snapshot(state: &AppState, snapshot: &Path) -> Result<()> {
+    if !snapshot.exists() || !snapshot.is_file() {
+        anyhow::bail!("config rollback backup archive not found: {}", snapshot.display());
+    }
+
+    let payload = fs::read(snapshot)
+        .with_context(|| format!("failed to read config rollback backup {}", snapshot.display()))?;
+
+    let passphrase = if snapshot
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.ends_with(".tar.enc"))
+        .unwrap_or(false)
+    {
+        Some(load_or_create_update_backup_key(state)?)
+    } else {
+        None
+    };
+
+    restore_backup(&state.config_store, &payload, passphrase.as_deref(), None)
+        .with_context(|| format!("failed to restore config from {}", snapshot.display()))?;
+
+    Ok(())
+}
+
+fn runtime_rollback_path(component: RepoComponent) -> PathBuf {
+    match component {
+        RepoComponent::Core => Path::new(RUNTIME_ROLLBACK_DIR).join("core/dayshield-core"),
+        RepoComponent::Ui => Path::new(RUNTIME_ROLLBACK_DIR).join("ui"),
+        RepoComponent::Rootfs => Path::new(RUNTIME_ROLLBACK_DIR).join("rootfs"),
+    }
+}
+
+fn deployed_runtime_path(component: RepoComponent) -> PathBuf {
+    match component {
+        RepoComponent::Core => PathBuf::from("/usr/local/sbin/dayshield-core"),
+        RepoComponent::Ui => PathBuf::from("/usr/local/share/dayshield-ui"),
+        RepoComponent::Rootfs => PathBuf::from("/"),
+    }
+}
+
+fn snapshot_runtime_for_rollback(component: RepoComponent) -> Result<()> {
+    if !component_supports_runtime_deploy(component) {
+        return Ok(());
+    }
+
+    let source = deployed_runtime_path(component);
+    let backup = runtime_rollback_path(component);
+
+    if let Some(parent) = backup.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create rollback directory {}", parent.display()))?;
+    }
+
+    if backup.exists() {
+        if backup.is_dir() {
+            fs::remove_dir_all(&backup)
+                .with_context(|| format!("failed to clear rollback snapshot {}", backup.display()))?;
+        } else {
+            fs::remove_file(&backup)
+                .with_context(|| format!("failed to clear rollback snapshot {}", backup.display()))?;
+        }
+    }
+
+    if !source.exists() {
+        anyhow::bail!(
+            "{} runtime artifact missing at {}; cannot create rollback snapshot",
+            component.as_str(),
+            source.display()
+        );
+    }
+
+    if source.is_dir() {
+        copy_dir_recursive(&source, &backup)?;
+    } else {
+        fs::copy(&source, &backup).with_context(|| {
+            format!(
+                "failed to snapshot {} -> {}",
+                source.display(),
+                backup.display()
+            )
+        })?;
+        let perms = fs::metadata(&source)?.permissions();
+        fs::set_permissions(&backup, perms)?;
+    }
+
+    Ok(())
+}
+
+fn restore_runtime_from_snapshot(component: RepoComponent) -> Result<()> {
+    if !component_supports_runtime_deploy(component) {
+        return Ok(());
+    }
+
+    let snapshot = runtime_rollback_path(component);
+    let target = deployed_runtime_path(component);
+
+    if !snapshot.exists() {
+        anyhow::bail!(
+            "{}: no rollback snapshot available at {}",
+            component.as_str(),
+            snapshot.display()
+        );
+    }
+
+    match component {
+        RepoComponent::Core => install_file_atomic(&snapshot, &target),
+        RepoComponent::Ui => install_dir_atomic(&snapshot, &target),
+        RepoComponent::Rootfs => Ok(()),
+    }
 }
 
 fn save_runtime_marker(component: RepoComponent, commit: &str) -> Result<()> {
@@ -1630,10 +1803,59 @@ async fn apply_updates_registry(
             );
         }
     }
+
+    let config_snapshot = match snapshot_config_for_rollback(state, settings.encrypt_update_config_backups) {
+        Ok(path) => path,
+        Err(err) => {
+            let msg = format!("failed to create config backup snapshot: {err}");
+            append_operation_log(&mut state_file, "apply", "error", &msg, None);
+            save_state(state, &state_file)?;
+            return Ok(UpdatesActionResult {
+                operation: "apply".to_string(),
+                success: false,
+                message: msg.clone(),
+                details: vec![msg],
+                status: get_status(state).await,
+            });
+        }
+    };
+
+    state_file.config_rollback_path = Some(config_snapshot.to_string_lossy().to_string());
+    append_operation_log(
+        &mut state_file,
+        "apply",
+        "info",
+        format!("Created config backup archive: {}", config_snapshot.display()),
+        None,
+    );
+    save_state(state, &state_file)?;
     
-    // Step 3: Backup current versions
-    // Create backups of current deployments
-    // (In a production system, you'd backup actual files here)
+    // Step 3: Backup currently deployed runtime artifacts for rollback.
+    for comp in &components_to_update {
+        if !component_supports_runtime_deploy(*comp) {
+            continue;
+        }
+
+        if let Err(err) = snapshot_runtime_for_rollback(*comp) {
+            let msg = format!("failed to create rollback snapshot for {}: {}", comp.as_str(), err);
+            append_operation_log(&mut state_file, "apply", "error", &msg, Some(comp.as_str()));
+            save_state(state, &state_file)?;
+            return Ok(UpdatesActionResult {
+                operation: "apply".to_string(),
+                success: false,
+                message: msg.clone(),
+                details: vec![msg],
+                status: get_status(state).await,
+            });
+        }
+
+        let entry = ensure_component_state(&mut state_file, *comp);
+        entry.rollback_version = entry
+            .current_version
+            .clone()
+            .or_else(|| entry.last_applied_version.clone());
+    }
+
     details.push("created backup snapshots".to_string());
     append_operation_log(
         &mut state_file,
@@ -1817,6 +2039,7 @@ pub async fn rollback_updates(
     check_atomicity_constraint(state, &selected, force_partial_apply).await?;
 
     let mut details = Vec::new();
+    let mut rolled_back_components: usize = 0;
     append_operation_log(
         &mut state_file,
         "rollback",
@@ -1828,6 +2051,68 @@ pub async fn rollback_updates(
     info!(component = ?component, "updates: rollback started");
 
     for comp in selected {
+        if settings.update_mode == "registry" {
+            let previous_version = {
+                let entry = ensure_component_state(&mut state_file, comp);
+                entry.rollback_version.clone()
+            };
+
+            let target_version = match previous_version {
+                Some(version) => version,
+                None => {
+                    let msg = format!(
+                        "{}: no rollback snapshot/version available",
+                        comp.as_str()
+                    );
+                    details.push(msg.clone());
+                    append_operation_log(&mut state_file, "rollback", "error", msg.clone(), Some(comp.as_str()));
+                    continue;
+                }
+            };
+
+            let current_before = {
+                let entry = ensure_component_state(&mut state_file, comp);
+                entry.current_version.clone()
+            };
+
+            if let Err(err) = restore_runtime_from_snapshot(comp) {
+                let msg = format!("{}: rollback failed ({err})", comp.as_str());
+                {
+                    let entry = ensure_component_state(&mut state_file, comp);
+                    entry.last_error = Some(msg.clone());
+                }
+                append_operation_log(&mut state_file, "rollback", "error", msg.clone(), Some(comp.as_str()));
+                save_state(state, &state_file)?;
+                let status = get_status(state).await;
+                return Ok(UpdatesActionResult {
+                    operation: "rollback".to_string(),
+                    success: false,
+                    message: "rollback failed".to_string(),
+                    details: vec![msg],
+                    status,
+                });
+            }
+
+            {
+                let entry = ensure_component_state(&mut state_file, comp);
+                entry.current_version = Some(target_version.clone());
+                entry.last_applied_version = Some(target_version.clone());
+                entry.rollback_version = current_before;
+                entry.last_error = None;
+            }
+
+            details.push(format!("{}: rolled back to {}", comp.as_str(), target_version));
+            append_operation_log(
+                &mut state_file,
+                "rollback",
+                "success",
+                format!("Rolled back {} to {}", comp.as_str(), target_version),
+                Some(comp.as_str()),
+            );
+            rolled_back_components += 1;
+            continue;
+        }
+
         let (repo_path, _remote_url, _branch) = component_config(&settings, comp);
 
         if let Err(err) = ensure_repo_writable(&repo_path) {
@@ -1903,6 +2188,74 @@ pub async fn rollback_updates(
             format!("Rolled back {}", comp.as_str()),
             Some(comp.as_str()),
         );
+        rolled_back_components += 1;
+    }
+
+    if rolled_back_components == 0 {
+        append_operation_log(
+            &mut state_file,
+            "rollback",
+            "error",
+            "Rollback failed: no components could be rolled back",
+            None,
+        );
+        save_state(state, &state_file)?;
+        let status = get_status(state).await;
+        return Ok(UpdatesActionResult {
+            operation: "rollback".to_string(),
+            success: false,
+            message: "rollback failed: no rollback snapshot available".to_string(),
+            details,
+            status,
+        });
+    }
+
+    if settings.update_mode == "registry" {
+        let config_snapshot = state_file.config_rollback_path.clone();
+        let snapshot_path = match config_snapshot {
+            Some(path) => PathBuf::from(path),
+            None => {
+                append_operation_log(
+                    &mut state_file,
+                    "rollback",
+                    "error",
+                    "Rollback failed: no config backup archive available",
+                    None,
+                );
+                save_state(state, &state_file)?;
+                let status = get_status(state).await;
+                return Ok(UpdatesActionResult {
+                    operation: "rollback".to_string(),
+                    success: false,
+                    message: "rollback failed: no config backup archive available".to_string(),
+                    details,
+                    status,
+                });
+            }
+        };
+
+        if let Err(err) = restore_config_from_snapshot(state, &snapshot_path) {
+            let msg = format!("failed to restore config snapshot ({}): {}", snapshot_path.display(), err);
+            append_operation_log(&mut state_file, "rollback", "error", &msg, None);
+            save_state(state, &state_file)?;
+            let status = get_status(state).await;
+            return Ok(UpdatesActionResult {
+                operation: "rollback".to_string(),
+                success: false,
+                message: "rollback failed".to_string(),
+                details: vec![msg],
+                status,
+            });
+        }
+
+        append_operation_log(
+            &mut state_file,
+            "rollback",
+            "success",
+            format!("Restored config backup archive: {}", snapshot_path.display()),
+            None,
+        );
+        state_file.config_rollback_path = None;
     }
 
     state_file.last_applied_at = Some(Utc::now().to_rfc3339());

@@ -27,7 +27,7 @@ use crate::state::AppState;
 
 use crate::backup::{
     create::{create_backup, DEFAULT_BACKUP_DIR},
-    model::{BackupMetadata, BackupScheduleConfig, Subsystem},
+    model::{BackupMetadata, BackupScheduleConfig, BackupType, Subsystem},
     restore::restore_backup,
     scheduler::{load_schedule, prune_backups, save_schedule},
 };
@@ -97,6 +97,10 @@ pub struct CreateBackupResponse {
     pub size_bytes: u64,
     /// Whether the backup is encrypted.
     pub encrypted: bool,
+    /// Type/source of backup.
+    pub backup_type: String,
+    /// Application version in backup metadata.
+    pub version: String,
 }
 
 /// A single entry in the `GET /backup/list` response.
@@ -106,6 +110,12 @@ pub struct BackupListEntry {
     pub size_bytes: u64,
     /// Whether the file appears to be encrypted (`.tar.enc` extension).
     pub encrypted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 /// Query parameters for `POST /backup/restore`.
@@ -145,6 +155,7 @@ pub async fn create_handler(
         req.encrypt,
         passphrase.as_deref(),
         &backup_dir,
+        BackupType::Manual,
     )
     .map_err(BackupApiError::StorageError)?;
 
@@ -166,6 +177,8 @@ pub async fn create_handler(
         created_at: meta.created_at,
         size_bytes,
         encrypted: meta.encrypted,
+        backup_type: meta.backup_type.as_str().to_string(),
+        version: meta.version,
     }))
 }
 
@@ -192,10 +205,14 @@ pub async fn list_handler(
             }
             let size = e.metadata().ok()?.len();
             let encrypted = name.ends_with(".tar.enc");
+            let (created_at, backup_type, version) = parse_backup_filename_meta(&name);
             Some(BackupListEntry {
                 filename: name,
                 size_bytes: size,
                 encrypted,
+                created_at,
+                backup_type,
+                version,
             })
         })
         .collect();
@@ -393,8 +410,46 @@ fn safe_backup_path(filename: &str) -> Result<PathBuf, BackupApiError> {
 
 /// Return `true` if `name` looks like a DayShield backup filename.
 fn is_backup_filename(name: &str) -> bool {
-    (name.starts_with("dayshield-backup-") && name.ends_with(".tar"))
-        || (name.starts_with("dayshield-backup-") && name.ends_with(".tar.enc"))
+    parse_backup_filename_meta(name).0.is_some()
+}
+
+fn parse_backup_filename_meta(name: &str) -> (Option<u64>, Option<String>, Option<String>) {
+    let stem = if let Some(stem) = name.strip_suffix(".tar.enc") {
+        stem
+    } else if let Some(stem) = name.strip_suffix(".tar") {
+        stem
+    } else {
+        return (None, None, None);
+    };
+
+    if let Some(rest) = stem.strip_prefix("dayshield-backup-") {
+        if let Ok(ts) = rest.parse::<u64>() {
+            return (Some(ts), Some("manual".to_string()), None);
+        }
+        return (None, None, None);
+    }
+
+    let Some(rest) = stem.strip_prefix("dayshield-") else {
+        return (None, None, None);
+    };
+    let Some((kind, tail)) = rest.split_once("-backup-v") else {
+        return (None, None, None);
+    };
+
+    if !matches!(kind, "manual" | "scheduled" | "update") {
+        return (None, None, None);
+    }
+
+    let Some(idx) = tail.rfind('-') else {
+        return (None, None, None);
+    };
+    let version = tail[..idx].to_string();
+    let ts_raw = &tail[idx + 1..];
+    let Ok(ts) = ts_raw.parse::<u64>() else {
+        return (None, None, None);
+    };
+
+    (Some(ts), Some(kind.to_string()), Some(version))
 }
 
 /// Parse a comma-separated list of subsystem names.
@@ -431,6 +486,8 @@ mod tests {
     fn safe_backup_path_accepts_valid_names() {
         assert!(safe_backup_path("dayshield-backup-1700000000.tar").is_ok());
         assert!(safe_backup_path("dayshield-backup-1700000000.tar.enc").is_ok());
+        assert!(safe_backup_path("dayshield-manual-backup-v1.0.0-1700000000.tar").is_ok());
+        assert!(safe_backup_path("dayshield-update-backup-v1.0.1-1700000000.tar.enc").is_ok());
     }
 
     #[test]

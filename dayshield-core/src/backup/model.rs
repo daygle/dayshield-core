@@ -35,6 +35,30 @@ pub enum Subsystem {
     Acme,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackupType {
+    Manual,
+    Scheduled,
+    Update,
+}
+
+impl BackupType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BackupType::Manual => "manual",
+            BackupType::Scheduled => "scheduled",
+            BackupType::Update => "update",
+        }
+    }
+}
+
+impl Default for BackupType {
+    fn default() -> Self {
+        BackupType::Manual
+    }
+}
+
 impl Subsystem {
     /// Return all available subsystems in canonical order.
     pub fn all() -> Vec<Subsystem> {
@@ -86,6 +110,9 @@ pub struct BackupMetadata {
     pub hostname: String,
     /// Which subsystems are included in this backup.
     pub subsystems: Vec<Subsystem>,
+    /// Why this backup was created.
+    #[serde(default)]
+    pub backup_type: BackupType,
     /// SHA-256 hex digest of the config content bytes.
     pub sha256: String,
     /// Whether the archive body is AES-256-GCM encrypted.

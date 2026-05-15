@@ -15,7 +15,7 @@ use tracing::{error, info, warn};
 use crate::state::AppState;
 
 use super::create::{create_backup, DEFAULT_BACKUP_DIR};
-use super::model::BackupScheduleConfig;
+use super::model::{BackupScheduleConfig, BackupType};
 
 // ---------------------------------------------------------------------------
 // Permission-aware write helper
@@ -148,7 +148,14 @@ async fn scheduler_loop(state: Arc<AppState>) {
 
         let result = {
             let p = passphrase.as_deref();
-            create_backup(&state.config_store, None, encrypt, p, &backup_dir)
+            create_backup(
+                &state.config_store,
+                None,
+                encrypt,
+                p,
+                &backup_dir,
+                BackupType::Scheduled,
+            )
         };
 
         match result {
@@ -180,7 +187,7 @@ async fn scheduler_loop(state: Arc<AppState>) {
 /// Delete the oldest backup files in `dir` so that at most `retain_count`
 /// remain.
 ///
-/// Files matching `dayshield-backup-*.tar` and `dayshield-backup-*.tar.enc`
+/// Files matching `dayshield-*-backup-*.tar` and `dayshield-*-backup-*.tar.enc`
 /// are considered.  They are sorted by name (which is timestamp-based) so the
 /// oldest sort first.
 pub fn prune_backups(dir: &Path, retain_count: usize) -> Result<()> {
@@ -232,8 +239,8 @@ fn is_backup_file(path: &Path) -> bool {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("");
-    (name.starts_with("dayshield-backup-") && name.ends_with(".tar"))
-        || (name.starts_with("dayshield-backup-") && name.ends_with(".tar.enc"))
+    (name.starts_with("dayshield-") && name.contains("-backup-") && name.ends_with(".tar"))
+        || (name.starts_with("dayshield-") && name.contains("-backup-") && name.ends_with(".tar.enc"))
 }
 
 // ---------------------------------------------------------------------------
@@ -284,10 +291,10 @@ mod tests {
     #[test]
     fn is_backup_file_matches_expected_patterns() {
         assert!(is_backup_file(Path::new(
-            "dayshield-backup-1700000000.tar"
+            "dayshield-manual-backup-v1.0.0-1700000000.tar"
         )));
         assert!(is_backup_file(Path::new(
-            "dayshield-backup-1700000000.tar.enc"
+            "dayshield-update-backup-v1.0.1-1700000000.tar.enc"
         )));
         assert!(!is_backup_file(Path::new("config.json")));
         assert!(!is_backup_file(Path::new("random.tar")));

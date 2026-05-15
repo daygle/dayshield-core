@@ -393,6 +393,10 @@ pub struct UpdateLogEntry {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub component: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1165,12 +1169,26 @@ fn append_operation_log(
     message: impl Into<String>,
     component: Option<&str>,
 ) {
+    append_operation_log_with_versions(state_file, operation, level, message, component, None, None);
+}
+
+fn append_operation_log_with_versions(
+    state_file: &mut UpdateStateFile,
+    operation: &str,
+    level: &str,
+    message: impl Into<String>,
+    component: Option<&str>,
+    from_version: Option<&str>,
+    to_version: Option<&str>,
+) {
     state_file.operation_logs.push(UpdateLogEntry {
         timestamp: Utc::now().to_rfc3339(),
         operation: operation.to_string(),
         level: level.to_string(),
         message: message.into(),
         component: component.map(|v| v.to_string()),
+        from_version: from_version.map(|v| v.to_string()),
+        to_version: to_version.map(|v| v.to_string()),
     });
 
     const MAX_LOG_ENTRIES: usize = 250;
@@ -1875,17 +1893,26 @@ async fn apply_updates_registry(
         
         match extract_and_deploy_artifact(comp, artifact_path, None).await {
             Ok(_) => {
+                let previous_version = {
+                    let entry = ensure_component_state(&mut state_file, comp);
+                    entry.current_version.clone()
+                };
                 let entry = ensure_component_state(&mut state_file, comp);
                 entry.current_version = Some(version.clone());
                 entry.last_applied_version = Some(version.clone());
                 entry.last_error = None;
                 details.push(format!("deployed {}-{}", component_name, version));
-                append_operation_log(
+                append_operation_log_with_versions(
                     &mut state_file,
                     "apply",
                     "success",
-                    format!("Deployed {}-{}", component_name, version),
+                    match previous_version.as_deref() {
+                        Some(prev) => format!("Deployed {} from v{} to v{}", component_name, prev, version),
+                        None => format!("Deployed {} to v{}", component_name, version),
+                    },
                     Some(component_name),
+                    previous_version.as_deref(),
+                    Some(version.as_str()),
                 );
             },
             Err(err) => {
@@ -2097,17 +2124,27 @@ pub async fn rollback_updates(
                 let entry = ensure_component_state(&mut state_file, comp);
                 entry.current_version = Some(target_version.clone());
                 entry.last_applied_version = Some(target_version.clone());
-                entry.rollback_version = current_before;
+                entry.rollback_version = current_before.clone();
                 entry.last_error = None;
             }
 
             details.push(format!("{}: rolled back to {}", comp.as_str(), target_version));
-            append_operation_log(
+            append_operation_log_with_versions(
                 &mut state_file,
                 "rollback",
                 "success",
-                format!("Rolled back {} to {}", comp.as_str(), target_version),
+                match current_before.as_deref() {
+                    Some(prev) => format!(
+                        "Rolled back {} from v{} to v{}",
+                        comp.as_str(),
+                        prev,
+                        target_version
+                    ),
+                    None => format!("Rolled back {} to v{}", comp.as_str(), target_version),
+                },
                 Some(comp.as_str()),
+                current_before.as_deref(),
+                Some(target_version.as_str()),
             );
             rolled_back_components += 1;
             continue;
@@ -2414,16 +2451,36 @@ pub async fn validate_updates(
 
     info!(success, "updates: validation completed");
 
+    let core_version = status
+        .components
+        .iter()
+        .find(|c| c.component == "core")
+        .and_then(|c| c.current_version.clone());
+    let ui_version = status
+        .components
+        .iter()
+        .find(|c| c.component == "ui")
+        .and_then(|c| c.current_version.clone());
+
+    let validation_summary = if success {
+        match (core_version.as_deref(), ui_version.as_deref()) {
+            (Some(core), Some(ui)) => {
+                format!("Validation completed successfully (Core v{core}/UI v{ui})")
+            }
+            _ => "Validation completed successfully".to_string(),
+        }
+    } else {
+        "Validation failed".to_string()
+    };
+
     let mut state_file = load_state(state);
-    append_operation_log(
+    append_operation_log_with_versions(
         &mut state_file,
         "validate",
         if success { "success" } else { "error" },
-        if success {
-            "Validation completed successfully".to_string()
-        } else {
-            "Validation failed".to_string()
-        },
+        validation_summary,
+        None,
+        None,
         None,
     );
     save_state(state, &state_file)?;

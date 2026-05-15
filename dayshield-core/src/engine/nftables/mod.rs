@@ -671,6 +671,7 @@ fn rule_targets_chain(rule: &FirewallRule, chain: FilterChain) -> bool {
         FirewallDirection::Input => chain == FilterChain::Input,
         FirewallDirection::Forward => chain == FilterChain::Forward,
         FirewallDirection::Output => chain == FilterChain::Output,
+        FirewallDirection::Both => chain == FilterChain::Input || chain == FilterChain::Output,
     }
 }
 

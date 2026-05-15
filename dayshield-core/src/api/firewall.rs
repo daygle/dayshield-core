@@ -159,7 +159,7 @@ pub struct CreateRuleRequest {
     pub destination_port: Option<u16>,
     pub action: Action,
     #[serde(default = "default_direction")]
-    pub direction: FirewallDirection,
+    pub direction: FirewallDirection, // Now supports Both
     pub interface: Option<String>,
     pub log: bool,
     #[serde(default = "default_true")]

@@ -404,12 +404,14 @@ pub struct FirewallSchedule {
 }
 
 /// Which nftables filter chain a firewall rule should target.
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FirewallDirection {
     Input,
     Forward,
     Output,
+    Both,
 }
 
 fn default_firewall_direction() -> FirewallDirection {

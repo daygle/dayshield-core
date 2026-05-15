@@ -10,6 +10,8 @@
 //! When `enabled` is `false`, both daemons are stopped and their config files
 //! are left untouched (only the service unit is stopped).
 
+use std::path::Path;
+
 use tokio::process::Command;
 use tracing::{info, warn};
 
@@ -46,12 +48,18 @@ pub async fn apply_ntp_config(cfg: &NtpConfig) -> Result<(), NtpError> {
     if !cfg.enabled {
         info!("NTP disabled - stopping daemons");
         stop_service("systemd-timesyncd").await;
-        stop_service("chrony").await;
+        stop_chrony_services().await;
         return Ok(());
     }
 
     if cfg.serve_clients {
-        apply_chrony(cfg).await
+        let chrony_unit = detect_chrony_unit().ok_or_else(|| NtpError::ServiceCommand {
+            service: "chrony".into(),
+            message:
+                "serve_clients requires chrony to be installed (missing chrony.service/chronyd.service)"
+                    .into(),
+        })?;
+        apply_chrony(cfg, chrony_unit).await
     } else {
         apply_timesyncd(cfg).await
     }
@@ -86,7 +94,7 @@ async fn apply_timesyncd(cfg: &NtpConfig) -> Result<(), NtpError> {
         })?;
 
     // Stop chrony if it was previously running.
-    stop_service("chrony").await;
+    stop_chrony_services().await;
 
     restart_service("systemd-timesyncd").await?;
     info!("systemd-timesyncd restarted");
@@ -99,7 +107,7 @@ async fn apply_timesyncd(cfg: &NtpConfig) -> Result<(), NtpError> {
 
 const CHRONY_CONF: &str = "/etc/chrony/chrony.conf";
 
-async fn apply_chrony(cfg: &NtpConfig) -> Result<(), NtpError> {
+async fn apply_chrony(cfg: &NtpConfig, chrony_unit: &'static str) -> Result<(), NtpError> {
     let mut lines: Vec<String> = vec![
         "# Managed by DayShield - do not edit manually".into(),
         String::new(),
@@ -153,9 +161,29 @@ async fn apply_chrony(cfg: &NtpConfig) -> Result<(), NtpError> {
     // Stop timesyncd if it was previously running.
     stop_service("systemd-timesyncd").await;
 
-    restart_service("chrony").await?;
-    info!("chrony restarted");
+    restart_service(chrony_unit).await?;
+    info!(unit = chrony_unit, "chrony restarted");
     Ok(())
+}
+
+fn detect_chrony_unit() -> Option<&'static str> {
+    const CANDIDATES: [&str; 2] = ["chrony", "chronyd"];
+    const UNIT_DIRS: [&str; 3] = ["/etc/systemd/system", "/lib/systemd/system", "/usr/lib/systemd/system"];
+
+    for unit in CANDIDATES {
+        let service_name = format!("{unit}.service");
+        for dir in UNIT_DIRS {
+            if Path::new(dir).join(&service_name).exists() {
+                return Some(unit);
+            }
+        }
+    }
+    None
+}
+
+async fn stop_chrony_services() {
+    stop_service("chrony").await;
+    stop_service("chronyd").await;
 }
 
 // ---------------------------------------------------------------------------

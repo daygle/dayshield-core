@@ -92,8 +92,6 @@ pub async fn update_config(
         return Err(NtpApiError::ValidationFailed(msg));
     }
 
-    ntp_config::save(&state.config_store, req.clone()).map_err(NtpApiError::StorageError)?;
-
     info!(
         enabled = req.enabled,
         serve_clients = req.serve_clients,
@@ -102,6 +100,10 @@ pub async fn update_config(
     );
 
     apply_ntp_config(&req).await.map_err(NtpApiError::from)?;
+
+    // Persist only after successful runtime apply so UI/state stays consistent
+    // with what is actually active on the appliance.
+    ntp_config::save(&state.config_store, req.clone()).map_err(NtpApiError::StorageError)?;
 
     Ok(Json(req))
 }

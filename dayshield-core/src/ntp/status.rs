@@ -4,7 +4,7 @@
 //!
 //! # Daemon selection
 //!
-//! 1. If `chrony` is active (`systemctl is-active chrony`), parse `chronyc tracking`.
+//! 1. If `chrony` or `chronyd` is active, parse `chronyc tracking`.
 //! 2. Otherwise fall back to `timedatectl show-timesync --no-pager` plus
 //!    `timedatectl show --property=SystemClockSynchronized --value`.
 //!
@@ -40,13 +40,18 @@ pub async fn ntp_status() -> NtpStatus {
 // ---------------------------------------------------------------------------
 
 async fn chrony_is_active() -> bool {
-    matches!(
-        Command::new("systemctl")
-            .args(["is-active", "--quiet", "chrony"])
-            .status()
-            .await,
-        Ok(s) if s.success()
-    )
+    for unit in ["chrony", "chronyd"] {
+        if matches!(
+            Command::new("systemctl")
+                .args(["is-active", "--quiet", unit])
+                .status()
+                .await,
+            Ok(s) if s.success()
+        ) {
+            return true;
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------

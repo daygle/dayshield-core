@@ -174,10 +174,13 @@ pub async fn apply_config(config: &DhcpConfig) -> Result<()> {
     std::fs::set_permissions(KEA_CONF_PATH, std::fs::Permissions::from_mode(0o644))
         .context("failed to chmod kea-dhcp4.conf")?;
 
-    // Keep Kea's packaged default path in sync while preserving DayShield's
-    // canonical config location under /etc/dayshield.
-    write_kea_compat_include(KEA_SYSTEM_CONF_PATH, KEA_CONF_PATH)
-        .context("failed to write kea compatibility include")?;
+    // Keep Kea's packaged default path in sync with valid JSON so distro units
+    // that read /etc/kea/kea-dhcp4.conf always parse successfully.
+    write_config_atomic(KEA_SYSTEM_CONF_PATH, &conf_str)
+        .context("failed to mirror kea-dhcp4.conf to system path")?;
+    #[cfg(unix)]
+    std::fs::set_permissions(KEA_SYSTEM_CONF_PATH, std::fs::Permissions::from_mode(0o644))
+        .context("failed to chmod system kea-dhcp4.conf")?;
 
     info!(path = KEA_CONF_PATH, "dhcp: kea-dhcp4.conf written");
 
@@ -213,28 +216,6 @@ fn write_config_atomic(path: &str, content: &str) -> Result<()> {
 
     std::fs::rename(&tmp, path)
         .with_context(|| format!("failed to rename {tmp} to {path}"))?;
-
-    Ok(())
-}
-
-/// Write a tiny include file at Kea's default config path that points to the
-/// canonical DayShield-managed DHCP config.
-fn write_kea_compat_include(include_path: &str, target_path: &str) -> Result<()> {
-    let include_contents = format!(
-        "# Managed by DayShield core\ninclude: \"{target_path}\"\n"
-    );
-
-    write_config_atomic(include_path, &include_contents).with_context(|| {
-        format!(
-            "failed to write compatibility include {}",
-            include_path
-        )
-    })?;
-
-    #[cfg(unix)]
-    std::fs::set_permissions(include_path, std::fs::Permissions::from_mode(0o644)).with_context(
-        || format!("failed to chmod compatibility include {}", include_path),
-    )?;
 
     Ok(())
 }

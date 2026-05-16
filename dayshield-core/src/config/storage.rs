@@ -30,6 +30,7 @@ use tracing::{debug, info, warn};
 
 use super::models::{
     AcmeConfig, AdminSecuritySettings, AiEngineConfig, CloudflaredConfig, CrowdSecConfig, DhcpConfig, DnsConfig, DnsDomainOverride,
+    DynamicDnsConfig,
     DnsHostOverride, DotConfig, FirewallAlias, FirewallRule, FirewallSettings, Gateway, Interface, NatConfig,
     NotifyConfig, NtpConfig, SuricataConfig, SystemConfig, WireGuardInterface,
 };
@@ -763,6 +764,27 @@ impl ConfigStore {
             }
         }
 
+        // Dynamic DNS config validation.
+        if let Some(dynamic_dns) = &config.dynamic_dns {
+            use crate::config::models::validate_dynamic_dns_config;
+            if let Err(msg) = validate_dynamic_dns_config(dynamic_dns) {
+                anyhow::bail!("Dynamic DNS config is invalid: {msg}");
+            }
+            if dynamic_dns.enabled {
+                let known: std::collections::HashSet<&str> =
+                    config.interfaces.iter().map(|i| i.name.as_str()).collect();
+                for entry in dynamic_dns.entries.iter().filter(|entry| entry.enabled) {
+                    if !known.is_empty() && !known.contains(entry.interface.as_str()) {
+                        anyhow::bail!(
+                            "Dynamic DNS entry {} references unknown interface {:?}",
+                            entry.id,
+                            entry.interface
+                        );
+                    }
+                }
+            }
+        }
+
         // NAT config validation.
         if let Some(nat) = &config.nat {
             use crate::config::models::validate_nat_config;
@@ -1046,6 +1068,18 @@ impl ConfigStore {
     pub fn save_ntp_config(&self, ntp: NtpConfig) -> Result<()> {
         let mut config = self.load()?;
         config.ntp = Some(ntp);
+        self.save_with_rollback(&config)
+    }
+
+    /// Return the Dynamic DNS configuration from the persisted config.
+    pub fn load_dynamic_dns_config(&self) -> Result<Option<DynamicDnsConfig>> {
+        Ok(self.load()?.dynamic_dns)
+    }
+
+    /// Atomically replace the Dynamic DNS configuration in the persisted config.
+    pub fn save_dynamic_dns_config(&self, dynamic_dns: DynamicDnsConfig) -> Result<()> {
+        let mut config = self.load()?;
+        config.dynamic_dns = Some(dynamic_dns);
         self.save_with_rollback(&config)
     }
 

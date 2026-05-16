@@ -1,6 +1,6 @@
 //! API module - assembles the Axum router and registers all route handlers.
 
-mod acme;
+pub(crate) mod acme;
 mod ai;
 mod admin;
 mod aliases;
@@ -12,6 +12,7 @@ mod dashboard;
 mod dhcp;
 mod dns;
 mod dns_overrides;
+pub(crate) mod dynamic_dns;
 mod dot;
 mod firewall;
 mod gateways;
@@ -21,7 +22,8 @@ mod metrics;
 mod nat;
 mod notify;
 mod ntp;
-mod rulesets;
+pub(crate) mod rulesets;
+mod schedules;
 mod suricata;
 mod system;
 mod wireguard;
@@ -167,6 +169,9 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/system/updates/appliance-rebuild-complete",
             post(system::mark_appliance_rebuild_complete),
         )
+        .route("/system/schedules", get(schedules::get_schedules))
+        .route("/system/schedules", post(schedules::update_schedules))
+        .route("/system/schedules/run/{job}", post(schedules::run_schedule_job))
         // Dashboard
         .route("/dashboard/system", get(dashboard::get_system_status))
         .route("/dashboard/network", get(dashboard::get_network_status))
@@ -221,6 +226,11 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/dns/overrides/{name}",
             delete(dns_overrides::delete_override),
         )
+        // Dynamic DNS
+        .route("/dynamic-dns/config", get(dynamic_dns::get_config))
+        .route("/dynamic-dns/config", post(dynamic_dns::update_config))
+        .route("/dynamic-dns/status", get(dynamic_dns::get_status))
+        .route("/dynamic-dns/update", post(dynamic_dns::trigger_update))
         // DHCP
         .route("/dhcp/config", get(dhcp::get_config))
         .route("/dhcp/config", post(dhcp::update_config))

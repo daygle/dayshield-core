@@ -122,6 +122,17 @@ fn is_valid_blocklist_url(value: &str) -> bool {
         && !trimmed.chars().any(|c| c.is_ascii_whitespace())
 }
 
+fn is_wan_interface(state: &Arc<AppState>, interface_name: &str) -> Result<bool, DnsError> {
+    let interfaces = state
+        .config_store
+        .load_interfaces()
+        .map_err(DnsError::StorageError)?;
+
+    Ok(interfaces
+        .iter()
+        .any(|iface| iface.name == interface_name && (iface.wan_mode.is_some() || iface.gateway.is_some())))
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -273,6 +284,23 @@ pub async fn update_config(
         }
     }
 
+    if let Some(groups) = req.interface_blocklists.as_ref() {
+        for group in groups {
+            if !is_valid_interface_name(&group.interface) {
+                return Err(DnsError::ValidationFailed(format!(
+                    "invalid interface name in blocklists: {}",
+                    group.interface
+                )));
+            }
+            if is_wan_interface(&state, &group.interface)? {
+                return Err(DnsError::ValidationFailed(format!(
+                    "DNS blocklists are not allowed on WAN interface {}",
+                    group.interface
+                )));
+            }
+        }
+    }
+
     // --- Build config ------------------------------------------------------
 
     let cfg = DnsConfig {
@@ -367,6 +395,13 @@ pub async fn list_interface_blocklists(
         )));
     }
 
+    if is_wan_interface(&state, &interface_name)? {
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "data": []
+        })));
+    }
+
     let cfg = state
         .config_store
         .load_dns_config()
@@ -395,6 +430,12 @@ pub async fn create_interface_blocklist(
     if !is_valid_interface_name(&interface_name) {
         return Err(DnsError::ValidationFailed(format!(
             "invalid interface name: {interface_name}"
+        )));
+    }
+
+    if is_wan_interface(&state, &interface_name)? {
+        return Err(DnsError::ValidationFailed(format!(
+            "DNS blocklists are not allowed on WAN interface {interface_name}"
         )));
     }
 
@@ -459,6 +500,12 @@ pub async fn delete_interface_blocklist(
     if !is_valid_interface_name(&interface_name) {
         return Err(DnsError::ValidationFailed(format!(
             "invalid interface name: {interface_name}"
+        )));
+    }
+
+    if is_wan_interface(&state, &interface_name)? {
+        return Err(DnsError::ValidationFailed(format!(
+            "DNS blocklists are not allowed on WAN interface {interface_name}"
         )));
     }
 

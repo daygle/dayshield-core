@@ -170,6 +170,28 @@ fn make_manager(state: &Arc<AppState>) -> RulesetManager {
     RulesetManager::new(config_dir)
 }
 
+pub(crate) async fn run_scheduled_ruleset_updates(
+    state: &Arc<AppState>,
+) -> Result<(usize, usize), RulesetError> {
+    let manager = make_manager(state);
+    let checked = manager.check_all_updates().await?;
+
+    let mut updated = 0usize;
+    let mut failed = 0usize;
+
+    for ruleset in checked
+        .into_iter()
+        .filter(|ruleset| ruleset.status == RulesetStatus::UpdateAvailable)
+    {
+        match manager.update(&ruleset.id).await {
+            Ok(_) => updated += 1,
+            Err(_) => failed += 1,
+        }
+    }
+
+    Ok((updated, failed))
+}
+
 // ---------------------------------------------------------------------------
 // GET /rulesets/available
 // ---------------------------------------------------------------------------

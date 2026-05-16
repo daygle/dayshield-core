@@ -183,6 +183,15 @@ pub async fn update_config(
 pub async fn issue_certificates(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, AcmeApiError> {
+    let message = run_acme_renewal(&state).await?;
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "message": message
+    })))
+}
+
+pub(crate) async fn run_acme_renewal(state: &Arc<AppState>) -> Result<String, AcmeApiError> {
     let cfg = state
         .config_store
         .load_acme_config()
@@ -195,18 +204,19 @@ pub async fn issue_certificates(
         ));
     }
 
-    info!(domains = ?cfg.domains, "acme: starting certificate issuance");
+    info!(domains = ?cfg.domains, "acme: starting certificate issuance / renewal");
 
-    let engine = AcmeEngine::new(cfg);
+    let engine = AcmeEngine::new(cfg.clone());
+    if !engine.renewal_check().await.unwrap_or(true) {
+        return Ok("certificate already valid; renewal not required".to_string());
+    }
+
     engine
         .order_certificate()
         .await
         .map_err(|e| AcmeApiError::EngineError(e.to_string()))?;
 
-    Ok(Json(serde_json::json!({
-        "status": "ok",
-        "message": "certificate issued successfully"
-    })))
+    Ok("certificate issued successfully".to_string())
 }
 
 /// Handler: return certificate status for the primary domain.

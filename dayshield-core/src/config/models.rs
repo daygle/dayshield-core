@@ -1811,6 +1811,164 @@ pub fn validate_ntp_config(config: &NtpConfig) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// Dynamic DNS
+// ---------------------------------------------------------------------------
+
+/// Supported Dynamic DNS providers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DynamicDnsProvider {
+    DuckDns,
+    NoIp,
+    Dynu,
+    FreeDns,
+    Custom,
+}
+
+/// Single Dynamic DNS record update definition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DynamicDnsEntry {
+    /// Stable identifier used by the UI and API for updates.
+    pub id: Uuid,
+    /// Whether this entry is active.
+    pub enabled: bool,
+    /// Dynamic DNS provider type.
+    pub provider: DynamicDnsProvider,
+    /// Interface name used to source the IPv4 address to publish.
+    pub interface: String,
+    /// Hostname / record identifier used by the provider.
+    pub hostname: String,
+    /// Optional provider account username.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// Optional provider password/token/API key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// Optional custom update URL template.
+    ///
+    /// Supported placeholders:
+    /// - `{hostname}`
+    /// - `{username}`
+    /// - `{password}`
+    /// - `{ip}`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_url: Option<String>,
+}
+
+/// Dynamic DNS global settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DynamicDnsConfig {
+    /// Enable Dynamic DNS updates globally.
+    pub enabled: bool,
+    /// Suggested refresh interval in seconds.
+    pub check_interval_seconds: u32,
+    /// Managed Dynamic DNS entries.
+    pub entries: Vec<DynamicDnsEntry>,
+}
+
+impl Default for DynamicDnsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            check_interval_seconds: 300,
+            entries: vec![],
+        }
+    }
+}
+
+pub fn validate_dynamic_dns_config(config: &DynamicDnsConfig) -> Result<(), String> {
+    if !config.enabled {
+        return Ok(());
+    }
+
+    if config.check_interval_seconds < 30 {
+        return Err("dynamic DNS check_interval_seconds must be >= 30".into());
+    }
+
+    let mut seen_ids = std::collections::HashSet::new();
+    for entry in &config.entries {
+        if !seen_ids.insert(entry.id) {
+            return Err(format!(
+                "dynamic DNS entries contains duplicate id {}",
+                entry.id
+            ));
+        }
+
+        if !entry.enabled {
+            continue;
+        }
+
+        if !is_valid_interface_name(&entry.interface) {
+            return Err(format!(
+                "dynamic DNS entry {} has invalid interface {:?}",
+                entry.id, entry.interface
+            ));
+        }
+
+        let hostname = entry.hostname.trim();
+        if hostname.is_empty() {
+            return Err(format!(
+                "dynamic DNS entry {} hostname must not be empty",
+                entry.id
+            ));
+        }
+
+        let username = entry.username.as_deref().unwrap_or("").trim();
+        let password = entry.password.as_deref().unwrap_or("").trim();
+        let update_url = entry.update_url.as_deref().unwrap_or("").trim();
+
+        match entry.provider {
+            DynamicDnsProvider::DuckDns => {
+                if password.is_empty() {
+                    return Err(format!(
+                        "dynamic DNS entry {} requires a token/password for DuckDNS",
+                        entry.id
+                    ));
+                }
+            }
+            DynamicDnsProvider::NoIp | DynamicDnsProvider::Dynu => {
+                if username.is_empty() || password.is_empty() {
+                    return Err(format!(
+                        "dynamic DNS entry {} requires username and password",
+                        entry.id
+                    ));
+                }
+            }
+            DynamicDnsProvider::FreeDns => {
+                if password.is_empty() {
+                    return Err(format!(
+                        "dynamic DNS entry {} requires an update token/password for FreeDNS",
+                        entry.id
+                    ));
+                }
+            }
+            DynamicDnsProvider::Custom => {
+                if update_url.is_empty() {
+                    return Err(format!(
+                        "dynamic DNS entry {} requires update_url for Custom provider",
+                        entry.id
+                    ));
+                }
+                if !validate_url(update_url) {
+                    return Err(format!(
+                        "dynamic DNS entry {} has invalid update_url {:?}",
+                        entry.id, update_url
+                    ));
+                }
+                if !update_url.contains("{ip}") {
+                    return Err(format!(
+                        "dynamic DNS entry {} custom update_url must include {{ip}} placeholder",
+                        entry.id
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Cloudflared
 // ---------------------------------------------------------------------------
 
@@ -2030,6 +2188,9 @@ pub struct SystemConfig {
     /// NTP client/server configuration.
     #[serde(default)]
     pub ntp: Option<NtpConfig>,
+    /// Dynamic DNS configuration.
+    #[serde(default)]
+    pub dynamic_dns: Option<DynamicDnsConfig>,
     /// Cloudflare Tunnel configuration.
     #[serde(default)]
     pub cloudflared: Option<CloudflaredConfig>,

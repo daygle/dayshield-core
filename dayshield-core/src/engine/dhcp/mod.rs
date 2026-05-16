@@ -149,7 +149,7 @@ pub async fn apply_config(config: &DhcpConfig) -> Result<()> {
     if !config.enabled {
         info!("dhcp: service disabled - stopping kea-dhcp4-server");
         let _ = Command::new("systemctl")
-            .args(["stop", "kea-dhcp4-server"])
+            .args(["disable", "--now", "kea-dhcp4-server"])
             .output()
             .await;
         return Ok(());
@@ -163,6 +163,17 @@ pub async fn apply_config(config: &DhcpConfig) -> Result<()> {
         .context("failed to write kea-dhcp4.conf")?;
 
     info!(path = KEA_CONF_PATH, "dhcp: kea-dhcp4.conf written");
+
+    let enable_out = Command::new("systemctl")
+        .args(["enable", "kea-dhcp4-server"])
+        .output()
+        .await
+        .context("failed to enable kea-dhcp4-server")?;
+
+    if !enable_out.status.success() {
+        let stderr = String::from_utf8_lossy(&enable_out.stderr);
+        anyhow::bail!("systemctl enable kea-dhcp4-server failed: {stderr}");
+    }
 
     restart_kea().await
 }
@@ -224,6 +235,7 @@ mod tests {
             pool_end: "192.168.1.200".into(),
             gateway: Some("192.168.1.1".into()),
             dns_servers: vec!["1.1.1.1".into(), "8.8.8.8".into()],
+            domain_name: None,
             lease_seconds: 86400,
             reservations: vec![],
         }

@@ -80,6 +80,48 @@ pub fn generate_config(iface: &WireGuardInterface) -> String {
     out
 }
 
+/// Generate a WireGuard configuration compatible with `wg syncconf`.
+///
+/// `wg syncconf` accepts only native WireGuard keys (Interface keys and Peer
+/// sections). It does not accept wg-quick-only directives like `Address`.
+fn generate_syncconf(iface: &WireGuardInterface) -> String {
+    let mut out = String::new();
+
+    out.push_str("# DayShield - WireGuard syncconf (auto-generated)\n");
+    out.push_str("[Interface]\n");
+    out.push_str(&format!("PrivateKey = {}\n", iface.private_key));
+    out.push_str(&format!("ListenPort = {}\n", iface.listen_port));
+
+    for peer in &iface.peers {
+        out.push('\n');
+        if !peer.name.is_empty() {
+            out.push_str(&format!("# Peer: {}\n", peer.name));
+        }
+        out.push_str("[Peer]\n");
+        out.push_str(&format!("PublicKey = {}\n", peer.public_key));
+
+        if let Some(psk) = &peer.preshared_key {
+            out.push_str(&format!("PresharedKey = {psk}\n"));
+        }
+
+        if !peer.allowed_ips.is_empty() {
+            out.push_str(&format!("AllowedIPs = {}\n", peer.allowed_ips.join(", ")));
+        }
+
+        if let Some(ep) = &peer.endpoint {
+            out.push_str(&format!("Endpoint = {ep}\n"));
+        }
+
+        if let Some(ka) = peer.persistent_keepalive {
+            if ka > 0 {
+                out.push_str(&format!("PersistentKeepalive = {ka}\n"));
+            }
+        }
+    }
+
+    out
+}
+
 /// Apply the WireGuard configuration for `iface`.
 ///
 /// Steps:
@@ -124,9 +166,14 @@ pub async fn apply_interface(iface: &WireGuardInterface) -> Result<()> {
         .unwrap_or(false);
 
     if exists {
+        let syncconf_path = format!("{}/{}.syncconf", WG_CONFIG_DIR, iface.name);
+        let syncconf_str = generate_syncconf(iface);
+        write_config_atomic(&syncconf_path, &syncconf_str)
+            .context("failed to write WireGuard syncconf file")?;
+
         // Sync without disrupting existing sessions.
         let out = Command::new("wg")
-            .args(["syncconf", &iface.name, &conf_path])
+            .args(["syncconf", &iface.name, &syncconf_path])
             .output()
             .await
             .context("failed to run wg syncconf")?;
@@ -134,6 +181,9 @@ pub async fn apply_interface(iface: &WireGuardInterface) -> Result<()> {
             let stderr = String::from_utf8_lossy(&out.stderr);
             anyhow::bail!("wg syncconf failed for {}: {stderr}", iface.name);
         }
+
+        // Best-effort cleanup.
+        let _ = std::fs::remove_file(&syncconf_path);
         info!(name = %iface.name, "vpn: interface synced via wg syncconf");
     } else {
         bring_up(&iface.name).await?;

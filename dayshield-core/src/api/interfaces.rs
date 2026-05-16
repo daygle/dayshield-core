@@ -20,12 +20,141 @@ use tracing::{info, warn};
 use crate::{
     config::models::{
         is_valid_cidr, is_valid_interface_name, is_valid_mss, is_valid_mtu, is_valid_vlan_id,
-        Interface,
+        Gateway, Interface,
     },
     engine::gateway::list_kernel_gateways,
     engine::interfaces::{apply_interface, list_kernel_interfaces, InterfaceError, KernelInterface},
+    engine::nftables::apply_rules,
     state::AppState,
 };
+
+const AUTO_GATEWAY_DESCRIPTION: &str = "Auto-managed from WAN interface settings";
+
+fn derive_nat_wan_interfaces(interfaces: &[Interface]) -> Vec<String> {
+    interfaces
+        .iter()
+        .filter(|iface| iface.enabled && (iface.wan_mode.is_some() || iface.gateway.is_some()))
+        .map(|iface| iface.name.clone())
+        .collect()
+}
+
+fn sync_nat_wan_interfaces(
+    state: &Arc<AppState>,
+    interfaces: &[Interface],
+) -> Result<bool, InterfaceError> {
+    let mut nat_cfg = state
+        .config_store
+        .load_nat_config()
+        .map_err(InterfaceError::StorageError)?
+        .unwrap_or_default();
+
+    let next_wan_interfaces = derive_nat_wan_interfaces(interfaces);
+    if nat_cfg.wan_interfaces == next_wan_interfaces {
+        return Ok(false);
+    }
+
+    nat_cfg.wan_interfaces = next_wan_interfaces;
+    state
+        .config_store
+        .save_nat_config(nat_cfg)
+        .map_err(InterfaceError::StorageError)?;
+
+    Ok(true)
+}
+
+fn derive_auto_gateways(interfaces: &[Interface]) -> Vec<Gateway> {
+    interfaces
+        .iter()
+        .filter(|iface| iface.enabled && (iface.wan_mode.is_some() || iface.gateway.is_some()))
+        .map(|iface| Gateway {
+            name: format!("{}_AUTO", iface.name),
+            description: Some(AUTO_GATEWAY_DESCRIPTION.to_string()),
+            interface: iface.name.clone(),
+            // Static WAN keeps an explicit gateway; DHCP/PPPoE remains discovered at runtime.
+            gateway_ip: iface.gateway.clone(),
+            monitor_ip: None,
+            weight: 1,
+            enabled: true,
+        })
+        .collect()
+}
+
+fn sync_auto_gateways_from_interfaces(
+    state: &Arc<AppState>,
+    interfaces: &[Interface],
+) -> Result<bool, InterfaceError> {
+    let desired_gateways = derive_auto_gateways(interfaces);
+    let desired_ifaces = desired_gateways
+        .iter()
+        .map(|g| g.interface.as_str())
+        .collect::<std::collections::HashSet<_>>();
+
+    let mut gateways = state
+        .config_store
+        .load_gateways()
+        .map_err(InterfaceError::StorageError)?;
+    let mut changed = false;
+
+    // Remove stale auto-managed gateway entries for interfaces that are no longer WAN.
+    let original_len = gateways.len();
+    gateways.retain(|g| {
+        let is_auto_managed = g.description.as_deref() == Some(AUTO_GATEWAY_DESCRIPTION);
+        !is_auto_managed || desired_ifaces.contains(g.interface.as_str())
+    });
+    if gateways.len() != original_len {
+        changed = true;
+    }
+
+    for desired in desired_gateways {
+        if let Some(existing) = gateways
+            .iter_mut()
+            .find(|g| g.interface == desired.interface && g.description.as_deref() == Some(AUTO_GATEWAY_DESCRIPTION))
+        {
+            if existing.gateway_ip != desired.gateway_ip {
+                existing.gateway_ip = desired.gateway_ip.clone();
+                changed = true;
+            }
+            if !existing.enabled {
+                existing.enabled = true;
+                changed = true;
+            }
+            if existing.name != desired.name {
+                existing.name = desired.name.clone();
+                changed = true;
+            }
+        } else {
+            gateways.push(desired);
+            changed = true;
+        }
+    }
+
+    if !changed {
+        return Ok(false);
+    }
+
+    state
+        .config_store
+        .save_gateways(gateways)
+        .map_err(InterfaceError::StorageError)?;
+
+    Ok(true)
+}
+
+async fn apply_full_nftables_rules(state: &Arc<AppState>) -> Result<(), InterfaceError> {
+    let full_cfg = state
+        .config_store
+        .load()
+        .map_err(InterfaceError::StorageError)?;
+    let fw_rules = full_cfg.firewall_rules.clone();
+    apply_rules(
+        &fw_rules,
+        full_cfg.nat.as_ref(),
+        &full_cfg.firewall_aliases,
+        full_cfg.firewall_settings.as_ref(),
+    )
+    .await
+    .map_err(|e| InterfaceError::ApplyFailed(e.to_string()))
+}
 
 // ---------------------------------------------------------------------------
 // Response types
@@ -330,11 +459,23 @@ pub async fn create_interface(
         return Err(err);
     }
 
+    let nat_wan_changed = sync_nat_wan_interfaces(&state, &ifaces_to_save)?;
+    let gateways_changed = sync_auto_gateways_from_interfaces(&state, &ifaces_to_save)?;
+
     info!(name = %iface.name, "interfaces: configuration persisted");
 
     // --- Apply -------------------------------------------------------------
 
     apply_interface(&iface).await?;
+
+    if nat_wan_changed {
+        apply_full_nftables_rules(&state).await?;
+        info!(name = %iface.name, "interfaces: synchronized NAT WAN interfaces and reapplied nftables");
+    }
+
+    if gateways_changed {
+        info!(name = %iface.name, "interfaces: synchronized auto-managed gateways from WAN interfaces");
+    }
 
     info!(name = %iface.name, "interfaces: engine apply complete");
 
@@ -390,6 +531,9 @@ pub async fn delete_interface(
         return Err(err);
     }
 
+    let nat_wan_changed = sync_nat_wan_interfaces(&state, &ifaces_to_save)?;
+    let gateways_changed = sync_auto_gateways_from_interfaces(&state, &ifaces_to_save)?;
+
     // --- Best-effort kernel teardown ---------------------------------------
     for deleted in &deleted_names {
         let _ = tokio::process::Command::new("ip")
@@ -400,6 +544,15 @@ pub async fn delete_interface(
             .args(["link", "del", "dev", deleted])
             .output()
             .await;
+    }
+
+    if nat_wan_changed {
+        apply_full_nftables_rules(&state).await?;
+        info!(%name, "interfaces: synchronized NAT WAN interfaces and reapplied nftables");
+    }
+
+    if gateways_changed {
+        info!(%name, "interfaces: synchronized auto-managed gateways from WAN interfaces");
     }
 
     info!(%name, count = deleted_names.len(), "interfaces: deleted interface(s)");

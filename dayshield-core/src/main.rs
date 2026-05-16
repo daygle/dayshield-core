@@ -30,6 +30,7 @@ mod nat;
 mod notify;
 mod ntp;
 mod rules;
+mod schedules;
 mod state;
 mod update;
 mod utils;
@@ -92,6 +93,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Start the automatic backup scheduler.
     backup::scheduler::start_backup_scheduler(Arc::clone(&app_state)).await;
+
+    // Start system schedules (Dynamic DNS, ACME renew, and future jobs).
+    schedules::start_scheduler(Arc::clone(&app_state)).await;
 
     // Start the periodic software update checker.
     update::start_update_checker(Arc::clone(&app_state)).await;

@@ -85,6 +85,7 @@ pub fn generate_config(config: &DnsConfig, dot: Option<&DotConfig>) -> String {
     out.push_str("    harden-glue: yes\n");
     out.push_str("    harden-dnssec-stripped: yes\n");
     out.push_str("    use-caps-for-id: yes\n");
+    out.push_str("    module-config: \"validator iterator\"\n");
     out.push_str("    cache-min-ttl: 3600\n");
     out.push_str("    cache-max-ttl: 86400\n");
     out.push_str("    prefetch: yes\n");

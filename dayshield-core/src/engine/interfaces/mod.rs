@@ -370,6 +370,8 @@ pub async fn apply_interface(config: &Interface) -> Result<(), InterfaceError> {
 
         match config.wan_mode.as_ref() {
             Some(WanMode::Pppoe) => {
+                // Ensure DHCP client is not competing with PPPoE on the same WAN.
+                stop_dhcp_client(name).await;
                 let username = config.pppoe_username.as_deref().unwrap_or("");
                 let password = config.pppoe_password.as_deref().unwrap_or("");
                 start_pppoe(name, username, password).await?;
@@ -544,12 +546,27 @@ async fn stop_dhcp_client(name: &str) {
 /// Spawns `pppd call wan-<wan_iface>` as a background process.  `ppp0` will
 /// appear once the ISP authenticates.
 async fn start_pppoe(wan_iface: &str, username: &str, password: &str) -> Result<(), InterfaceError> {
-    use std::os::unix::fs::PermissionsExt;
     use tokio::fs;
+
+    if username.trim().is_empty() || password.is_empty() {
+        return Err(InterfaceError::ApplyFailed(
+            "pppoe: missing username or password".to_string(),
+        ));
+    }
+    if username.chars().any(char::is_control) || password.chars().any(char::is_control) {
+        return Err(InterfaceError::ApplyFailed(
+            "pppoe: credentials contain control characters".to_string(),
+        ));
+    }
+
+    // pppd peer files are line-oriented. Escape values so embedded quotes or
+    // backslashes do not break parsing.
+    let escaped_username = username.replace('\\', "\\\\").replace('"', "\\\"");
+    let escaped_password = password.replace('\\', "\\\\").replace('"', "\\\"");
 
     let peer_name = format!("wan-{wan_iface}");
     let peer_path = format!("/etc/ppp/peers/{peer_name}");
-    let secrets_line = format!("\"{}\" * \"{}\" *\n", username, password);
+    let secrets_line = format!("\"{}\" * \"{}\" *\n", escaped_username, escaped_password);
 
     // Ensure /etc/ppp exists
     fs::create_dir_all("/etc/ppp/peers")
@@ -558,22 +575,30 @@ async fn start_pppoe(wan_iface: &str, username: &str, password: &str) -> Result<
 
     // Write peer config
     let peer_cfg = format!(
-        "plugin rp-pppoe.so {wan_iface}\nuser \"{username}\"\nnoauth\ndefaultroute\n\
+        "plugin rp-pppoe.so {wan_iface}\nuser \"{escaped_username}\"\nnoauth\ndefaultroute\n\
 replacedefaultroute\nhide-password\npersist\nmaxfail 0\nholdoff 5\nnoipv6\n"
     );
     fs::write(&peer_path, &peer_cfg)
         .await
         .map_err(|e| InterfaceError::ApplyFailed(format!("pppoe: write peer file: {e}")))?;
-    std::fs::set_permissions(&peer_path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| InterfaceError::ApplyFailed(format!("pppoe: chmod peer file: {e}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&peer_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| InterfaceError::ApplyFailed(format!("pppoe: chmod peer file: {e}")))?;
+    }
 
     // Write secrets (600 permissions)
     for path in ["/etc/ppp/chap-secrets", "/etc/ppp/pap-secrets"] {
         fs::write(path, &secrets_line)
             .await
             .map_err(|e| InterfaceError::ApplyFailed(format!("pppoe: write {path}: {e}")))?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| InterfaceError::ApplyFailed(format!("pppoe: chmod {path}: {e}")))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| InterfaceError::ApplyFailed(format!("pppoe: chmod {path}: {e}")))?;
+        }
     }
 
     // Stop any existing pppd for this WAN first

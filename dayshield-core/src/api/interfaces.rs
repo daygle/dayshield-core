@@ -20,6 +20,7 @@ use tracing::{info, warn};
 use crate::{
     config::models::{
         is_valid_cidr, is_valid_interface_name, is_valid_mss, is_valid_mtu, is_valid_vlan_id,
+        WanMode,
         Gateway, Interface,
     },
     engine::gateway::list_kernel_gateways,
@@ -392,6 +393,26 @@ pub async fn create_interface(
         }
     }
 
+    if matches!(iface.wan_mode, Some(WanMode::Pppoe)) {
+        let user_ok = iface
+            .pppoe_username
+            .as_deref()
+            .map(|s| !s.trim().is_empty() && !s.chars().any(char::is_control))
+            .unwrap_or(false);
+        let pass_ok = iface
+            .pppoe_password
+            .as_deref()
+            .map(|s| !s.is_empty() && !s.chars().any(char::is_control))
+            .unwrap_or(false);
+
+        if !user_ok || !pass_ok {
+            return Err(InterfaceError::ApplyFailed(
+                "pppoe mode requires non-empty username/password without control characters"
+                    .to_string(),
+            ));
+        }
+    }
+
     match iface.vlan {
         Some(vlan_id) => {
             if !is_valid_vlan_id(vlan_id) {
@@ -536,6 +557,12 @@ pub async fn delete_interface(
 
     // --- Best-effort kernel teardown ---------------------------------------
     for deleted in &deleted_names {
+        if is_valid_interface_name(deleted) {
+            let _ = tokio::process::Command::new("pkill")
+                .args(["-f", &format!("pppd call wan-{deleted}")])
+                .output()
+                .await;
+        }
         let _ = tokio::process::Command::new("ip")
             .args(["link", "set", deleted, "down"])
             .output()

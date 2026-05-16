@@ -451,7 +451,7 @@ pub async fn create_interface(
     };
     if let Err(err) = state
         .config_store
-        .save_interfaces(ifaces_to_save)
+        .save_interfaces(ifaces_to_save.clone())
         .map_err(InterfaceError::StorageError)
     {
         let mut in_memory = state.interfaces.write().await;
@@ -523,7 +523,7 @@ pub async fn delete_interface(
     };
     if let Err(err) = state
         .config_store
-        .save_interfaces(ifaces_to_save)
+        .save_interfaces(ifaces_to_save.clone())
         .map_err(InterfaceError::StorageError)
     {
         let mut in_memory = state.interfaces.write().await;

@@ -28,7 +28,7 @@ use crate::config::models::{
 };
 
 /// Path where Unbound's configuration file is written.
-const UNBOUND_CONF_PATH: &str = "/etc/unbound/unbound.conf";
+const UNBOUND_CONF_PATH: &str = "/etc/dayshield/unbound.conf";
 
 /// Directory where DoT TLS certificate and key are stored.
 const DOT_CERTS_DIR: &str = "/etc/dayshield/certs";

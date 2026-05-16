@@ -14,6 +14,9 @@
 
 use std::path::Path;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use anyhow::{Context, Result};
 use serde_json::json;
 use tokio::process::Command;
@@ -22,7 +25,7 @@ use tracing::info;
 use crate::config::models::DhcpConfig;
 
 /// Path where the Kea DHCPv4 configuration file is written.
-const KEA_CONF_PATH: &str = "/etc/kea/kea-dhcp4.conf";
+const KEA_CONF_PATH: &str = "/etc/dayshield/kea-dhcp4.conf";
 
 /// Path to the Kea memfile lease database.
 pub const KEA_LEASES_PATH: &str = "/var/lib/kea/kea-leases4.csv";
@@ -156,11 +159,17 @@ pub async fn apply_config(config: &DhcpConfig) -> Result<()> {
     }
 
     std::fs::create_dir_all("/etc/kea").context("failed to create /etc/kea")?;
+    #[cfg(unix)]
+    std::fs::set_permissions("/etc/kea", std::fs::Permissions::from_mode(0o755))
+        .context("failed to chmod /etc/kea")?;
     std::fs::create_dir_all("/var/log/kea").context("failed to create /var/log/kea")?;
 
     let conf_str = generate_config(config);
     write_config_atomic(KEA_CONF_PATH, &conf_str)
         .context("failed to write kea-dhcp4.conf")?;
+    #[cfg(unix)]
+    std::fs::set_permissions(KEA_CONF_PATH, std::fs::Permissions::from_mode(0o644))
+        .context("failed to chmod kea-dhcp4.conf")?;
 
     info!(path = KEA_CONF_PATH, "dhcp: kea-dhcp4.conf written");
 

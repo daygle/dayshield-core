@@ -24,7 +24,7 @@ use tracing::{info, warn};
 use crate::config::models::{VpnTunnel, WireGuardInterface};
 
 /// Directory where WireGuard configuration files are stored.
-const WG_CONFIG_DIR: &str = "/etc/wireguard";
+const WG_CONF_PATH: &str = "/etc/dayshield/wg0.conf"; // Updated path
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -143,7 +143,7 @@ pub async fn apply_interface(iface: &WireGuardInterface) -> Result<()> {
         "vpn: applying WireGuard interface config"
     );
 
-    let conf_path = format!("{}/{}.conf", WG_CONFIG_DIR, iface.name);
+    let conf_path = format!("{}/{}.conf", WG_CONF_PATH, iface.name);
 
     if !iface.enabled {
         info!(name = %iface.name, "vpn: interface disabled - bringing down");
@@ -166,7 +166,7 @@ pub async fn apply_interface(iface: &WireGuardInterface) -> Result<()> {
         .unwrap_or(false);
 
     if exists {
-        let syncconf_path = format!("{}/{}.syncconf", WG_CONFIG_DIR, iface.name);
+        let syncconf_path = format!("{}/{}.syncconf", WG_CONF_PATH, iface.name);
         let syncconf_str = generate_syncconf(iface);
         write_config_atomic(&syncconf_path, &syncconf_str)
             .context("failed to write WireGuard syncconf file")?;
@@ -206,7 +206,7 @@ pub async fn remove_interface(name: &str) -> Result<()> {
 
     bring_down(name).await?;
 
-    let conf_path = format!("{}/{}.conf", WG_CONFIG_DIR, name);
+    let conf_path = format!("{}/{}.conf", WG_CONF_PATH, name);
     if Path::new(&conf_path).exists() {
         std::fs::remove_file(&conf_path)
             .with_context(|| format!("failed to remove config file {conf_path}"))?;

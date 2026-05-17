@@ -23,7 +23,8 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
-use crate::config::models::{is_valid_cidr, is_valid_interface_name, Interface, WanMode};
+use crate::config::models::{is_valid_cidr, is_valid_interface_name, Interface, Ipv6Mode, WanMode};
+use crate::engine::{prefix_delegation, radvd};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -234,7 +235,7 @@ pub async fn list_kernel_interfaces() -> Result<Vec<KernelInterface>, InterfaceE
         vec![]
     };
 
-    // Build ifname → addresses map.
+    // Build ifname â†’ addresses map.
     let mut addr_map: HashMap<String, Vec<String>> = HashMap::new();
     for entry in &addr_entries {
         let cidrs: Vec<String> = entry
@@ -345,6 +346,8 @@ pub async fn apply_interface_with_ipv6(
         enabled = config.enabled,
         dhcp4 = config.dhcp4,
         dhcp6 = config.dhcp6,
+        accept_ra = config.accept_ra,
+        ipv6_mode = ?config.effective_ipv6_mode(),
         ipv6_enabled,
         addresses = ?config.addresses,
         "interfaces: applying interface configuration"
@@ -384,11 +387,18 @@ pub async fn apply_interface_with_ipv6(
                 // Ensure DHCP client is not competing with PPPoE on the same WAN.
                 stop_dhcp_client(name).await;
                 stop_dhcp6_client(name).await;
+                set_ipv6_ra_accept(name, false).await?;
                 let username = config.pppoe_username.as_deref().unwrap_or("");
                 let password = config.pppoe_password.as_deref().unwrap_or("");
                 start_pppoe(name, username, password, ipv6_enabled).await?;
             }
             _ => {
+                let ipv6_mode = config.effective_ipv6_mode();
+                let use_dhcp6 = ipv6_enabled && matches!(ipv6_mode, Ipv6Mode::Dhcp6);
+                let use_ra = ipv6_enabled && matches!(ipv6_mode, Ipv6Mode::Slaac);
+
+                set_ipv6_ra_accept(name, use_ra).await?;
+
                 if config.dhcp4 {
                     start_dhcp_client(name).await?;
                 } else {
@@ -396,15 +406,54 @@ pub async fn apply_interface_with_ipv6(
                     stop_dhcp_client(name).await;
                 }
 
-                if ipv6_enabled && config.dhcp6 {
+                if use_dhcp6 {
                     start_dhcp6_client(name).await?;
+                    // Start prefix-delegation client when ia_pd_hint_len is configured.
+                    if let Some(hint_len) = config.ia_pd_hint_len {
+                        prefix_delegation::ensure_pd_hook_installed().await.ok();
+                        start_dhcp6_pd_client(name, Some(hint_len)).await.ok();
+                    } else {
+                        stop_dhcp6_pd_client(name).await;
+                    }
                 } else {
                     stop_dhcp6_client(name).await;
+                    stop_dhcp6_pd_client(name).await;
+                }
+
+                // For TrackInterface LAN mode: apply the tracked prefix if already available.
+                // Full resolution (all LAN interfaces + radvd) happens in sync_interfaces_with_ipv6.
+                if ipv6_enabled && matches!(ipv6_mode, Ipv6Mode::TrackInterface) {
+                    if let Some(src) = &config.track_source_interface {
+                        let target_len = config.delegated_prefix_len.unwrap_or(64);
+                        let prefix_id = config.track_prefix_id.unwrap_or(0);
+                        match prefix_delegation::read_delegated_prefix(src) {
+                            Some(delegated) => {
+                                if let Some(assigned) = prefix_delegation::compute_track_address(
+                                    &delegated, prefix_id, target_len, 1,
+                                ) {
+                                    if let Err(e) = assign_ipv6_address_exclusive(name, &assigned).await {
+                                        warn!(name = %name, addr = %assigned, error = %e,
+                                            "interfaces: failed to assign tracked IPv6 prefix");
+                                    } else {
+                                        debug!(name = %name, assigned = %assigned,
+                                            "interfaces: applied tracked IPv6 prefix");
+                                    }
+                                }
+                            }
+                            None => {
+                                debug!(name = %name, source = %src,
+                                    "interfaces: delegated prefix not yet available");
+                            }
+                        }
+                    }
                 }
 
                 for cidr in &config.addresses {
                     if !ipv6_enabled && cidr.contains(':') {
                         return Err(InterfaceError::InvalidCIDR(cidr.clone()));
+                    }
+                    if cidr.contains(':') && !matches!(ipv6_mode, Ipv6Mode::Static) {
+                        continue;
                     }
                     if config.dhcp4 && !cidr.contains(':') {
                         continue;
@@ -437,6 +486,8 @@ pub async fn apply_interface_with_ipv6(
         stop_pppoe(name).await;
         stop_dhcp_client(name).await;
         stop_dhcp6_client(name).await;
+        stop_dhcp6_pd_client(name).await;
+        let _ = set_ipv6_ra_accept(name, false).await;
         info!(name = %name, "interfaces: bringing interface down");
         run_ip(&["link", "set", "dev", name, "down"]).await?;
     }
@@ -474,6 +525,9 @@ pub async fn sync_interfaces_with_ipv6(
 
     for config in configured {
         let kernel_iface = kernel_map.get(config.name.as_str()).copied();
+        let ipv6_mode = config.effective_ipv6_mode();
+        let manage_ipv4_static = !config.dhcp4;
+        let manage_ipv6_static = ipv6_enabled && matches!(ipv6_mode, Ipv6Mode::Static);
 
         let current_up = kernel_iface.map(|k| k.state == "UP").unwrap_or(false);
 
@@ -485,21 +539,50 @@ pub async fn sync_interfaces_with_ipv6(
         let desired_addrs = config
             .addresses
             .iter()
-            .filter(|addr| ipv6_enabled || !addr.contains(':'))
+            .filter(|addr| {
+                if addr.contains(':') {
+                    manage_ipv6_static
+                } else {
+                    manage_ipv4_static
+                }
+            })
             .cloned()
             .collect::<Vec<String>>();
-        let addrs_match = !config.dhcp4
-            && desired_addrs.len() == kernel_addrs.len()
-            && desired_addrs.iter().all(|a| kernel_addrs.contains(a));
+        let managed_kernel_addrs = kernel_addrs
+            .iter()
+            .filter(|addr| {
+                if addr.contains(':') {
+                    manage_ipv6_static
+                } else {
+                    manage_ipv4_static
+                }
+            })
+            .cloned()
+            .collect::<Vec<String>>();
+        let addrs_match = (manage_ipv4_static || manage_ipv6_static)
+            && desired_addrs.len() == managed_kernel_addrs.len()
+            && desired_addrs.iter().all(|a| managed_kernel_addrs.contains(a));
 
         if !already_up || !addrs_match {
             apply_interface_with_ipv6(config, ipv6_enabled).await?;
+        } else if config.enabled {
+            // Keep RA policy synchronized even when addresses/state are unchanged.
+            let enable_ra = ipv6_enabled
+                && matches!(ipv6_mode, Ipv6Mode::Slaac)
+                && !matches!(config.wan_mode.as_ref(), Some(WanMode::Pppoe));
+            set_ipv6_ra_accept(&config.name, enable_ra).await?;
         }
 
         // Remove stale static addresses from the kernel.
-        if config.enabled && !config.dhcp4 {
+        if config.enabled && (manage_ipv4_static || manage_ipv6_static) {
             if let Some(ki) = kernel_iface {
                 for kernel_addr in &ki.addresses {
+                    if kernel_addr.contains(':') && !manage_ipv6_static {
+                        continue;
+                    }
+                    if !kernel_addr.contains(':') && !manage_ipv4_static {
+                        continue;
+                    }
                     if !desired_addrs.contains(kernel_addr) {
                         warn!(
                             name = %config.name,
@@ -516,6 +599,79 @@ pub async fn sync_interfaces_with_ipv6(
     }
 
     info!("interfaces: sync complete");
+
+    // -----------------------------------------------------------------------
+    // Phase 2: Resolve tracked prefixes and apply radvd for LAN interfaces
+    // using ipv6_mode = track_interface.
+    // -----------------------------------------------------------------------
+    if ipv6_enabled {
+        let mut radvd_assignments: Vec<radvd::PrefixAssignment> = Vec::new();
+
+        for config in configured {
+            if !config.enabled {
+                continue;
+            }
+            if !matches!(config.effective_ipv6_mode(), Ipv6Mode::TrackInterface) {
+                continue;
+            }
+            let Some(src) = config.track_source_interface.as_deref() else {
+                continue;
+            };
+            let target_len = config.delegated_prefix_len.unwrap_or(64);
+            let prefix_id = config.track_prefix_id.unwrap_or(0);
+
+            match prefix_delegation::read_delegated_prefix(src) {
+                Some(delegated) => {
+                    match prefix_delegation::compute_track_address(&delegated, prefix_id, target_len, 1) {
+                        Some(assigned) => {
+                            // Assign address (replace any previous track-assigned address).
+                            if let Err(e) = assign_ipv6_address_exclusive(&config.name, &assigned).await {
+                                warn!(
+                                    name = %config.name,
+                                    addr = %assigned,
+                                    error = %e,
+                                    "interfaces: failed to set tracked prefix"
+                                );
+                            } else {
+                                info!(
+                                    name = %config.name,
+                                    assigned = %assigned,
+                                    source = %src,
+                                    "interfaces: applied tracked IPv6 prefix"
+                                );
+                                radvd_assignments.push(radvd::PrefixAssignment {
+                                    iface: config.name.clone(),
+                                    prefix: assigned,
+                                });
+                            }
+                        }
+                        None => {
+                            warn!(
+                                name = %config.name,
+                                delegated = %delegated,
+                                prefix_id,
+                                target_len,
+                                "interfaces: could not compute tracked prefix from delegated"
+                            );
+                        }
+                    }
+                }
+                None => {
+                    debug!(
+                        name = %config.name,
+                        source = %src,
+                        "interfaces: delegated prefix not yet available; will retry on next sync"
+                    );
+                }
+            }
+        }
+
+        // Update radvd with current set of assignments (stops radvd if empty).
+        if let Err(e) = radvd::apply_radvd(&radvd_assignments).await {
+            warn!(error = %e, "interfaces: radvd apply failed (non-fatal)");
+        }
+    }
+
     Ok(())
 }
 
@@ -634,6 +790,129 @@ async fn stop_dhcp6_client(name: &str) {
             debug!(name = %name, error = %e, "interfaces: could not remove dhclient6 PID file");
         }
     }
+}
+
+/// Start `dhclient -6 -P` for `name` to acquire an IPv6 prefix delegation.
+///
+/// When `hint_len` is provided, a dhclient config requesting that prefix size
+/// is written first.  The PID is written to `/run/dhclient6-pd.<name>.pid`.
+async fn start_dhcp6_pd_client(name: &str, hint_len: Option<u8>) -> Result<(), InterfaceError> {
+    let pid_file = format!("/run/dhclient6-pd.{name}.pid");
+    let lease_file = format!("/var/lib/dhclient/dhclient6-pd.{name}.leases");
+
+    stop_dhcp6_pd_client(name).await;
+
+    let mut args: Vec<String> = vec!["-6".into(), "-P".into()];
+
+    // If a prefix hint is given, write a config file and pass -cf.
+    if let Some(len) = hint_len {
+        match prefix_delegation::write_dhcp6_pd_conf(name, len).await {
+            Ok(conf_path) => {
+                args.push("-cf".into());
+                args.push(conf_path);
+            }
+            Err(e) => {
+                warn!(name = %name, hint_len = len, error = %e,
+                    "interfaces: could not write dhclient6-pd config; proceeding without hint");
+            }
+        }
+    }
+
+    args.extend([
+        "-pf".into(),
+        pid_file.clone(),
+        "-lf".into(),
+        lease_file,
+        name.to_string(),
+    ]);
+
+    info!(name = %name, hint_len = ?hint_len, "interfaces: starting dhclient6 prefix delegation");
+
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    Command::new("dhclient")
+        .args(&arg_refs)
+        .spawn()
+        .map_err(|e| {
+            InterfaceError::ApplyFailed(format!(
+                "failed to spawn dhclient6-pd for {name}: {e}"
+            ))
+        })?;
+    Ok(())
+}
+
+/// Stop the DHCPv6-PD client for `name`, releasing any active prefix lease.
+async fn stop_dhcp6_pd_client(name: &str) {
+    let pid_file = format!("/run/dhclient6-pd.{name}.pid");
+
+    let result = Command::new("dhclient")
+        .args(["-6", "-r", "-P", "-pf", &pid_file, name])
+        .output()
+        .await;
+
+    match result {
+        Ok(out) if out.status.success() => {
+            info!(name = %name, "interfaces: dhclient6-pd released prefix delegation");
+        }
+        Ok(out) => {
+            debug!(
+                name = %name,
+                stderr = %String::from_utf8_lossy(&out.stderr),
+                "interfaces: dhclient6-pd -r exited non-zero (may not have been running)"
+            );
+        }
+        Err(e) => {
+            debug!(name = %name, error = %e, "interfaces: dhclient6-pd not found or not spawnable");
+        }
+    }
+
+    if let Err(e) = std::fs::remove_file(&pid_file) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            debug!(name = %name, error = %e, "interfaces: could not remove dhclient6-pd PID file");
+        }
+    }
+}
+
+/// Assign an IPv6 address as the sole global-scope address on an interface.
+///
+/// Flushes all existing global-scope IPv6 addresses (which is correct for
+/// a `track_interface` LAN interface managed exclusively by DayShield) then
+/// adds the new address.
+async fn assign_ipv6_address_exclusive(name: &str, cidr: &str) -> Result<(), InterfaceError> {
+    // Remove all existing global-scope IPv6 addresses.
+    let _ = Command::new("ip")
+        .args(["-6", "addr", "flush", "dev", name, "scope", "global"])
+        .output()
+        .await;
+
+    // Add the new tracked address.
+    run_ip(&["addr", "add", cidr, "dev", name]).await
+}
+
+/// Configure Linux IPv6 Router Advertisement acceptance for an interface.
+///
+/// Uses `accept_ra=2` when enabled so RA works even if forwarding is enabled.
+async fn set_ipv6_ra_accept(name: &str, enabled: bool) -> Result<(), InterfaceError> {
+    let value = if enabled { "2" } else { "0" };
+    let key = format!("net.ipv6.conf.{name}.accept_ra");
+    let assignment = format!("{key}={value}");
+
+    debug!(name = %name, enabled, "interfaces: applying IPv6 RA acceptance");
+
+    let out = Command::new("sysctl")
+        .args(["-w", &assignment])
+        .output()
+        .await
+        .map_err(|e| InterfaceError::ApplyFailed(format!("failed to spawn sysctl for {name}: {e}")))?;
+
+    if !out.status.success() {
+        return Err(InterfaceError::ApplyFailed(format!(
+            "sysctl -w {assignment} exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        )));
+    }
+
+    Ok(())
 }
 
 /// Write PPPoE peer config and start `pppd` for `wan_iface`.
@@ -770,6 +1049,12 @@ mod tests {
             enabled,
             dhcp4: false,
             dhcp6: false,
+            accept_ra: false,
+            ipv6_mode: Some(Ipv6Mode::Static),
+            track_source_interface: None,
+            track_prefix_id: None,
+            delegated_prefix_len: None,
+            ia_pd_hint_len: None,
             vlan: None,
             parent_interface: None,
             wan_mode: None,

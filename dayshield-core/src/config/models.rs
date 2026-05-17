@@ -41,6 +41,21 @@ pub enum WanMode {
     Pppoe,
 }
 
+/// Per-interface IPv6 address acquisition mode.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Ipv6Mode {
+    /// Static IPv6 addressing configured on the interface.
+    #[default]
+    Static,
+    /// Obtain IPv6 addressing/state from DHCPv6.
+    Dhcp6,
+    /// Accept Router Advertisements and use SLAAC.
+    Slaac,
+    /// Track delegated prefix from another interface (DHCPv6-PD style).
+    TrackInterface,
+}
+
 /// Represents a managed network interface.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Interface {
@@ -65,6 +80,34 @@ pub struct Interface {
     pub dhcp4: bool,
     /// Obtain an IPv6 address via DHCP (reserved for future use).
     pub dhcp6: bool,
+    /// Accept IPv6 Router Advertisements (SLAAC).
+    ///
+    /// When enabled, DayShield sets `net.ipv6.conf.<iface>.accept_ra=2` so RA
+    /// can be used even while forwarding is enabled.
+    #[serde(default)]
+    pub accept_ra: bool,
+    /// Preferred IPv6 mode. If omitted, legacy `dhcp6` / `accept_ra` booleans
+    /// are used for backward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv6_mode: Option<Ipv6Mode>,
+    /// Source interface to track when `ipv6_mode = track_interface`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_source_interface: Option<String>,
+    /// Prefix ID for tracked-prefix subnet selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_prefix_id: Option<u8>,
+    /// Optional delegated prefix length hint for tracked prefixes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegated_prefix_len: Option<u8>,
+    /// DHCPv6-PD prefix size hint to request from the ISP.
+    ///
+    /// When set on a WAN interface with `ipv6_mode = dhcp6`, the engine starts
+    /// a separate DHCPv6-PD client (`dhclient -6 -P`) that requests a delegated
+    /// prefix of this length (e.g. `56` for a `/56`).
+    /// LAN interfaces tracking this WAN via `ipv6_mode = track_interface` will
+    /// then carve `/64` subnets from the delegated pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ia_pd_hint_len: Option<u8>,
     /// VLAN tag ID (802.1Q), if this is a VLAN sub-interface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vlan: Option<u16>,
@@ -90,6 +133,22 @@ pub struct Interface {
     /// after configuring the interface addresses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<String>,
+}
+
+impl Interface {
+    /// Resolve the effective IPv6 mode with backward compatibility for legacy
+    /// `dhcp6` / `accept_ra` booleans.
+    pub fn effective_ipv6_mode(&self) -> Ipv6Mode {
+        self.ipv6_mode.clone().unwrap_or_else(|| {
+            if self.dhcp6 {
+                Ipv6Mode::Dhcp6
+            } else if self.accept_ra {
+                Ipv6Mode::Slaac
+            } else {
+                Ipv6Mode::Static
+            }
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -44,7 +44,7 @@ const TMP_SUFFIX: &str = ".tmp";
 /// Backup file suffix used for rollback.
 const BAK_SUFFIX: &str = ".bak";
 
-// ── Permission-aware write helper ─────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ Permission-aware write helper Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 /// Write `data` to `path` with mode `0o600` (owner read/write only).
 ///
@@ -89,7 +89,7 @@ fn write_restricted(path: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-// ── Schema versioning ─────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ Schema versioning Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 /// The current on-disk schema version.
 ///
@@ -123,7 +123,7 @@ fn migrate_config(config: SystemConfig, from_version: u32) -> Result<SystemConfi
     while version < CURRENT_SCHEMA_VERSION {
         match version {
             0 => {
-                // Migration v0 → v1: no structural changes; the schema_version
+                // Migration v0 Ã¢â€ â€™ v1: no structural changes; the schema_version
                 // field was simply added to the on-disk envelope.
                 debug!("Migrating config from schema v0 to v1 (no-op)");
                 version = 1;
@@ -139,7 +139,7 @@ fn migrate_config(config: SystemConfig, from_version: u32) -> Result<SystemConfi
     Ok(config)
 }
 
-// ── Type alias for the post-save engine hook ──────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ Type alias for the post-save engine hook Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 /// Callback type invoked after a successful [`ConfigStore::save_with_rollback`].
 ///
@@ -302,7 +302,7 @@ impl ConfigStore {
             ensure_ipv6_allowed,
             is_valid_cidr, is_valid_domain, is_valid_interface_name, is_valid_ip,
             is_valid_ipv4_addr, is_valid_ipv4_range, is_valid_mac, is_valid_mss, is_valid_mtu, is_valid_port,
-            is_valid_vlan_id,
+            is_valid_vlan_id, Ipv6Mode,
         };
 
         let interface_names: std::collections::HashSet<&str> =
@@ -316,7 +316,7 @@ impl ConfigStore {
         for iface in &config.interfaces {
             if !is_valid_interface_name(&iface.name) {
                 anyhow::bail!(
-                    "Interface {:?} has an invalid name (must be 1–15 alphanumeric/[-_.] chars)",
+                    "Interface {:?} has an invalid name (must be 1Ã¢â‚¬â€œ15 alphanumeric/[-_.] chars)",
                     iface.name
                 );
             }
@@ -336,11 +336,74 @@ impl ConfigStore {
                     anyhow::bail!("{msg}");
                 }
             }
-            if iface.dhcp6 && !ipv6_enabled {
+            let ipv6_mode = iface.effective_ipv6_mode();
+
+            if !matches!(ipv6_mode, Ipv6Mode::Static) && !ipv6_enabled {
                 anyhow::bail!(
-                    "Interface {:?} enables DHCPv6 but system ipv6Enabled is false",
+                    "Interface {:?} selects non-static IPv6 mode but system ipv6Enabled is false",
                     iface.name
                 );
+            }
+            if matches!(ipv6_mode, Ipv6Mode::Slaac)
+                && !(iface.wan_mode.is_some() || iface.gateway.is_some())
+            {
+                anyhow::bail!(
+                    "Interface {:?} enables SLAAC/RA but is not WAN-designated",
+                    iface.name
+                );
+            }
+            if matches!(ipv6_mode, Ipv6Mode::TrackInterface) {
+                let source = iface.track_source_interface.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Interface {:?} uses track_interface mode but has no track_source_interface",
+                        iface.name
+                    )
+                })?;
+                if source == iface.name {
+                    anyhow::bail!(
+                        "Interface {:?} track_source_interface cannot reference itself",
+                        iface.name
+                    );
+                }
+                if !interface_names.contains(source) {
+                    anyhow::bail!(
+                        "Interface {:?} references unknown track_source_interface {:?}",
+                        iface.name,
+                        source
+                    );
+                }
+                if let Some(prefix_len) = iface.delegated_prefix_len {
+                    if prefix_len > 128 {
+                        anyhow::bail!(
+                            "Interface {:?} delegated_prefix_len {} is out of range 0-128",
+                            iface.name,
+                            prefix_len
+                        );
+                    }
+                }
+            }
+            // ia_pd_hint_len is only valid on WAN DHCPv6 interfaces.
+            if let Some(hint_len) = iface.ia_pd_hint_len {
+                if hint_len < 1 || hint_len > 128 {
+                    anyhow::bail!(
+                        "Interface {:?} ia_pd_hint_len {} is out of range 1-128",
+                        iface.name,
+                        hint_len
+                    );
+                }
+                let is_wan = iface.wan_mode.is_some() || iface.gateway.is_some();
+                if !is_wan {
+                    anyhow::bail!(
+                        "Interface {:?} ia_pd_hint_len can only be set on WAN-designated interfaces",
+                        iface.name
+                    );
+                }
+                if !matches!(iface.effective_ipv6_mode(), Ipv6Mode::Dhcp6) {
+                    anyhow::bail!(
+                        "Interface {:?} ia_pd_hint_len requires ipv6_mode = dhcp6",
+                        iface.name
+                    );
+                }
             }
             if let Some(gateway) = &iface.gateway {
                 if !is_valid_ip(gateway) {
@@ -361,7 +424,7 @@ impl ConfigStore {
             if let Some(mtu) = iface.mtu {
                 if !is_valid_mtu(mtu) {
                     anyhow::bail!(
-                        "Interface {:?} has invalid MTU {} (must be ≥ 68)",
+                        "Interface {:?} has invalid MTU {} (must be Ã¢â€°Â¥ 68)",
                         iface.name,
                         mtu
                     );
@@ -370,7 +433,7 @@ impl ConfigStore {
             if let Some(mss) = iface.mss {
                 if !is_valid_mss(mss) {
                     anyhow::bail!(
-                        "Interface {:?} has invalid MSS {} (must be ≥ 536)",
+                        "Interface {:?} has invalid MSS {} (must be Ã¢â€°Â¥ 536)",
                         iface.name,
                         mss
                     );
@@ -477,7 +540,7 @@ impl ConfigStore {
             for port in &settings.management_ports {
                 if !is_valid_port(*port) {
                     anyhow::bail!(
-                        "Firewall management_ports contains invalid port {} (must be 1–65535)",
+                        "Firewall management_ports contains invalid port {} (must be 1Ã¢â‚¬â€œ65535)",
                         port
                     );
                 }
@@ -572,7 +635,7 @@ impl ConfigStore {
                 }
                 if !is_valid_ipv4_range(&scope.pool_start, &scope.pool_end) {
                     anyhow::bail!(
-                        "DHCP scope {} pool_start {} must be ≤ pool_end {}",
+                        "DHCP scope {} pool_start {} must be Ã¢â€°Â¤ pool_end {}",
                         scope.id,
                         scope.pool_start,
                         scope.pool_end
@@ -656,7 +719,7 @@ impl ConfigStore {
                 if !validate_alias_name(&alias.name) {
                     anyhow::bail!(
                         "Firewall alias has invalid name {:?} \
-                         (must be 1–63 chars, start with letter or _, contain only [A-Za-z0-9_])",
+                         (must be 1Ã¢â‚¬â€œ63 chars, start with letter or _, contain only [A-Za-z0-9_])",
                         alias.name
                     );
                 }
@@ -743,7 +806,7 @@ impl ConfigStore {
                 if !validate_wg_interface_name(&wg.name) {
                     anyhow::bail!(
                         "WireGuard interface has invalid name {:?} \
-                         (must be 1–15 alphanumeric/[-_.] chars)",
+                         (must be 1Ã¢â‚¬â€œ15 alphanumeric/[-_.] chars)",
                         wg.name
                     );
                 }
@@ -875,7 +938,7 @@ impl ConfigStore {
                 if !validate_alias_name(&cs.ban_alias_name) {
                     anyhow::bail!(
                         "CrowdSec ban_alias_name {:?} is invalid \
-                         (must be 1–63 chars, start with letter or _, contain only [A-Za-z0-9_])",
+                         (must be 1Ã¢â‚¬â€œ63 chars, start with letter or _, contain only [A-Za-z0-9_])",
                         cs.ban_alias_name
                     );
                 }
@@ -1440,7 +1503,7 @@ impl Default for ConfigStore {
     }
 }
 
-// ── JSON fragment merge ────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ JSON fragment merge Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 /// Recursively merge `src` into `dst`.
 ///
@@ -1490,6 +1553,12 @@ mod tests {
             enabled: true,
             dhcp4: false,
             dhcp6: false,
+            accept_ra: false,
+            ipv6_mode: Some(crate::config::models::Ipv6Mode::Static),
+            track_source_interface: None,
+            track_prefix_id: None,
+            delegated_prefix_len: None,
+            ia_pd_hint_len: None,
             vlan: None,
             parent_interface: None,
             wan_mode: None,
@@ -1614,6 +1683,12 @@ mod tests {
             enabled: true,
             dhcp4: false,
             dhcp6: false,
+            accept_ra: false,
+            ipv6_mode: Some(crate::config::models::Ipv6Mode::Static),
+            track_source_interface: None,
+            track_prefix_id: None,
+            delegated_prefix_len: None,
+            ia_pd_hint_len: None,
             vlan: None,
             parent_interface: None,
             wan_mode: None,
@@ -1641,6 +1716,12 @@ mod tests {
             enabled: true,
             dhcp4: false,
             dhcp6: false,
+            accept_ra: false,
+            ipv6_mode: Some(crate::config::models::Ipv6Mode::Static),
+            track_source_interface: None,
+            track_prefix_id: None,
+            delegated_prefix_len: None,
+            ia_pd_hint_len: None,
             vlan: None,
             parent_interface: None,
             wan_mode: None,
@@ -1668,6 +1749,12 @@ mod tests {
             enabled: true,
             dhcp4: false,
             dhcp6: false,
+            accept_ra: false,
+            ipv6_mode: Some(crate::config::models::Ipv6Mode::Static),
+            track_source_interface: None,
+            track_prefix_id: None,
+            delegated_prefix_len: None,
+            ia_pd_hint_len: None,
             vlan: None,
             parent_interface: None,
             wan_mode: None,
@@ -1695,6 +1782,12 @@ mod tests {
             enabled: true,
             dhcp4: false,
             dhcp6: false,
+            accept_ra: false,
+            ipv6_mode: Some(crate::config::models::Ipv6Mode::Static),
+            track_source_interface: None,
+            track_prefix_id: None,
+            delegated_prefix_len: None,
+            ia_pd_hint_len: None,
             vlan: Some(100),
             parent_interface: None,
             wan_mode: None,
@@ -1722,6 +1815,12 @@ mod tests {
             enabled: true,
             dhcp4: false,
             dhcp6: false,
+            accept_ra: false,
+            ipv6_mode: Some(crate::config::models::Ipv6Mode::Static),
+            track_source_interface: None,
+            track_prefix_id: None,
+            delegated_prefix_len: None,
+            ia_pd_hint_len: None,
             vlan: Some(100),
             parent_interface: Some("eth9".into()),
             wan_mode: None,
@@ -1750,6 +1849,12 @@ mod tests {
             enabled: true,
             dhcp4: false,
             dhcp6: false,
+            accept_ra: false,
+            ipv6_mode: Some(crate::config::models::Ipv6Mode::Static),
+            track_source_interface: None,
+            track_prefix_id: None,
+            delegated_prefix_len: None,
+            ia_pd_hint_len: None,
             vlan: Some(100),
             parent_interface: Some("eth0".into()),
             wan_mode: None,

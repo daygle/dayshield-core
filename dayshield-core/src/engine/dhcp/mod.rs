@@ -163,7 +163,8 @@ pub async fn apply_config(config: &DhcpConfig) -> Result<()> {
 
     std::fs::create_dir_all("/etc/kea").context("failed to create /etc/kea")?;
     #[cfg(unix)]
-    std::fs::set_permissions("/etc/kea", std::fs::Permissions::from_mode(0o755))
+    // Keep this aligned with the kea-dhcp4-server systemd drop-in.
+    std::fs::set_permissions("/etc/kea", std::fs::Permissions::from_mode(0o750))
         .context("failed to chmod /etc/kea")?;
     std::fs::create_dir_all("/var/log/kea").context("failed to create /var/log/kea")?;
 

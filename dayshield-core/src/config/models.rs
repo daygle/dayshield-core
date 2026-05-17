@@ -258,6 +258,15 @@ pub fn is_valid_mac(mac: &str) -> bool {
     parts.len() == 6 && parts.iter().all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
+/// Return `true` if `duid` is a syntactically valid DHCPv6 DUID.
+///
+/// A DUID is a colon-separated sequence of hex octets (at least 3 bytes).
+/// Example: `00:03:00:01:aa:bb:cc:dd:ee:ff`
+pub fn is_valid_duid(duid: &str) -> bool {
+    let parts: Vec<&str> = duid.split(':').collect();
+    parts.len() >= 3 && parts.iter().all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
 /// Return `true` if `domain` is a syntactically valid domain name.
 ///
 /// Rules (per RFC 1035 / 952):
@@ -1075,6 +1084,56 @@ pub struct DhcpReservation {
     pub mac_address: String,
     pub ip_address: String,
     /// Optional human-readable label for this reservation.
+    #[serde(default)]
+    pub description: String,
+}
+
+/// Configuration for the DHCPv6 server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Dhcp6Config {
+    /// Whether the DHCPv6 service should be running.
+    pub enabled: bool,
+    /// Interface the DHCPv6 server listens on (e.g. "eth1").
+    #[serde(default)]
+    pub interface: String,
+    /// DHCPv6 scopes (one per subnet).
+    pub scopes: Vec<Dhcp6Scope>,
+}
+
+/// A DHCPv6 address pool for a single subnet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Dhcp6Scope {
+    pub id: Uuid,
+    /// IPv6 subnet in CIDR notation.
+    pub subnet: String,
+    /// First address in the dynamic pool.
+    pub pool_start: String,
+    /// Last address in the dynamic pool.
+    pub pool_end: String,
+    /// DNS servers to advertise.
+    pub dns_servers: Vec<String>,
+    /// Lease duration in seconds.
+    pub lease_seconds: u32,
+    /// DNS search domain to advertise (optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain_name: Option<String>,
+    /// Static DUID → IPv6 address reservations for this scope.
+    #[serde(default)]
+    pub reservations: Vec<Dhcp6Reservation>,
+}
+
+/// A static DHCPv6 reservation (DUID → IPv6 address binding).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Dhcp6Reservation {
+    pub id: Uuid,
+    /// DHCP Unique Identifier (colon-separated hex, e.g. `00:03:00:01:aa:bb:cc:dd:ee:ff`).
+    pub duid: String,
+    /// Reserved IPv6 address.
+    pub ip_address: String,
+    /// Optional hostname hint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    /// Human-readable note.
     #[serde(default)]
     pub description: String,
 }
@@ -2335,6 +2394,8 @@ pub struct SystemConfig {
     pub nat: Option<NatConfig>,
     pub dns: Option<DnsConfig>,
     pub dhcp: Option<DhcpConfig>,
+    #[serde(default)]
+    pub dhcp6: Option<Dhcp6Config>,
     pub vpn_tunnels: Vec<VpnTunnel>,
     /// WireGuard VPN interfaces managed by DayShield.
     #[serde(default)]

@@ -234,6 +234,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         // DHCP
         .route("/dhcp/config", get(dhcp::get_config))
         .route("/dhcp/config", post(dhcp::update_config))
+        .route("/dhcp6/config", get(dhcp::get_config_v6))
+        .route("/dhcp6/config", post(dhcp::update_config_v6))
+        .route("/dhcp6/static-leases", get(dhcp::list_dhcp6_static_leases))
+        .route("/dhcp6/static-leases", post(dhcp::create_dhcp6_static_lease))
+        .route("/dhcp6/static-leases/{id}", delete(dhcp::delete_dhcp6_static_lease))
+        .route("/dhcp6/leases", get(dhcp::list_active_dhcp6_leases))
         .route("/dhcp/static-leases", get(dhcp::list_static_leases))
         .route("/dhcp/static-leases", post(dhcp::create_static_lease))
         .route("/dhcp/static-leases/{id}", delete(dhcp::delete_static_lease))
@@ -242,6 +248,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Per-interface DHCP
         .route("/interfaces/{name}/dhcp/config", get(dhcp::get_interface_dhcp_config))
         .route("/interfaces/{name}/dhcp/config", post(dhcp::update_interface_dhcp_config))
+        .route("/interfaces/{name}/dhcp6/config", get(dhcp::get_interface_dhcp6_config))
+        .route("/interfaces/{name}/dhcp6/config", post(dhcp::update_interface_dhcp6_config))
         .route("/interfaces/{name}/dhcp/static-leases", get(dhcp::list_interface_static_leases))
         .route("/interfaces/{name}/dhcp/static-leases", post(dhcp::create_interface_static_lease))
         .route("/interfaces/{name}/dhcp/static-leases/{id}", delete(dhcp::delete_interface_static_lease))

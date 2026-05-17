@@ -29,7 +29,7 @@ use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
 use super::models::{
-    AcmeConfig, AdminSecuritySettings, AiEngineConfig, CloudflaredConfig, CrowdSecConfig, DhcpConfig, DnsConfig, DnsDomainOverride,
+    AcmeConfig, AdminSecuritySettings, AiEngineConfig, CloudflaredConfig, CrowdSecConfig, Dhcp6Config, DhcpConfig, DnsConfig, DnsDomainOverride,
     DynamicDnsConfig,
     DnsHostOverride, DotConfig, FirewallAlias, FirewallRule, FirewallSettings, Gateway, Interface, NatConfig,
     NotifyConfig, NtpConfig, SuricataConfig, SystemConfig, WireGuardInterface,
@@ -678,6 +678,78 @@ impl ConfigStore {
             }
         }
 
+        // DHCPv6 config validation.
+        if let Some(dhcp6) = &config.dhcp6 {
+            for scope in &dhcp6.scopes {
+                if !crate::config::models::is_valid_ipv6_cidr(&scope.subnet) {
+                    anyhow::bail!(
+                        "DHCPv6 scope {} has invalid subnet {:?}",
+                        scope.id,
+                        scope.subnet
+                    );
+                }
+                if !crate::config::models::is_valid_ipv6_addr(&scope.pool_start) {
+                    anyhow::bail!(
+                        "DHCPv6 scope {} has invalid pool_start {:?}",
+                        scope.id,
+                        scope.pool_start
+                    );
+                }
+                if !crate::config::models::is_valid_ipv6_addr(&scope.pool_end) {
+                    anyhow::bail!(
+                        "DHCPv6 scope {} has invalid pool_end {:?}",
+                        scope.id,
+                        scope.pool_end
+                    );
+                }
+                let start = scope
+                    .pool_start
+                    .parse::<std::net::Ipv6Addr>()
+                    .map(u128::from)
+                    .map_err(|_| anyhow::anyhow!("invalid DHCPv6 pool_start"))?;
+                let end = scope
+                    .pool_end
+                    .parse::<std::net::Ipv6Addr>()
+                    .map(u128::from)
+                    .map_err(|_| anyhow::anyhow!("invalid DHCPv6 pool_end"))?;
+                if start > end {
+                    anyhow::bail!(
+                        "DHCPv6 scope {} pool_start {} must be <= pool_end {}",
+                        scope.id,
+                        scope.pool_start,
+                        scope.pool_end
+                    );
+                }
+                for dns in &scope.dns_servers {
+                    if !crate::config::models::is_valid_ipv6_addr(dns) {
+                        anyhow::bail!(
+                            "DHCPv6 scope {} has invalid DNS server {:?}",
+                            scope.id,
+                            dns
+                        );
+                    }
+                }
+                for reservation in &scope.reservations {
+                    if !crate::config::models::is_valid_duid(&reservation.duid) {
+                        anyhow::bail!(
+                            "DHCPv6 scope {} reservation {} has invalid DUID {:?}",
+                            scope.id,
+                            reservation.id,
+                            reservation.duid
+                        );
+                    }
+                    if !crate::config::models::is_valid_ipv6_addr(&reservation.ip_address) {
+                        anyhow::bail!(
+                            "DHCPv6 scope {} reservation {} has invalid ip_address {:?}",
+                            scope.id,
+                            reservation.id,
+                            reservation.ip_address
+                        );
+                    }
+                }
+            }
+        }
+
         // DNS local record type validation.
         if let Some(dns) = &config.dns {
             for rec in &dns.local_records {
@@ -1195,6 +1267,24 @@ impl ConfigStore {
     pub fn save_dhcp_config(&self, dhcp: DhcpConfig) -> Result<()> {
         let mut config = self.load()?;
         config.dhcp = Some(dhcp);
+        self.save_with_rollback(&config)
+    }
+
+    /// Return the DHCPv6 configuration from the persisted config.
+    ///
+    /// Returns `None` if no DHCPv6 configuration has been saved yet.
+    pub fn load_dhcp6_config(&self) -> Result<Option<Dhcp6Config>> {
+        Ok(self.load()?.dhcp6)
+    }
+
+    /// Atomically replace the DHCPv6 configuration in the persisted config.
+    ///
+    /// Loads the current config, replaces `dhcp6`, validates, then calls
+    /// [`Self::save_with_rollback`] to write atomically with rollback on
+    /// post-write validation failure.
+    pub fn save_dhcp6_config(&self, dhcp6: Dhcp6Config) -> Result<()> {
+        let mut config = self.load()?;
+        config.dhcp6 = Some(dhcp6);
         self.save_with_rollback(&config)
     }
 
@@ -1888,7 +1978,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn make_rule(description: &str) -> crate::config::models::FirewallRule {
-        use crate::config::models::{Action, FirewallRule};
+        use crate::config::models::{Action, FirewallDirection, FirewallRule};
         FirewallRule {
             id: uuid::Uuid::new_v4(),
             description: Some(description.into()),
@@ -1899,8 +1989,11 @@ mod tests {
             source_port: None,
             destination_port: None,
             action: Action::Accept,
+            direction: FirewallDirection::Forward,
             interface: None,
             log: false,
+            enabled: true,
+            schedule: None,
         }
     }
 
@@ -1952,7 +2045,7 @@ mod tests {
 
     #[test]
     fn save_firewall_rules_rejects_negative_priority() {
-        use crate::config::models::{Action, FirewallRule};
+        use crate::config::models::{Action, FirewallDirection, FirewallRule};
 
         let dir = temp_dir();
         let store = ConfigStore::with_dir(&dir);
@@ -1967,8 +2060,11 @@ mod tests {
             source_port: None,
             destination_port: None,
             action: Action::Drop,
+            direction: FirewallDirection::Forward,
             interface: None,
             log: false,
+            enabled: true,
+            schedule: None,
         };
 
         let result = store.save_firewall_rules(vec![bad_rule]);
@@ -2084,6 +2180,7 @@ mod tests {
         use crate::config::models::{DhcpConfig, DhcpScope};
         DhcpConfig {
             enabled: true,
+            interface: "eth1".into(),
             scopes: vec![DhcpScope {
                 id: uuid::Uuid::new_v4(),
                 subnet: "192.168.1.0/24".into(),
@@ -2092,6 +2189,7 @@ mod tests {
                 gateway: Some("192.168.1.1".into()),
                 dns_servers: vec!["1.1.1.1".into()],
                 lease_seconds: 86400,
+                domain_name: None,
                 reservations: vec![],
             }],
         }
@@ -2203,6 +2301,7 @@ mod tests {
         let mut cfg = SystemConfig::default();
         cfg.dhcp = Some(crate::config::models::DhcpConfig {
             enabled: true,
+            interface: "eth1".into(),
             scopes: vec![crate::config::models::DhcpScope {
                 id: uuid::Uuid::new_v4(),
                 subnet: "192.168.1.0/24".into(),
@@ -2211,11 +2310,13 @@ mod tests {
                 gateway: None,
                 dns_servers: vec![],
                 lease_seconds: 86400,
+                domain_name: None,
                 reservations: vec![crate::config::models::DhcpReservation {
                     id: uuid::Uuid::new_v4(),
                     hostname: None,
                     mac_address: "not-a-mac".into(),
                     ip_address: "192.168.1.50".into(),
+                    description: String::new(),
                 }],
             }],
         });
@@ -2232,6 +2333,7 @@ mod tests {
         let mut cfg = SystemConfig::default();
         cfg.dhcp = Some(crate::config::models::DhcpConfig {
             enabled: true,
+            interface: "eth1".into(),
             scopes: vec![crate::config::models::DhcpScope {
                 id: uuid::Uuid::new_v4(),
                 subnet: "192.168.1.0/24".into(),
@@ -2240,6 +2342,7 @@ mod tests {
                 gateway: None,
                 dns_servers: vec![],
                 lease_seconds: 86400,
+                domain_name: None,
                 reservations: vec![],
             }],
         });

@@ -17,6 +17,7 @@
 pub mod acme;
 pub mod crowdsec;
 pub mod dhcp;
+pub mod dhcp6;
 pub mod dns;
 pub mod gateway;
 pub mod interfaces;

@@ -29,10 +29,11 @@ use uuid::Uuid;
 
 use crate::{
     config::models::{
-        is_valid_ipv4_addr, is_valid_ipv4_range, is_valid_mac,
-        DhcpConfig, DhcpReservation, DhcpScope,
+        is_valid_duid, is_valid_ipv4_addr, is_valid_ipv4_range, is_valid_ipv6_addr,
+        is_valid_ipv6_cidr, is_valid_mac, Dhcp6Config, Dhcp6Reservation, Dhcp6Scope, DhcpConfig,
+        DhcpReservation, DhcpScope,
     },
-    engine::dhcp::apply_config,
+    engine::{dhcp::apply_config as apply_dhcp4_config, dhcp6::apply_config as apply_dhcp6_config},
     state::AppState,
 };
 
@@ -371,7 +372,7 @@ pub async fn update_config(
 
     // --- Apply -------------------------------------------------------------
 
-    apply_config(&cfg)
+    apply_dhcp4_config(&cfg)
         .await
         .map_err(|e| DhcpError::EngineError(e.to_string()))?;
 
@@ -488,7 +489,7 @@ pub async fn create_static_lease(
         .save_dhcp_config(cfg.clone())
         .map_err(DhcpError::StorageError)?;
 
-    apply_config(&cfg)
+    apply_dhcp4_config(&cfg)
         .await
         .map_err(|e| DhcpError::EngineError(e.to_string()))?;
 
@@ -539,7 +540,7 @@ pub async fn delete_static_lease(
         .save_dhcp_config(cfg.clone())
         .map_err(DhcpError::StorageError)?;
 
-    apply_config(&cfg)
+    apply_dhcp4_config(&cfg)
         .await
         .map_err(|e| DhcpError::EngineError(e.to_string()))?;
 
@@ -807,7 +808,7 @@ pub async fn update_interface_dhcp_config(
 
     // --- Apply -------------------------------------------------------------
 
-    apply_config(&cfg)
+    apply_dhcp4_config(&cfg)
         .await
         .map_err(|e| DhcpError::EngineError(e.to_string()))?;
 
@@ -945,7 +946,7 @@ pub async fn create_interface_static_lease(
         .save_dhcp_config(cfg.clone())
         .map_err(DhcpError::StorageError)?;
 
-    apply_config(&cfg)
+    apply_dhcp4_config(&cfg)
         .await
         .map_err(|e| DhcpError::EngineError(e.to_string()))?;
 
@@ -1006,11 +1007,583 @@ pub async fn delete_interface_static_lease(
         .save_dhcp_config(cfg.clone())
         .map_err(DhcpError::StorageError)?;
 
-    apply_config(&cfg)
+    apply_dhcp4_config(&cfg)
         .await
         .map_err(|e| DhcpError::EngineError(e.to_string()))?;
 
     info!(%id, interface = %interface_name, "dhcp: static lease deleted from interface");
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// DHCPv6 API DTO types (camelCase for UI compatibility)
+// ---------------------------------------------------------------------------
+
+/// Response for a single DHCPv6 static lease.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Dhcp6StaticLeaseResponse {
+    pub id: String,
+    pub duid: String,
+    pub ip_address: String,
+    pub hostname: String,
+    pub description: String,
+}
+
+/// Request body for `POST /dhcp6/static-leases`.
+/// Accepts either a raw DUID or a MAC address (which is auto-converted to DUID-LL).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateDhcp6StaticLeaseRequest {
+    /// Raw DUID (colon-separated hex). Takes precedence over `mac` if both provided.
+    pub duid: Option<String>,
+    /// MAC address (aa:bb:cc:dd:ee:ff). Converted to DUID-LL: 00:03:00:01:<mac>.
+    pub mac: Option<String>,
+    pub ip_address: String,
+    pub hostname: Option<String>,
+    pub description: Option<String>,
+}
+
+/// Response for a single active DHCPv6 lease.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Dhcp6LeaseResponse {
+    pub ip_address: String,
+    pub duid: String,
+    pub hostname: String,
+    pub ends: String,
+    pub state: String,
+}
+
+/// Flat DHCPv6 config response matching the TypeScript `Dhcp6Config` interface.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Dhcp6FlatConfigResponse {
+    pub enabled: bool,
+    pub interface: String,
+    /// Subnet in CIDR notation (e.g. `fd00::/64`).
+    pub subnet: String,
+    pub range_start: String,
+    pub range_end: String,
+    pub dns_servers: Vec<String>,
+    pub lease_time: u32,
+    pub domain_name: String,
+}
+
+/// Request body for `POST /dhcp6/config`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateDhcp6FlatRequest {
+    pub enabled: Option<bool>,
+    pub interface: Option<String>,
+    pub subnet: Option<String>,
+    pub range_start: Option<String>,
+    pub range_end: Option<String>,
+    pub dns_servers: Option<Vec<String>>,
+    pub lease_time: Option<u32>,
+    pub domain_name: Option<String>,
+}
+
+fn default_dhcp6_cfg() -> Dhcp6Config {
+    Dhcp6Config {
+        enabled: false,
+        interface: String::new(),
+        scopes: vec![],
+    }
+}
+
+fn to_flat_response_v6(cfg: &Dhcp6Config) -> Dhcp6FlatConfigResponse {
+    if let Some(scope) = cfg.scopes.first() {
+        Dhcp6FlatConfigResponse {
+            enabled: cfg.enabled,
+            interface: cfg.interface.clone(),
+            subnet: scope.subnet.clone(),
+            range_start: scope.pool_start.clone(),
+            range_end: scope.pool_end.clone(),
+            dns_servers: scope.dns_servers.clone(),
+            lease_time: scope.lease_seconds,
+            domain_name: scope.domain_name.clone().unwrap_or_default(),
+        }
+    } else {
+        Dhcp6FlatConfigResponse {
+            enabled: cfg.enabled,
+            interface: cfg.interface.clone(),
+            subnet: String::new(),
+            range_start: String::new(),
+            range_end: String::new(),
+            dns_servers: vec![],
+            lease_time: 86400,
+            domain_name: String::new(),
+        }
+    }
+}
+
+fn derive_subnet_from_ipv6_addr(addr: &str) -> String {
+    if let Ok(ip) = addr.parse::<std::net::Ipv6Addr>() {
+        let seg = ip.segments();
+        return format!("{:x}:{:x}:{:x}:{:x}::/64", seg[0], seg[1], seg[2], seg[3]);
+    }
+    "fd00::/64".to_string()
+}
+
+fn is_valid_ipv6_range(start: &str, end: &str) -> bool {
+    match (
+        start.parse::<std::net::Ipv6Addr>(),
+        end.parse::<std::net::Ipv6Addr>(),
+    ) {
+        (Ok(s), Ok(e)) => u128::from(s) <= u128::from(e),
+        _ => false,
+    }
+}
+
+fn validate_dhcp6_scope(scope: &Dhcp6Scope) -> Result<(), DhcpError> {
+    if !scope.subnet.is_empty() && !is_valid_ipv6_cidr(&scope.subnet) {
+        return Err(DhcpError::ValidationFailed(format!(
+            "invalid subnet: {}",
+            scope.subnet
+        )));
+    }
+    if !scope.pool_start.is_empty() && !is_valid_ipv6_addr(&scope.pool_start) {
+        return Err(DhcpError::ValidationFailed(format!(
+            "invalid rangeStart: {}",
+            scope.pool_start
+        )));
+    }
+    if !scope.pool_end.is_empty() && !is_valid_ipv6_addr(&scope.pool_end) {
+        return Err(DhcpError::ValidationFailed(format!(
+            "invalid rangeEnd: {}",
+            scope.pool_end
+        )));
+    }
+    if !scope.pool_start.is_empty()
+        && !scope.pool_end.is_empty()
+        && !is_valid_ipv6_range(&scope.pool_start, &scope.pool_end)
+    {
+        return Err(DhcpError::ValidationFailed(format!(
+            "rangeStart {} must be <= rangeEnd {}",
+            scope.pool_start, scope.pool_end
+        )));
+    }
+    for dns in &scope.dns_servers {
+        if !is_valid_ipv6_addr(dns) {
+            return Err(DhcpError::ValidationFailed(format!("invalid DNS server: {dns}")));
+        }
+    }
+    Ok(())
+}
+
+/// Return the DHCPv6 configuration in a flat format compatible with the UI.
+pub async fn get_config_v6(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, DhcpError> {
+    let cfg = state
+        .config_store
+        .load_dhcp6_config()
+        .map_err(DhcpError::StorageError)?
+        .unwrap_or_else(default_dhcp6_cfg);
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": to_flat_response_v6(&cfg)
+    })))
+}
+
+/// Update the DHCPv6 configuration from a flat request body.
+pub async fn update_config_v6(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateDhcp6FlatRequest>,
+) -> Result<impl IntoResponse, DhcpError> {
+    let mut cfg = state
+        .config_store
+        .load_dhcp6_config()
+        .map_err(DhcpError::StorageError)?
+        .unwrap_or_else(default_dhcp6_cfg);
+
+    if let Some(v) = req.enabled { cfg.enabled = v; }
+    if let Some(v) = req.interface { cfg.interface = v; }
+
+    if cfg.scopes.is_empty() {
+        let subnet = req
+            .subnet
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .or_else(|| {
+                req.range_start
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(derive_subnet_from_ipv6_addr)
+            })
+            .unwrap_or_else(|| "fd00::/64".to_string());
+
+        cfg.scopes.push(Dhcp6Scope {
+            id: Uuid::new_v4(),
+            subnet,
+            pool_start: String::new(),
+            pool_end: String::new(),
+            dns_servers: vec![],
+            lease_seconds: 86400,
+            domain_name: None,
+            reservations: vec![],
+        });
+    }
+
+    let scope = &mut cfg.scopes[0];
+    if let Some(v) = req.subnet.filter(|s| !s.is_empty()) { scope.subnet = v; }
+    if let Some(v) = req.range_start { scope.pool_start = v; }
+    if let Some(v) = req.range_end { scope.pool_end = v; }
+    if let Some(v) = req.dns_servers { scope.dns_servers = v; }
+    if let Some(v) = req.lease_time { scope.lease_seconds = v; }
+    if let Some(v) = req.domain_name { scope.domain_name = if v.is_empty() { None } else { Some(v) }; }
+
+    validate_dhcp6_scope(scope)?;
+
+    state
+        .config_store
+        .save_dhcp6_config(cfg.clone())
+        .map_err(DhcpError::StorageError)?;
+
+    apply_dhcp6_config(&cfg)
+        .await
+        .map_err(|e| DhcpError::EngineError(e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": to_flat_response_v6(&cfg)
+    })))
+}
+
+/// Get DHCPv6 configuration for a specific interface.
+pub async fn get_interface_dhcp6_config(
+    State(state): State<Arc<AppState>>,
+    Path(interface_name): Path<String>,
+) -> Result<impl IntoResponse, DhcpError> {
+    let cfg = state
+        .config_store
+        .load_dhcp6_config()
+        .map_err(DhcpError::StorageError)?
+        .unwrap_or_else(default_dhcp6_cfg);
+
+    if cfg.interface != interface_name && !cfg.interface.is_empty() {
+        let empty_response = Dhcp6FlatConfigResponse {
+            enabled: false,
+            interface: interface_name,
+            subnet: String::new(),
+            range_start: String::new(),
+            range_end: String::new(),
+            dns_servers: vec![],
+            lease_time: 86400,
+            domain_name: String::new(),
+        };
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "data": empty_response
+        })));
+    }
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": to_flat_response_v6(&cfg)
+    })))
+}
+
+/// Update DHCPv6 configuration for a specific interface.
+pub async fn update_interface_dhcp6_config(
+    State(state): State<Arc<AppState>>,
+    Path(interface_name): Path<String>,
+    Json(req): Json<UpdateDhcp6FlatRequest>,
+) -> Result<impl IntoResponse, DhcpError> {
+    let mut cfg = state
+        .config_store
+        .load_dhcp6_config()
+        .map_err(DhcpError::StorageError)?
+        .unwrap_or_else(default_dhcp6_cfg);
+
+    cfg.interface = interface_name;
+    if let Some(v) = req.enabled { cfg.enabled = v; }
+
+    if cfg.scopes.is_empty() {
+        let subnet = req
+            .subnet
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .or_else(|| {
+                req.range_start
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(derive_subnet_from_ipv6_addr)
+            })
+            .unwrap_or_else(|| "fd00::/64".to_string());
+
+        cfg.scopes.push(Dhcp6Scope {
+            id: Uuid::new_v4(),
+            subnet,
+            pool_start: String::new(),
+            pool_end: String::new(),
+            dns_servers: vec![],
+            lease_seconds: 86400,
+            domain_name: None,
+            reservations: vec![],
+        });
+    }
+
+    let scope = &mut cfg.scopes[0];
+    if let Some(v) = req.subnet.filter(|s| !s.is_empty()) { scope.subnet = v; }
+    if let Some(v) = req.range_start { scope.pool_start = v; }
+    if let Some(v) = req.range_end { scope.pool_end = v; }
+    if let Some(v) = req.dns_servers { scope.dns_servers = v; }
+    if let Some(v) = req.lease_time { scope.lease_seconds = v; }
+    if let Some(v) = req.domain_name { scope.domain_name = if v.is_empty() { None } else { Some(v) }; }
+
+    validate_dhcp6_scope(scope)?;
+
+    state
+        .config_store
+        .save_dhcp6_config(cfg.clone())
+        .map_err(DhcpError::StorageError)?;
+
+    apply_dhcp6_config(&cfg)
+        .await
+        .map_err(|e| DhcpError::EngineError(e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": to_flat_response_v6(&cfg)
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// GET /dhcp6/static-leases
+// ---------------------------------------------------------------------------
+
+/// Return all DUID → IPv6 static reservations across all DHCPv6 scopes.
+pub async fn list_dhcp6_static_leases(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, DhcpError> {
+    let cfg = state
+        .config_store
+        .load_dhcp6_config()
+        .map_err(DhcpError::StorageError)?
+        .unwrap_or_else(default_dhcp6_cfg);
+
+    let leases: Vec<Dhcp6StaticLeaseResponse> = cfg
+        .scopes
+        .iter()
+        .flat_map(|s| s.reservations.iter())
+        .map(|r| Dhcp6StaticLeaseResponse {
+            id: r.id.to_string(),
+            duid: r.duid.clone(),
+            ip_address: r.ip_address.clone(),
+            hostname: r.hostname.clone().unwrap_or_default(),
+            description: r.description.clone(),
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({ "success": true, "data": leases })))
+}
+
+// ---------------------------------------------------------------------------
+// POST /dhcp6/static-leases
+// ---------------------------------------------------------------------------
+
+/// Add a DUID → IPv6 static reservation to the first DHCPv6 scope.
+///
+/// Accepts either a raw `duid` or a `mac` address which is automatically
+/// converted to a DUID-LL (`00:03:00:01:<mac>`).
+pub async fn create_dhcp6_static_lease(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateDhcp6StaticLeaseRequest>,
+) -> Result<impl IntoResponse, DhcpError> {
+    let duid = if let Some(d) = req.duid.as_deref().filter(|s| !s.is_empty()) {
+        d.to_string()
+    } else if let Some(mac) = req.mac.as_deref().filter(|s| !s.is_empty()) {
+        if !is_valid_mac(mac) {
+            return Err(DhcpError::ValidationFailed(format!(
+                "invalid MAC address: {mac} (expected aa:bb:cc:dd:ee:ff)"
+            )));
+        }
+        format!("00:03:00:01:{mac}")
+    } else {
+        return Err(DhcpError::ValidationFailed(
+            "either 'duid' or 'mac' must be provided".to_string(),
+        ));
+    };
+
+    if !is_valid_duid(&duid) {
+        return Err(DhcpError::ValidationFailed(format!(
+            "invalid DUID: {duid}"
+        )));
+    }
+    if !is_valid_ipv6_addr(&req.ip_address) {
+        return Err(DhcpError::ValidationFailed(format!(
+            "invalid IPv6 address: {}",
+            req.ip_address
+        )));
+    }
+
+    let mut cfg = state
+        .config_store
+        .load_dhcp6_config()
+        .map_err(DhcpError::StorageError)?
+        .unwrap_or_else(default_dhcp6_cfg);
+
+    if cfg.scopes.is_empty() {
+        cfg.scopes.push(Dhcp6Scope {
+            id: Uuid::new_v4(),
+            subnet: derive_subnet_from_ipv6_addr(&req.ip_address),
+            pool_start: String::new(),
+            pool_end: String::new(),
+            dns_servers: vec![],
+            lease_seconds: 86400,
+            domain_name: None,
+            reservations: vec![],
+        });
+    }
+
+    let reservation = Dhcp6Reservation {
+        id: Uuid::new_v4(),
+        duid: duid.clone(),
+        ip_address: req.ip_address.clone(),
+        hostname: req.hostname.filter(|h| !h.is_empty()),
+        description: req.description.unwrap_or_default(),
+    };
+
+    let resp = Dhcp6StaticLeaseResponse {
+        id: reservation.id.to_string(),
+        duid: reservation.duid.clone(),
+        ip_address: reservation.ip_address.clone(),
+        hostname: reservation.hostname.clone().unwrap_or_default(),
+        description: reservation.description.clone(),
+    };
+
+    cfg.scopes[0].reservations.push(reservation);
+
+    state
+        .config_store
+        .save_dhcp6_config(cfg.clone())
+        .map_err(DhcpError::StorageError)?;
+
+    apply_dhcp6_config(&cfg)
+        .await
+        .map_err(|e| DhcpError::EngineError(e.to_string()))?;
+
+    info!(duid = %duid, ip = %req.ip_address, "dhcp6: static lease created");
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "success": true, "data": resp })),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /dhcp6/static-leases/{id}
+// ---------------------------------------------------------------------------
+
+/// Remove a DHCPv6 static reservation by UUID string.
+pub async fn delete_dhcp6_static_lease(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, DhcpError> {
+    let target = id.parse::<Uuid>().map_err(|_| {
+        DhcpError::ValidationFailed(format!("invalid lease ID: {id}"))
+    })?;
+
+    let mut cfg = state
+        .config_store
+        .load_dhcp6_config()
+        .map_err(DhcpError::StorageError)?
+        .unwrap_or_else(default_dhcp6_cfg);
+
+    let mut found = false;
+    for scope in &mut cfg.scopes {
+        let before = scope.reservations.len();
+        scope.reservations.retain(|r| r.id != target);
+        if scope.reservations.len() < before {
+            found = true;
+        }
+    }
+
+    if !found {
+        return Err(DhcpError::ValidationFailed(format!(
+            "DHCPv6 static lease {id} not found"
+        )));
+    }
+
+    state
+        .config_store
+        .save_dhcp6_config(cfg.clone())
+        .map_err(DhcpError::StorageError)?;
+
+    apply_dhcp6_config(&cfg)
+        .await
+        .map_err(|e| DhcpError::EngineError(e.to_string()))?;
+
+    info!(%id, "dhcp6: static lease deleted");
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// GET /dhcp6/leases
+// ---------------------------------------------------------------------------
+
+/// Return active DHCPv6 leases parsed from the Kea DHCPv6 memfile lease database.
+///
+/// Kea DHCPv6 CSV columns:
+/// `address,duid,iaid,prefix-len,type,preferred-life,valid-life,expire,subnet-id,
+///  fqdn-fwd,fqdn-rev,hostname,hwaddr,state[,user-context,hwtype,hwaddr-source]`
+///
+/// Returns an empty array when the lease file does not exist.
+pub async fn list_active_dhcp6_leases(
+    State(_state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    use crate::engine::dhcp6::KEA6_LEASES_PATH;
+
+    let content = match tokio::fs::read_to_string(KEA6_LEASES_PATH).await {
+        Ok(c) => c,
+        Err(_) => {
+            return Json(serde_json::json!({ "success": true, "data": serde_json::json!([]) }));
+        }
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let leases: Vec<Dhcp6LeaseResponse> = content
+        .lines()
+        .filter(|l| !l.starts_with("address") && !l.is_empty())
+        .filter_map(|line| {
+            // Columns: address(0), duid(1), iaid(2), prefix-len(3), type(4),
+            // preferred-life(5), valid-life(6), expire(7), subnet-id(8),
+            // fqdn-fwd(9), fqdn-rev(10), hostname(11), hwaddr(12), state(13)
+            let cols: Vec<&str> = line.splitn(15, ',').collect();
+            if cols.len() < 14 {
+                return None;
+            }
+            let address     = cols[0].to_string();
+            let duid        = cols[1].to_string();
+            let expire: u64 = cols[7].parse().ok()?;
+            let hostname    = cols[11].to_string();
+            let state_col: u8 = cols[13].trim().parse().unwrap_or(0);
+            let state_str = match state_col {
+                0 if expire > now => "active",
+                0                 => "expired",
+                1                 => "declined",
+                _                 => "reclaimed",
+            };
+            Some(Dhcp6LeaseResponse {
+                ip_address: address,
+                duid,
+                hostname,
+                ends: expire.to_string(),
+                state: state_str.to_string(),
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!({ "success": true, "data": leases }))
 }

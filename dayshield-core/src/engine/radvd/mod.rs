@@ -50,6 +50,12 @@ pub struct PrefixAssignment {
     /// Assigned address CIDR on that interface, e.g. `"2001:db8:0:3::1/64"`.
     /// The host bits will be stripped when building the RA prefix block.
     pub prefix: String,
+    /// `AdvManagedFlag` — set `true` for interfaces running a DHCPv6 server so
+    /// hosts request addresses via DHCPv6 rather than configuring via SLAAC.
+    pub managed: bool,
+    /// `AdvOtherConfigFlag` — set `true` alongside `managed` so hosts also
+    /// fetch DNS servers and other config via DHCPv6.
+    pub other: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -90,17 +96,21 @@ fn generate_radvd_conf(assignments: &[PrefixAssignment]) -> String {
 
     for a in assignments {
         let network = network_from_cidr(&a.prefix);
+        let managed_flag = if a.managed { "on" } else { "off" };
+        let other_flag = if a.other { "on" } else { "off" };
+        // When managed-mode is on, hosts use DHCPv6 for addresses — SLAAC is disabled.
+        let autonomous = if a.managed { "off" } else { "on" };
         conf.push_str(&format!(
             r#"interface {iface} {{
     AdvSendAdvert on;
-    AdvManagedFlag off;
-    AdvOtherConfigFlag off;
+    AdvManagedFlag {managed};
+    AdvOtherConfigFlag {other};
     MinRtrAdvInterval 3;
     MaxRtrAdvInterval 10;
 
     prefix {prefix} {{
         AdvOnLink on;
-        AdvAutonomous on;
+        AdvAutonomous {autonomous};
         AdvRouterAddr on;
         AdvPreferredLifetime 3600;
         AdvValidLifetime 7200;
@@ -110,6 +120,9 @@ fn generate_radvd_conf(assignments: &[PrefixAssignment]) -> String {
 "#,
             iface = a.iface,
             prefix = network,
+            managed = managed_flag,
+            other = other_flag,
+            autonomous = autonomous,
         ));
     }
 

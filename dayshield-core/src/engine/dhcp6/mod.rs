@@ -3,7 +3,7 @@
 //! This module translates a [`Dhcp6Config`] into a Kea DHCPv6 JSON
 //! configuration and manages kea-dhcp6-server lifecycle.
 
-use std::path::Path;
+use std::{io::ErrorKind, path::Path};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -128,12 +128,14 @@ pub async fn apply_config(config: &Dhcp6Config) -> Result<()> {
             .args(["disable", "--now", "kea-dhcp6-server"])
             .output()
             .await;
+        remove_config_if_exists(KEA6_CONF_PATH)?;
+        remove_config_if_exists(KEA6_SYSTEM_CONF_PATH)?;
         return Ok(());
     }
 
     std::fs::create_dir_all("/etc/kea").context("failed to create /etc/kea")?;
     #[cfg(unix)]
-    std::fs::set_permissions("/etc/kea", std::fs::Permissions::from_mode(0o750))
+    std::fs::set_permissions("/etc/kea", std::fs::Permissions::from_mode(0o755))
         .context("failed to chmod /etc/kea")?;
     std::fs::create_dir_all("/var/log/kea").context("failed to create /var/log/kea")?;
 
@@ -144,13 +146,19 @@ pub async fn apply_config(config: &Dhcp6Config) -> Result<()> {
     std::fs::set_permissions(KEA6_CONF_PATH, std::fs::Permissions::from_mode(0o644))
         .context("failed to chmod kea-dhcp6.conf")?;
 
-    write_config_atomic(KEA6_SYSTEM_CONF_PATH, &conf_str)
-        .context("failed to mirror kea-dhcp6.conf to system path")?;
+    write_config_atomic(KEA6_SYSTEM_CONF_PATH, &conf_str).context(
+        "failed to mirror kea-dhcp6.conf to system path \
+         (check dayshield.service sandbox: ReadWritePaths should include /etc/kea)",
+    )?;
     #[cfg(unix)]
     std::fs::set_permissions(KEA6_SYSTEM_CONF_PATH, std::fs::Permissions::from_mode(0o644))
         .context("failed to chmod system kea-dhcp6.conf")?;
 
-    info!(path = KEA6_CONF_PATH, "dhcp6: kea-dhcp6.conf written");
+    info!(
+        path = KEA6_CONF_PATH,
+        system_path = KEA6_SYSTEM_CONF_PATH,
+        "dhcp6: kea-dhcp6.conf written"
+    );
 
     let enable_out = Command::new("systemctl")
         .args(["enable", "kea-dhcp6-server"])
@@ -178,6 +186,17 @@ fn write_config_atomic(path: &str, content: &str) -> Result<()> {
     std::fs::rename(&tmp, path).with_context(|| format!("rename {tmp} -> {path}"))?;
 
     Ok(())
+}
+
+fn remove_config_if_exists(path: &str) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => {
+            info!(path, "dhcp6: removed stale kea-dhcp6.conf");
+            Ok(())
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("failed to remove stale config {path}")),
+    }
 }
 
 async fn restart_kea6() -> Result<()> {

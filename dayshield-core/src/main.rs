@@ -36,6 +36,7 @@ mod state;
 mod update;
 mod utils;
 
+use config::models::{Dhcp6Config, DhcpConfig};
 use state::AppState;
 
 #[tokio::main]
@@ -105,6 +106,11 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Reconcile Kea with the persisted DayShield config. Kea units can be
+    // enabled independently by the package/rootfs, so startup must recreate
+    // the distro config mirrors before those services are expected healthy.
+    reconcile_dhcp_runtime(&app_state.config_store).await;
+
     // Start the background metrics collector.
     metrics::collector::start_metrics_collector(Arc::clone(&app_state)).await;
 
@@ -162,4 +168,52 @@ fn resolve_bind_addr(ipv6_enabled: bool) -> String {
     }
 
     default_bind_addr(ipv6_enabled).to_string()
+}
+
+async fn reconcile_dhcp_runtime(config_store: &config::ConfigStore) {
+    match config_store.load_dhcp_config() {
+        Ok(Some(cfg)) => {
+            if let Err(err) = engine::dhcp::apply_config(&cfg).await {
+                warn!("failed to reconcile DHCPv4 runtime config: {err:#}");
+            }
+        }
+        Ok(None) => {
+            let cfg = default_dhcp_cfg();
+            if let Err(err) = engine::dhcp::apply_config(&cfg).await {
+                warn!("failed to disable unconfigured DHCPv4 service: {err:#}");
+            }
+        }
+        Err(err) => warn!("failed to load DHCPv4 config for startup reconcile: {err:#}"),
+    }
+
+    match config_store.load_dhcp6_config() {
+        Ok(Some(cfg)) => {
+            if let Err(err) = engine::dhcp6::apply_config(&cfg).await {
+                warn!("failed to reconcile DHCPv6 runtime config: {err:#}");
+            }
+        }
+        Ok(None) => {
+            let cfg = default_dhcp6_cfg();
+            if let Err(err) = engine::dhcp6::apply_config(&cfg).await {
+                warn!("failed to disable unconfigured DHCPv6 service: {err:#}");
+            }
+        }
+        Err(err) => warn!("failed to load DHCPv6 config for startup reconcile: {err:#}"),
+    }
+}
+
+fn default_dhcp_cfg() -> DhcpConfig {
+    DhcpConfig {
+        enabled: false,
+        interface: String::new(),
+        scopes: vec![],
+    }
+}
+
+fn default_dhcp6_cfg() -> Dhcp6Config {
+    Dhcp6Config {
+        enabled: false,
+        interface: String::new(),
+        scopes: vec![],
+    }
 }

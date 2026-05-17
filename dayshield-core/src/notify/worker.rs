@@ -13,7 +13,7 @@ use tracing::{debug, info, warn};
 
 use super::model::NotifyEvent;
 use super::rate_limit::RateLimiter;
-use super::smtp::send_email;
+use super::smtp::send_email_with_ipv6;
 use crate::config::models::NotifyConfig;
 use crate::state::AppState;
 
@@ -30,6 +30,14 @@ fn load_config(state: &Arc<AppState>) -> Option<NotifyConfig> {
     } else {
         None
     }
+}
+
+fn load_ipv6_enabled(state: &Arc<AppState>) -> bool {
+    state
+        .config_store
+        .load_system_settings()
+        .map(|settings| settings.ipv6_enabled)
+        .unwrap_or(false)
 }
 
 /// Compose a digest email from a batch of events.
@@ -102,7 +110,7 @@ pub async fn start_notify_worker(state: Arc<AppState>, mut rx: mpsc::Receiver<No
                         }
                         let subject = event.subject.clone();
                         let body = event.body.clone();
-                        match send_email(&cfg, &subject, &body).await {
+                        match send_email_with_ipv6(&cfg, &subject, &body, load_ipv6_enabled(&state)).await {
                             Ok(()) => info!(subject = %subject, "Notification sent"),
                             Err(e) => warn!(error = %e, "Failed to send notification email"),
                         }
@@ -132,7 +140,7 @@ pub async fn start_notify_worker(state: Arc<AppState>, mut rx: mpsc::Receiver<No
 
                     let events = std::mem::take(&mut digest_buffer);
                     let (subject, body) = compose_digest(&events);
-                    match send_email(&cfg, &subject, &body).await {
+                    match send_email_with_ipv6(&cfg, &subject, &body, load_ipv6_enabled(&state)).await {
                         Ok(()) => info!(count = events.len(), "Digest notification sent"),
                         Err(e) => warn!(error = %e, "Failed to send digest email"),
                     }

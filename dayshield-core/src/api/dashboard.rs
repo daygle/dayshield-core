@@ -118,6 +118,7 @@ pub struct LanIface {
     pub name: String,
     pub description: Option<String>,
     pub ip: Option<String>,
+    pub ipv6: Option<String>,
     pub enabled: bool,
 }
 
@@ -126,6 +127,7 @@ pub struct NetworkStatus {
     pub wan_iface: String,
     pub wan_iface_description: Option<String>,
     pub wan_ip: Option<String>,
+    pub wan_ipv6: Option<String>,
     /// `"up"`, `"down"`, or `"unknown"`
     pub gateway_status: &'static str,
     /// WAN receive throughput in bytes/second (from last metrics snapshot).
@@ -158,19 +160,38 @@ pub async fn get_network_status(
     // Resolve live kernel addresses (needed for DHCP interfaces whose config
     // addresses vec is intentionally empty).
     let kernel_ifaces = list_kernel_interfaces().await.unwrap_or_default();
-    let kernel_ip_for = |name: &str| -> Option<String> {
+    let ipv6_enabled = state
+        .config_store
+        .load_system_settings()
+        .map(|settings| settings.ipv6_enabled)
+        .unwrap_or(false);
+    let kernel_ip_for = |name: &str, ipv6: bool| -> Option<String> {
         kernel_ifaces
             .iter()
             .find(|ki| ki.name == name)
-            // Pick the first IPv4 address (contains a dot), ignore IPv6.
-            .and_then(|ki| ki.addresses.iter().find(|a| a.contains('.')))
+            .and_then(|ki| {
+                ki.addresses.iter().find(|a| {
+                    if ipv6 {
+                        a.contains(':')
+                    } else {
+                        a.contains('.')
+                    }
+                })
+            })
             // Strip the CIDR prefix length (e.g. "192.168.1.1/24" → "192.168.1.1").
             .map(|cidr| cidr.split('/').next().unwrap_or(cidr).to_string())
     };
     let wan_ip = wan
-        .and_then(|i| i.addresses.first())
+        .and_then(|i| i.addresses.iter().find(|cidr| cidr.contains('.')))
         .map(|cidr| cidr.split('/').next().unwrap_or(cidr).to_string())
-        .or_else(|| kernel_ip_for(&wan_name));
+        .or_else(|| kernel_ip_for(&wan_name, false));
+    let wan_ipv6 = if ipv6_enabled {
+        wan.and_then(|i| i.addresses.iter().find(|cidr| cidr.contains(':')))
+            .map(|cidr| cidr.split('/').next().unwrap_or(cidr).to_string())
+            .or_else(|| kernel_ip_for(&wan_name, true))
+    } else {
+        None
+    };
 
     let wan_metrics = net_metrics.iter().find(|m| m.name == wan_name);
     let wan_rx_bps = wan_metrics.map(|m| m.rx_bps as f64).unwrap_or(0.0);
@@ -185,9 +206,16 @@ pub async fn get_network_status(
         .map(|i| LanIface {
             name: i.name.clone(),
             description: i.description.clone(),
-            ip: i.addresses.first()
+            ip: i.addresses.iter().find(|cidr| cidr.contains('.'))
                 .map(|cidr| cidr.split('/').next().unwrap_or(cidr).to_string())
-                .or_else(|| kernel_ip_for(&i.name)),
+                .or_else(|| kernel_ip_for(&i.name, false)),
+            ipv6: if ipv6_enabled {
+                i.addresses.iter().find(|cidr| cidr.contains(':'))
+                    .map(|cidr| cidr.split('/').next().unwrap_or(cidr).to_string())
+                    .or_else(|| kernel_ip_for(&i.name, true))
+            } else {
+                None
+            },
             enabled: i.enabled,
         })
         .collect();
@@ -196,6 +224,7 @@ pub async fn get_network_status(
         wan_iface: wan_name,
         wan_iface_description: wan_description,
         wan_ip,
+        wan_ipv6,
         gateway_status,
         wan_rx_bps,
         wan_tx_bps,

@@ -6,7 +6,7 @@
 //! - [`model`]    - rich NAT types re-exported from [`crate::config::models`].
 //! - [`validate`] - validation helpers for [`NatConfig`] and [`NatRule`].
 //! - [`config`]   - thin persistence wrappers over the shared [`ConfigStore`].
-//! - [`nftables`] - deterministic nftables (`table ip nat`) generator.
+//! - [`nftables`] - deterministic nftables NAT generator.
 //!
 //! # Outbound modes
 //!
@@ -16,10 +16,10 @@
 //! | `hybrid`    | Auto masquerade + user-defined masquerade/SNAT rules    |
 //! | `manual`    | Only user-defined rules; no automatic masquerade        |
 //!
-//! # IPv4 boundary
+//! # Address families
 //!
-//! All NAT rules are IPv4-only.  IPv6 addresses and IPv6 interfaces are
-//! rejected by the validator and will never appear in nftables output.
+//! NAT rules are IPv4 by default. IPv6 NAT rules are accepted only when the
+//! global `ipv6Enabled` setting is enabled, and are emitted into `table ip6 nat`.
 
 pub mod config;
 pub mod model;

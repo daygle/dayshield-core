@@ -19,12 +19,13 @@ use tracing::{info, warn};
 
 use crate::{
     config::models::{
-        is_valid_cidr, is_valid_interface_name, is_valid_mss, is_valid_mtu, is_valid_vlan_id,
+        ensure_ipv6_allowed, is_valid_cidr, is_valid_interface_name, is_valid_mss, is_valid_mtu,
+        is_valid_vlan_id,
         WanMode,
         Gateway, Interface,
     },
-    engine::gateway::list_kernel_gateways,
-    engine::interfaces::{apply_interface, list_kernel_interfaces, InterfaceError, KernelInterface},
+    engine::gateway::list_kernel_gateways_with_ipv6,
+    engine::interfaces::{apply_interface_with_ipv6, list_kernel_interfaces, InterfaceError, KernelInterface},
     engine::nftables::apply_rules,
     state::AppState,
 };
@@ -152,6 +153,11 @@ async fn apply_full_nftables_rules(state: &Arc<AppState>) -> Result<(), Interfac
         full_cfg.nat.as_ref(),
         &full_cfg.firewall_aliases,
         full_cfg.firewall_settings.as_ref(),
+        full_cfg
+            .system_settings
+            .as_ref()
+            .map(|settings| settings.ipv6_enabled)
+            .unwrap_or(false),
     )
     .await
     .map_err(|e| InterfaceError::ApplyFailed(e.to_string()))
@@ -179,16 +185,34 @@ pub struct InterfaceResponse {
     pub pppoe_username: Option<String>,
     pub ipv4_address: Option<String>,  // First address from CIDR (e.g. "192.168.1.1")
     pub ipv4_prefix: Option<u8>,       // Prefix from first address (e.g. 24)
+    pub ipv6_address: Option<String>,
+    pub ipv6_prefix: Option<u8>,
     pub gateway: Option<String>,
 }
 
 impl InterfaceResponse {
     /// Convert from a backend `Interface` to API response format.
     pub fn from_interface(iface: &Interface) -> Self {
-        // Parse first address if available
+        // Parse first IPv4 and first IPv6 address if available.
         let (ipv4_address, ipv4_prefix) = iface
             .addresses
-            .first()
+            .iter()
+            .find(|cidr| !cidr.contains(':'))
+            .and_then(|cidr| {
+                let parts: Vec<&str> = cidr.split('/').collect();
+                match parts.as_slice() {
+                    [addr, prefix_str] => {
+                        prefix_str.parse::<u8>().ok().map(|p| (addr.to_string(), p))
+                    }
+                    _ => None,
+                }
+            })
+            .map(|(addr, prefix)| (Some(addr), Some(prefix)))
+            .unwrap_or((None, None));
+        let (ipv6_address, ipv6_prefix) = iface
+            .addresses
+            .iter()
+            .find(|cidr| cidr.contains(':'))
             .and_then(|cidr| {
                 let parts: Vec<&str> = cidr.split('/').collect();
                 match parts.as_slice() {
@@ -230,6 +254,8 @@ impl InterfaceResponse {
             pppoe_username: iface.pppoe_username.clone(),
             ipv4_address,
             ipv4_prefix,
+            ipv6_address,
+            ipv6_prefix,
             gateway: iface.gateway.clone(),
         }
     }
@@ -262,6 +288,8 @@ pub struct InterfaceRequest {
     pub pppoe_password: Option<String>,
     pub ipv4_address: Option<String>,  // UI sends this as separate field
     pub ipv4_prefix: Option<u8>,       // UI sends this as separate field
+    pub ipv6_address: Option<String>,
+    pub ipv6_prefix: Option<u8>,
     pub gateway: Option<String>,
 }
 
@@ -269,11 +297,13 @@ impl InterfaceRequest {
     /// Convert from API request format to backend `Interface`.
     pub fn to_interface(self) -> Interface {
         // Build addresses from ipv4_address and ipv4_prefix
-        let addresses = if let (Some(addr), Some(prefix)) = (self.ipv4_address, self.ipv4_prefix) {
-            vec![format!("{}/{}", addr, prefix)]
-        } else {
-            vec![]
-        };
+        let mut addresses = Vec::new();
+        if let (Some(addr), Some(prefix)) = (self.ipv4_address, self.ipv4_prefix) {
+            addresses.push(format!("{}/{}", addr, prefix));
+        }
+        if let (Some(addr), Some(prefix)) = (self.ipv6_address, self.ipv6_prefix) {
+            addresses.push(format!("{}/{}", addr, prefix));
+        }
 
         let wan_mode = match self.wan_mode.as_deref() {
             Some("pppoe") => Some(crate::config::models::WanMode::Pppoe),
@@ -341,7 +371,12 @@ pub async fn list_interfaces(
 
     // If an interface has no static gateway configured, surface any active
     // default-route gateway currently seen in the kernel for that interface.
-    let active_gateways = list_kernel_gateways().await;
+    let ipv6_enabled = state
+        .config_store
+        .load_system_settings()
+        .map(|settings| settings.ipv6_enabled)
+        .unwrap_or(false);
+    let active_gateways = list_kernel_gateways_with_ipv6(ipv6_enabled).await;
     let configured_response = configured_response
         .into_iter()
         .map(|mut iface| {
@@ -368,6 +403,11 @@ pub async fn create_interface(
     Json(req): Json<InterfaceRequest>,
 ) -> Result<impl IntoResponse, InterfaceError> {
     let iface = req.to_interface();
+    let ipv6_enabled = state
+        .config_store
+        .load_system_settings()
+        .map_err(InterfaceError::StorageError)?
+        .ipv6_enabled;
 
     // --- Validation --------------------------------------------------------
 
@@ -390,6 +430,21 @@ pub async fn create_interface(
     for cidr in &iface.addresses {
         if !is_valid_cidr(cidr) {
             return Err(InterfaceError::InvalidCIDR(cidr.clone()));
+        }
+        if let Err(msg) = ensure_ipv6_allowed(cidr, ipv6_enabled, "interface address") {
+            return Err(InterfaceError::ApplyFailed(msg));
+        }
+    }
+
+    if iface.dhcp6 && !ipv6_enabled {
+        return Err(InterfaceError::ApplyFailed(
+            "DHCPv6 requires system ipv6Enabled".to_string(),
+        ));
+    }
+
+    if let Some(gateway) = &iface.gateway {
+        if let Err(msg) = ensure_ipv6_allowed(gateway, ipv6_enabled, "interface gateway") {
+            return Err(InterfaceError::ApplyFailed(msg));
         }
     }
 
@@ -487,7 +542,7 @@ pub async fn create_interface(
 
     // --- Apply -------------------------------------------------------------
 
-    apply_interface(&iface).await?;
+    apply_interface_with_ipv6(&iface, ipv6_enabled).await?;
 
     if nat_wan_changed {
         apply_full_nftables_rules(&state).await?;
@@ -610,6 +665,8 @@ mod tests {
             pppoe_password: None,
             ipv4_address: Some("192.168.100.1".into()),
             ipv4_prefix: Some(24),
+            ipv6_address: None,
+            ipv6_prefix: None,
             gateway: None,
         };
 

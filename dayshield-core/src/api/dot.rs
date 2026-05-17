@@ -16,7 +16,7 @@ use tracing::info;
 
 use crate::{
     config::models::{validate_dot_config, DotConfig},
-    engine::dns::apply_config,
+    engine::dns::apply_config_with_ipv6,
     state::AppState,
 };
 
@@ -182,7 +182,13 @@ pub async fn update_config(
         .map_err(DotError::StorageError)?
         .unwrap_or_default();
 
-    apply_config(&dns_cfg, Some(&cfg))
+    let ipv6_enabled = state
+        .config_store
+        .load_system_settings()
+        .map_err(DotError::StorageError)?
+        .ipv6_enabled;
+
+    apply_config_with_ipv6(&dns_cfg, Some(&cfg), ipv6_enabled)
         .await
         .map_err(|e| DotError::EngineError(e.to_string()))?;
 

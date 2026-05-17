@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use crate::{
     config::models::{
-        is_valid_ip, is_valid_ipv4_range, is_valid_mac,
+        is_valid_ipv4_addr, is_valid_ipv4_range, is_valid_mac,
         DhcpConfig, DhcpReservation, DhcpScope,
     },
     engine::dhcp::apply_config,
@@ -325,12 +325,12 @@ pub async fn update_config(
 
     let scope = &cfg.scopes[0];
 
-    if !scope.pool_start.is_empty() && !is_valid_ip(&scope.pool_start) {
+    if !scope.pool_start.is_empty() && !is_valid_ipv4_addr(&scope.pool_start) {
         return Err(DhcpError::ValidationFailed(format!(
             "invalid rangeStart: {}", scope.pool_start
         )));
     }
-    if !scope.pool_end.is_empty() && !is_valid_ip(&scope.pool_end) {
+    if !scope.pool_end.is_empty() && !is_valid_ipv4_addr(&scope.pool_end) {
         return Err(DhcpError::ValidationFailed(format!(
             "invalid rangeEnd: {}", scope.pool_end
         )));
@@ -344,12 +344,12 @@ pub async fn update_config(
         )));
     }
     if let Some(gw) = &scope.gateway {
-        if !is_valid_ip(gw) {
+        if !is_valid_ipv4_addr(gw) {
             return Err(DhcpError::ValidationFailed(format!("invalid gateway: {gw}")));
         }
     }
     for dns in &scope.dns_servers {
-        if !is_valid_ip(dns) {
+        if !is_valid_ipv4_addr(dns) {
             return Err(DhcpError::ValidationFailed(format!("invalid DNS server: {dns}")));
         }
     }
@@ -436,7 +436,7 @@ pub async fn create_static_lease(
             req.mac
         )));
     }
-    if !is_valid_ip(&req.ip_address) {
+    if !is_valid_ipv4_addr(&req.ip_address) {
         return Err(DhcpError::ValidationFailed(format!(
             "invalid IP address: {}",
             req.ip_address
@@ -761,12 +761,12 @@ pub async fn update_interface_dhcp_config(
 
     let scope = &cfg.scopes[0];
 
-    if !scope.pool_start.is_empty() && !is_valid_ip(&scope.pool_start) {
+    if !scope.pool_start.is_empty() && !is_valid_ipv4_addr(&scope.pool_start) {
         return Err(DhcpError::ValidationFailed(format!(
             "invalid rangeStart: {}", scope.pool_start
         )));
     }
-    if !scope.pool_end.is_empty() && !is_valid_ip(&scope.pool_end) {
+    if !scope.pool_end.is_empty() && !is_valid_ipv4_addr(&scope.pool_end) {
         return Err(DhcpError::ValidationFailed(format!(
             "invalid rangeEnd: {}", scope.pool_end
         )));
@@ -780,12 +780,12 @@ pub async fn update_interface_dhcp_config(
         )));
     }
     if let Some(gw) = &scope.gateway {
-        if !is_valid_ip(gw) {
+        if !is_valid_ipv4_addr(gw) {
             return Err(DhcpError::ValidationFailed(format!("invalid gateway: {gw}")));
         }
     }
     for dns in &scope.dns_servers {
-        if !is_valid_ip(dns) {
+        if !is_valid_ipv4_addr(dns) {
             return Err(DhcpError::ValidationFailed(format!("invalid DNS server: {dns}")));
         }
     }
@@ -881,7 +881,7 @@ pub async fn create_interface_static_lease(
             req.mac
         )));
     }
-    if !is_valid_ip(&req.ip_address) {
+    if !is_valid_ipv4_addr(&req.ip_address) {
         return Err(DhcpError::ValidationFailed(format!(
             "invalid IP address: {}",
             req.ip_address

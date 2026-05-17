@@ -20,6 +20,7 @@ pub mod dhcp;
 pub mod dns;
 pub mod gateway;
 pub mod interfaces;
+pub mod ipv6;
 pub mod nftables;
 pub mod suricata;
 pub mod vpn;

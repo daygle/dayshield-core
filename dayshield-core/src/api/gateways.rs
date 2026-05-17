@@ -16,8 +16,8 @@ use serde::Serialize;
 use tracing::{info, warn};
 
 use crate::{
-    config::models::Gateway,
-    engine::gateway::{apply_gateway, list_kernel_gateways, probe_all_gateways, GatewayState},
+    config::models::{ensure_ipv6_allowed, Gateway},
+    engine::gateway::{apply_gateway_with_ipv6, list_kernel_gateways_with_ipv6, probe_all_gateways, GatewayState},
     state::AppState,
 };
 
@@ -56,6 +56,11 @@ pub struct ListGatewaysResponse {
 pub async fn list_gateways(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let configured = state.config_store.load_gateways().unwrap_or_default();
     let configured_interfaces = state.config_store.load_interfaces().unwrap_or_default();
+    let ipv6_enabled = state
+        .config_store
+        .load_system_settings()
+        .map(|settings| settings.ipv6_enabled)
+        .unwrap_or(false);
 
     let iface_friendly_names: HashMap<String, String> = configured_interfaces
         .into_iter()
@@ -68,7 +73,7 @@ pub async fn list_gateways(State(state): State<Arc<AppState>>) -> impl IntoRespo
         })
         .collect();
 
-    let kernel_routes = list_kernel_gateways().await;
+    let kernel_routes = list_kernel_gateways_with_ipv6(ipv6_enabled).await;
     let probed = probe_all_gateways(&configured).await;
 
     let default_interface = kernel_routes.first().map(|r| r.interface.clone());
@@ -129,6 +134,12 @@ pub async fn upsert_gateway(
     State(state): State<Arc<AppState>>,
     Json(gateway): Json<Gateway>,
 ) -> impl IntoResponse {
+    let ipv6_enabled = state
+        .config_store
+        .load_system_settings()
+        .map(|settings| settings.ipv6_enabled)
+        .unwrap_or(false);
+
     // Validate name.
     if gateway.name.is_empty() {
         return (
@@ -147,12 +158,26 @@ pub async fn upsert_gateway(
             )
                 .into_response();
         }
+        if let Err(msg) = ensure_ipv6_allowed(ip, ipv6_enabled, "gateway_ip") {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({ "error": msg })),
+            )
+                .into_response();
+        }
     }
     if let Some(ip) = &gateway.monitor_ip {
         if ip.parse::<std::net::IpAddr>().is_err() {
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(serde_json::json!({ "error": format!("invalid monitor_ip: {ip}") })),
+            )
+                .into_response();
+        }
+        if let Err(msg) = ensure_ipv6_allowed(ip, ipv6_enabled, "monitor_ip") {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({ "error": msg })),
             )
                 .into_response();
         }
@@ -176,7 +201,7 @@ pub async fn upsert_gateway(
     }
 
     // Apply to kernel (no-op for DHCP/PPPoE gateways).
-    if let Err(e) = apply_gateway(&gateway).await {
+    if let Err(e) = apply_gateway_with_ipv6(&gateway, ipv6_enabled).await {
         warn!(error = %e, "gateways: failed to apply route");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,

@@ -1,7 +1,8 @@
 //! DayShield Core - backend orchestrator entry point.
 //!
 //! Initialises logging, builds the shared application state, wires up the
-//! Axum router and starts the HTTP server on 0.0.0.0:8443 by default.
+//! Axum router and starts the HTTP server on IPv4 by default, or IPv4/IPv6
+//! when the global IPv6 setting is enabled.
 //
 // Suppress dead-code warnings for the many placeholder engine functions and
 // config types that are defined here as stubs and will be wired up in future
@@ -88,6 +89,22 @@ async fn main() -> anyhow::Result<()> {
     let (app_state_inner, notify_rx) = AppState::new();
     let app_state = Arc::new(app_state_inner);
 
+    // Apply the persisted IPv6 runtime switch before network-facing services
+    // start doing work. Failure is logged rather than fatal so first boot on a
+    // partially provisioned image can still reach the UI for repair.
+    let ipv6_enabled = match app_state.config_store.load_system_settings() {
+        Ok(settings) => {
+            if let Err(e) = engine::ipv6::apply_ipv6_setting(settings.ipv6_enabled).await {
+                warn!("failed to apply IPv6 runtime setting: {e:#}");
+            }
+            settings.ipv6_enabled
+        }
+        Err(e) => {
+            warn!("failed to load system settings for IPv6 runtime switch: {e:#}");
+            false
+        }
+    };
+
     // Start the background metrics collector.
     metrics::collector::start_metrics_collector(Arc::clone(&app_state)).await;
 
@@ -110,7 +127,7 @@ async fn main() -> anyhow::Result<()> {
     let app: Router = api::router(app_state);
 
     // Bind and serve.
-    let addr = resolve_bind_addr();
+    let addr = resolve_bind_addr(ipv6_enabled);
     let listener = TcpListener::bind(&addr).await?;
     info!("Listening on http://{}", addr);
 
@@ -119,21 +136,30 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn default_bind_addr() -> &'static str {
-    "0.0.0.0:8443"
+fn default_bind_addr(ipv6_enabled: bool) -> &'static str {
+    if ipv6_enabled {
+        "[::]:8443"
+    } else {
+        "0.0.0.0:8443"
+    }
 }
 
-fn resolve_bind_addr() -> String {
+fn resolve_bind_addr(ipv6_enabled: bool) -> String {
     if let Ok(addr) = env::var("DAYSHIELD_BIND_ADDR") {
         return addr;
     }
 
     if let Ok(port) = env::var("DAYSHIELD_PORT") {
         match port.parse::<u16>() {
+            Ok(port) if ipv6_enabled => return format!("[::]:{}", port),
             Ok(port) => return format!("0.0.0.0:{}", port),
-            Err(_) => warn!("DAYSHIELD_PORT={} is not a valid port; using {}", port, default_bind_addr()),
+            Err(_) => warn!(
+                "DAYSHIELD_PORT={} is not a valid port; using {}",
+                port,
+                default_bind_addr(ipv6_enabled)
+            ),
         }
     }
 
-    default_bind_addr().to_string()
+    default_bind_addr(ipv6_enabled).to_string()
 }

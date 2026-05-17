@@ -1,7 +1,8 @@
 //! SMTP client - sends notification emails via SMTP over TLS.
 //!
 //! Uses `lettre` with the `smtp-transport` + `rustls-tls` features.
-//! IPv4-only: the host is resolved to the first IPv4 address found.
+//! IPv6 is gated by the global DayShield setting; the default path resolves to
+//! the first IPv4 address for compatibility with IPv4-only deployments.
 
 use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::time::Duration;
@@ -55,9 +56,15 @@ fn resolve_ipv4(host: &str, port: u16) -> Result<Ipv4Addr, NotifyError> {
 }
 
 /// Build a `lettre` [`SmtpTransport`] from the supplied config.
-fn build_transport(cfg: &NotifyConfig) -> Result<SmtpTransport, NotifyError> {
-    let ipv4 = resolve_ipv4(&cfg.smtp_server, cfg.smtp_port)?;
-    debug!(smtp_server = %cfg.smtp_server, ipv4 = %ipv4, port = cfg.smtp_port, "Using SMTP server");
+fn build_transport(cfg: &NotifyConfig, ipv6_enabled: bool) -> Result<SmtpTransport, NotifyError> {
+    let connect_host = if ipv6_enabled {
+        debug!(smtp_server = %cfg.smtp_server, port = cfg.smtp_port, "Using SMTP server with IPv4/IPv6 resolution");
+        cfg.smtp_server.clone()
+    } else {
+        let ipv4 = resolve_ipv4(&cfg.smtp_server, cfg.smtp_port)?;
+        debug!(smtp_server = %cfg.smtp_server, ipv4 = %ipv4, port = cfg.smtp_port, "Using SMTP server IPv4 address");
+        ipv4.to_string()
+    };
 
     let tls_params = TlsParameters::builder(cfg.smtp_server.clone())
         .build_rustls()
@@ -65,7 +72,7 @@ fn build_transport(cfg: &NotifyConfig) -> Result<SmtpTransport, NotifyError> {
 
     let creds = Credentials::new(cfg.smtp_username.clone(), cfg.smtp_password.clone());
 
-    let transport = SmtpTransport::builder_dangerous(ipv4.to_string())
+    let transport = SmtpTransport::builder_dangerous(connect_host)
         .port(cfg.smtp_port)
         .tls(Tls::Required(tls_params))
         .credentials(creds)
@@ -85,6 +92,16 @@ fn build_transport(cfg: &NotifyConfig) -> Result<SmtpTransport, NotifyError> {
 /// Returns [`NotifyError::ConfigError`] when the from/to addresses cannot be
 /// parsed, or [`NotifyError::SmtpError`] on transport failures.
 pub async fn send_email(cfg: &NotifyConfig, subject: &str, body: &str) -> Result<(), NotifyError> {
+    send_email_with_ipv6(cfg, subject, body, false).await
+}
+
+/// Send a single email using the current IPv6 mode.
+pub async fn send_email_with_ipv6(
+    cfg: &NotifyConfig,
+    subject: &str,
+    body: &str,
+    ipv6_enabled: bool,
+) -> Result<(), NotifyError> {
     if cfg.to_addresses.is_empty() {
         return Err(NotifyError::ConfigError(
             "to_addresses is empty".to_string(),
@@ -111,7 +128,7 @@ pub async fn send_email(cfg: &NotifyConfig, subject: &str, body: &str) -> Result
         .map_err(|e| NotifyError::SmtpError(format!("message build failed: {e}")))?;
 
     // Attempt 1.
-    let transport = build_transport(cfg)?;
+    let transport = build_transport(cfg, ipv6_enabled)?;
     match do_send(&transport, &email) {
         Ok(()) => return Ok(()),
         Err(e) => {
@@ -120,7 +137,7 @@ pub async fn send_email(cfg: &NotifyConfig, subject: &str, body: &str) -> Result
     }
 
     // Retry once with a fresh transport.
-    let transport = build_transport(cfg)?;
+    let transport = build_transport(cfg, ipv6_enabled)?;
     do_send(&transport, &email)
 }
 

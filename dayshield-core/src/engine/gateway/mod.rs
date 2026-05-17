@@ -66,15 +66,30 @@ struct IpRouteEntry {
 /// Runs `ip -j route show default` and returns one [`KernelGateway`] per
 /// default route entry.  Returns an empty list on any error.
 pub async fn list_kernel_gateways() -> Vec<KernelGateway> {
+    list_kernel_gateways_with_ipv6(false).await
+}
+
+/// Read live IPv4 default routes, plus IPv6 defaults when enabled.
+pub async fn list_kernel_gateways_with_ipv6(ipv6_enabled: bool) -> Vec<KernelGateway> {
+    let mut gateways = list_kernel_gateways_for_family(&["-j", "route", "show", "default"]).await;
+    if ipv6_enabled {
+        gateways.extend(
+            list_kernel_gateways_for_family(&["-j", "-6", "route", "show", "default"]).await,
+        );
+    }
+    gateways
+}
+
+async fn list_kernel_gateways_for_family(args: &[&str]) -> Vec<KernelGateway> {
     let out = Command::new("ip")
-        .args(["-j", "route", "show", "default"])
+        .args(args)
         .output()
         .await;
 
     let out = match out {
         Ok(o) => o,
         Err(e) => {
-            warn!(error = %e, "gateway: failed to run ip route");
+            warn!(error = %e, args = ?args, "gateway: failed to run ip route");
             return vec![];
         }
     };
@@ -82,6 +97,7 @@ pub async fn list_kernel_gateways() -> Vec<KernelGateway> {
     if !out.status.success() {
         warn!(
             stderr = %String::from_utf8_lossy(&out.stderr),
+            args = ?args,
             "gateway: ip route show default failed"
         );
         return vec![];
@@ -110,6 +126,11 @@ pub async fn list_kernel_gateways() -> Vec<KernelGateway> {
 /// Returns an error string if the `ip route` command cannot be spawned or
 /// exits with a non-zero status.
 pub async fn apply_gateway(gw: &Gateway) -> Result<(), String> {
+    apply_gateway_with_ipv6(gw, false).await
+}
+
+/// Apply a static gateway route using the current IPv6 mode.
+pub async fn apply_gateway_with_ipv6(gw: &Gateway, ipv6_enabled: bool) -> Result<(), String> {
     let ip = match &gw.gateway_ip {
         Some(ip) => ip,
         None => {
@@ -120,13 +141,24 @@ pub async fn apply_gateway(gw: &Gateway) -> Result<(), String> {
             return Ok(());
         }
     };
+    let is_ipv6 = ip.contains(':');
+    if is_ipv6 && !ipv6_enabled {
+        return Err("IPv6 gateway requires system ipv6Enabled".to_string());
+    }
 
     if !gw.enabled {
         info!(name = %gw.name, ip = %ip, "gateway: removing disabled gateway route");
-        let _ = Command::new("ip")
-            .args(["route", "del", "default", "via", ip, "dev", &gw.interface])
-            .output()
-            .await;
+        if is_ipv6 {
+            let _ = Command::new("ip")
+                .args(["-6", "route", "del", "default", "via", ip, "dev", &gw.interface])
+                .output()
+                .await;
+        } else {
+            let _ = Command::new("ip")
+                .args(["route", "del", "default", "via", ip, "dev", &gw.interface])
+                .output()
+                .await;
+        }
         return Ok(());
     }
 
@@ -137,8 +169,13 @@ pub async fn apply_gateway(gw: &Gateway) -> Result<(), String> {
         "gateway: applying default route"
     );
 
-    let out = Command::new("ip")
-        .args(["route", "replace", "default", "via", ip, "dev", &gw.interface])
+    let mut cmd = Command::new("ip");
+    if is_ipv6 {
+        cmd.args(["-6", "route", "replace", "default", "via", ip, "dev", &gw.interface]);
+    } else {
+        cmd.args(["route", "replace", "default", "via", ip, "dev", &gw.interface]);
+    }
+    let out = cmd
         .output()
         .await
         .map_err(|e| format!("failed to run ip route replace: {e}"))?;
@@ -159,7 +196,8 @@ pub async fn apply_gateway(gw: &Gateway) -> Result<(), String> {
 /// Returns [`GatewayState::Online`] if the ping succeeds,
 /// [`GatewayState::Offline`] otherwise.
 pub async fn probe_gateway(ip: &str) -> GatewayState {
-    match Command::new("ping")
+    let program = if ip.contains(':') { "ping6" } else { "ping" };
+    match Command::new(program)
         .args(["-c", "1", "-W", "2", ip])
         .output()
         .await

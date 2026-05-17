@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::{
     config::models::{
+        ensure_ipv6_allowed,
         is_valid_domain,
         is_valid_interface_name,
         is_valid_ip,
@@ -29,7 +30,7 @@ use crate::{
         DotConfig,
         validate_dot_config,
     },
-    engine::dns::apply_config,
+    engine::dns::apply_config_with_ipv6,
     state::AppState,
 };
 
@@ -113,6 +114,14 @@ fn default_true() -> bool {
     true
 }
 
+fn ipv6_enabled(state: &AppState) -> Result<bool, DnsError> {
+    Ok(state
+        .config_store
+        .load_system_settings()
+        .map_err(DnsError::StorageError)?
+        .ipv6_enabled)
+}
+
 fn is_valid_blocklist_url(value: &str) -> bool {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed.len() > 2048 {
@@ -193,6 +202,7 @@ pub async fn update_config(
         .load_dns_config()
         .map_err(DnsError::StorageError)?
         .unwrap_or_default();
+    let ipv6_enabled = ipv6_enabled(&state)?;
 
     // --- Validation --------------------------------------------------------
 
@@ -210,6 +220,11 @@ pub async fn update_config(
                 "invalid listen address: {addr} (expected IP address or interface name)"
             )));
         }
+        if is_valid_ip(addr) {
+            if let Err(msg) = ensure_ipv6_allowed(addr, ipv6_enabled, "DNS listen address") {
+                return Err(DnsError::ValidationFailed(msg));
+            }
+        }
     }
 
     for fwd in &req.forwarders {
@@ -218,6 +233,9 @@ pub async fn update_config(
             return Err(DnsError::ValidationFailed(format!(
                 "invalid forwarder: {fwd} (expected IPv4 or IPv6 address)"
             )));
+        }
+        if let Err(msg) = ensure_ipv6_allowed(fwd, ipv6_enabled, "DNS forwarder") {
+            return Err(DnsError::ValidationFailed(msg));
         }
     }
 
@@ -238,6 +256,12 @@ pub async fn update_config(
                 }
             }
             "AAAA" => {
+                if !ipv6_enabled {
+                    return Err(DnsError::ValidationFailed(format!(
+                        "AAAA record {:?} requires system ipv6Enabled",
+                        rec.name
+                    )));
+                }
                 if rec.value.parse::<std::net::Ipv6Addr>().is_err() {
                     return Err(DnsError::ValidationFailed(format!(
                         "AAAA record {:?} value must be an IPv6 address, got: {}",
@@ -375,7 +399,7 @@ pub async fn update_config(
         .load_dot_config()
         .map_err(DnsError::StorageError)?;
 
-    apply_config(&cfg, dot.as_ref())
+    apply_config_with_ipv6(&cfg, dot.as_ref(), ipv6_enabled)
         .await
         .map_err(|e| DnsError::EngineError(e.to_string()))?;
 
@@ -482,7 +506,7 @@ pub async fn create_interface_blocklist(
         .load_dot_config()
         .map_err(DnsError::StorageError)?;
 
-    apply_config(&cfg, dot.as_ref())
+    apply_config_with_ipv6(&cfg, dot.as_ref(), ipv6_enabled(&state)?)
         .await
         .map_err(|e| DnsError::EngineError(e.to_string()))?;
 
@@ -548,7 +572,7 @@ pub async fn delete_interface_blocklist(
         .load_dot_config()
         .map_err(DnsError::StorageError)?;
 
-    apply_config(&cfg, dot.as_ref())
+    apply_config_with_ipv6(&cfg, dot.as_ref(), ipv6_enabled(&state)?)
         .await
         .map_err(|e| DnsError::EngineError(e.to_string()))?;
 

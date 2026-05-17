@@ -299,13 +299,19 @@ impl ConfigStore {
     /// describing the first validation failure found.
     pub fn validate(&self, config: &SystemConfig) -> Result<()> {
         use crate::config::models::{
+            ensure_ipv6_allowed,
             is_valid_cidr, is_valid_domain, is_valid_interface_name, is_valid_ip,
-            is_valid_ipv4_range, is_valid_mac, is_valid_mss, is_valid_mtu, is_valid_port,
+            is_valid_ipv4_addr, is_valid_ipv4_range, is_valid_mac, is_valid_mss, is_valid_mtu, is_valid_port,
             is_valid_vlan_id,
         };
 
         let interface_names: std::collections::HashSet<&str> =
             config.interfaces.iter().map(|i| i.name.as_str()).collect();
+        let ipv6_enabled = config
+            .system_settings
+            .as_ref()
+            .map(|settings| settings.ipv6_enabled)
+            .unwrap_or(false);
 
         for iface in &config.interfaces {
             if !is_valid_interface_name(&iface.name) {
@@ -321,6 +327,35 @@ impl ConfigStore {
                         iface.name,
                         cidr
                     );
+                }
+                if let Err(msg) = ensure_ipv6_allowed(
+                    cidr,
+                    ipv6_enabled,
+                    &format!("Interface {:?} address", iface.name),
+                ) {
+                    anyhow::bail!("{msg}");
+                }
+            }
+            if iface.dhcp6 && !ipv6_enabled {
+                anyhow::bail!(
+                    "Interface {:?} enables DHCPv6 but system ipv6Enabled is false",
+                    iface.name
+                );
+            }
+            if let Some(gateway) = &iface.gateway {
+                if !is_valid_ip(gateway) {
+                    anyhow::bail!(
+                        "Interface {:?} has invalid gateway {:?}",
+                        iface.name,
+                        gateway
+                    );
+                }
+                if let Err(msg) = ensure_ipv6_allowed(
+                    gateway,
+                    ipv6_enabled,
+                    &format!("Interface {:?} gateway", iface.name),
+                ) {
+                    anyhow::bail!("{msg}");
                 }
             }
             if let Some(mtu) = iface.mtu {
@@ -398,6 +433,34 @@ impl ConfigStore {
                     rule.priority
                 );
             }
+            if matches!(
+                rule.protocol.as_ref(),
+                Some(crate::config::models::Protocol::Icmpv6)
+            ) && !ipv6_enabled
+            {
+                anyhow::bail!(
+                    "Firewall rule {} uses ICMPv6 but system ipv6Enabled is false",
+                    rule.id
+                );
+            }
+            if let Some(src) = &rule.source {
+                if let Err(msg) = ensure_ipv6_allowed(
+                    src,
+                    ipv6_enabled,
+                    &format!("Firewall rule {} source", rule.id),
+                ) {
+                    anyhow::bail!("{msg}");
+                }
+            }
+            if let Some(dst) = &rule.destination {
+                if let Err(msg) = ensure_ipv6_allowed(
+                    dst,
+                    ipv6_enabled,
+                    &format!("Firewall rule {} destination", rule.id),
+                ) {
+                    anyhow::bail!("{msg}");
+                }
+            }
         }
 
         // Firewall global settings validation.
@@ -426,6 +489,13 @@ impl ConfigStore {
                         src
                     );
                 }
+                if let Err(msg) = ensure_ipv6_allowed(
+                    src,
+                    ipv6_enabled,
+                    "Firewall management_allowed_sources",
+                ) {
+                    anyhow::bail!("{msg}");
+                }
             }
             if let Some(iface) = &settings.management_interface {
                 if !iface.is_empty() && !is_valid_interface_name(iface) {
@@ -443,6 +513,9 @@ impl ConfigStore {
                 if !is_valid_ip(addr) {
                     anyhow::bail!("DNS listen address {:?} is not a valid IP address", addr);
                 }
+                if let Err(msg) = ensure_ipv6_allowed(addr, ipv6_enabled, "DNS listen address") {
+                    anyhow::bail!("{msg}");
+                }
             }
             if dns.port == 0 {
                 anyhow::bail!("DNS port must be non-zero");
@@ -451,10 +524,24 @@ impl ConfigStore {
                 if !is_valid_ip(fwd) {
                     anyhow::bail!("DNS forwarder {:?} is not a valid IP address", fwd);
                 }
+                if let Err(msg) = ensure_ipv6_allowed(fwd, ipv6_enabled, "DNS forwarder") {
+                    anyhow::bail!("{msg}");
+                }
             }
             for rec in &dns.local_records {
                 if rec.name.is_empty() {
                     anyhow::bail!("DNS local record has an empty name");
+                }
+                if rec.record_type.eq_ignore_ascii_case("AAAA") && !ipv6_enabled {
+                    anyhow::bail!(
+                        "DNS local record {:?} is AAAA but system ipv6Enabled is false",
+                        rec.name
+                    );
+                }
+                if let Err(msg) =
+                    ensure_ipv6_allowed(&rec.value, ipv6_enabled, "DNS local record value")
+                {
+                    anyhow::bail!("{msg}");
                 }
             }
         }
@@ -469,14 +556,14 @@ impl ConfigStore {
                         scope.subnet
                     );
                 }
-                if !is_valid_ip(&scope.pool_start) {
+                if !is_valid_ipv4_addr(&scope.pool_start) {
                     anyhow::bail!(
                         "DHCP scope {} has invalid pool_start {:?}",
                         scope.id,
                         scope.pool_start
                     );
                 }
-                if !is_valid_ip(&scope.pool_end) {
+                if !is_valid_ipv4_addr(&scope.pool_end) {
                     anyhow::bail!(
                         "DHCP scope {} has invalid pool_end {:?}",
                         scope.id,
@@ -492,7 +579,7 @@ impl ConfigStore {
                     );
                 }
                 if let Some(gw) = &scope.gateway {
-                    if !is_valid_ip(gw) {
+                    if !is_valid_ipv4_addr(gw) {
                         anyhow::bail!(
                             "DHCP scope {} has invalid gateway {:?}",
                             scope.id,
@@ -501,7 +588,7 @@ impl ConfigStore {
                     }
                 }
                 for dns in &scope.dns_servers {
-                    if !is_valid_ip(dns) {
+                    if !is_valid_ipv4_addr(dns) {
                         anyhow::bail!(
                             "DHCP scope {} has invalid DNS server {:?}",
                             scope.id,
@@ -517,7 +604,7 @@ impl ConfigStore {
                             res.mac_address
                         );
                     }
-                    if !is_valid_ip(&res.ip_address) {
+                    if !is_valid_ipv4_addr(&res.ip_address) {
                         anyhow::bail!(
                             "DHCP reservation {} has invalid IP {:?}",
                             res.id,
@@ -554,6 +641,11 @@ impl ConfigStore {
             if let Err(msg) = validate_suricata_config(suricata) {
                 anyhow::bail!("Suricata config is invalid: {msg}");
             }
+            for cidr in suricata.home_nets.iter().chain(suricata.external_nets.iter()) {
+                if let Err(msg) = ensure_ipv6_allowed(cidr, ipv6_enabled, "Suricata network") {
+                    anyhow::bail!("Suricata config is invalid: {msg}");
+                }
+            }
         }
 
         // Firewall alias validation.
@@ -574,6 +666,22 @@ impl ConfigStore {
                 if let Err(msg) = validate_alias_values(alias) {
                     anyhow::bail!("{msg}");
                 }
+                if matches!(
+                    alias.alias_type,
+                    crate::config::models::AliasType::Host
+                        | crate::config::models::AliasType::Network
+                        | crate::config::models::AliasType::UrlTable
+                ) {
+                    for value in &alias.values {
+                        if let Err(msg) = ensure_ipv6_allowed(
+                            value,
+                            ipv6_enabled,
+                            &format!("Firewall alias {:?}", alias.name),
+                        ) {
+                            anyhow::bail!("{msg}");
+                        }
+                    }
+                }
             }
         }
 
@@ -593,6 +701,11 @@ impl ConfigStore {
                         ov.hostname, ov.address
                     );
                 }
+                if let Err(msg) =
+                    ensure_ipv6_allowed(&ov.address, ipv6_enabled, "DNS host override address")
+                {
+                    anyhow::bail!("{msg}");
+                }
             }
         }
 
@@ -611,6 +724,11 @@ impl ConfigStore {
                         "DNS domain override {:?} has invalid forward_to address {:?}",
                         ov.domain, ov.forward_to
                     );
+                }
+                if let Err(msg) =
+                    ensure_ipv6_allowed(&ov.forward_to, ipv6_enabled, "DNS domain override target")
+                {
+                    anyhow::bail!("{msg}");
                 }
             }
         }
@@ -654,6 +772,11 @@ impl ConfigStore {
                             addr
                         );
                     }
+                    if let Err(msg) =
+                        ensure_ipv6_allowed(addr, ipv6_enabled, "WireGuard interface address")
+                    {
+                        anyhow::bail!("{msg}");
+                    }
                 }
                 for peer in &wg.peers {
                     if !validate_wg_key(&peer.public_key) {
@@ -681,6 +804,11 @@ impl ConfigStore {
                                 cidr
                             );
                         }
+                        if let Err(msg) =
+                            ensure_ipv6_allowed(cidr, ipv6_enabled, "WireGuard peer allowed_ip")
+                        {
+                            anyhow::bail!("{msg}");
+                        }
                     }
                     if let Some(ep) = &peer.endpoint {
                         if !validate_endpoint(ep) {
@@ -691,7 +819,39 @@ impl ConfigStore {
                                 ep
                             );
                         }
+                        if let Err(msg) =
+                            ensure_ipv6_allowed(ep, ipv6_enabled, "WireGuard peer endpoint")
+                        {
+                            anyhow::bail!("{msg}");
+                        }
                     }
+                }
+            }
+        }
+
+        // Gateway validation.
+        for gateway in &config.gateways {
+            if !is_valid_interface_name(&gateway.interface) {
+                anyhow::bail!(
+                    "Gateway {:?} has invalid interface {:?}",
+                    gateway.name,
+                    gateway.interface
+                );
+            }
+            if let Some(ip) = &gateway.gateway_ip {
+                if !is_valid_ip(ip) {
+                    anyhow::bail!("Gateway {:?} has invalid gateway_ip {:?}", gateway.name, ip);
+                }
+                if let Err(msg) = ensure_ipv6_allowed(ip, ipv6_enabled, "Gateway gateway_ip") {
+                    anyhow::bail!("{msg}");
+                }
+            }
+            if let Some(ip) = &gateway.monitor_ip {
+                if !is_valid_ip(ip) {
+                    anyhow::bail!("Gateway {:?} has invalid monitor_ip {:?}", gateway.name, ip);
+                }
+                if let Err(msg) = ensure_ipv6_allowed(ip, ipv6_enabled, "Gateway monitor_ip") {
+                    anyhow::bail!("{msg}");
                 }
             }
         }
@@ -745,8 +905,8 @@ impl ConfigStore {
 
         // NTP config validation.
         if let Some(ntp) = &config.ntp {
-            use crate::config::models::validate_ntp_config;
-            if let Err(msg) = validate_ntp_config(ntp) {
+            use crate::config::models::validate_ntp_config_with_ipv6;
+            if let Err(msg) = validate_ntp_config_with_ipv6(ntp, ipv6_enabled) {
                 anyhow::bail!("NTP config is invalid: {msg}");
             }
             // Cross-check listen_interfaces against the known interface names.
@@ -766,8 +926,8 @@ impl ConfigStore {
 
         // Dynamic DNS config validation.
         if let Some(dynamic_dns) = &config.dynamic_dns {
-            use crate::config::models::validate_dynamic_dns_config;
-            if let Err(msg) = validate_dynamic_dns_config(dynamic_dns) {
+            use crate::config::models::validate_dynamic_dns_config_with_ipv6;
+            if let Err(msg) = validate_dynamic_dns_config_with_ipv6(dynamic_dns, ipv6_enabled) {
                 anyhow::bail!("Dynamic DNS config is invalid: {msg}");
             }
             if dynamic_dns.enabled {
@@ -787,8 +947,8 @@ impl ConfigStore {
 
         // NAT config validation.
         if let Some(nat) = &config.nat {
-            use crate::config::models::validate_nat_config;
-            if let Err(msg) = validate_nat_config(nat) {
+            use crate::config::models::validate_nat_config_with_ipv6;
+            if let Err(msg) = validate_nat_config_with_ipv6(nat, ipv6_enabled) {
                 anyhow::bail!("NAT config is invalid: {msg}");
             }
         }

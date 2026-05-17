@@ -2,7 +2,7 @@
 //!
 //! Provides persisted Dynamic DNS configuration and on-demand record updates.
 
-use std::{net::Ipv4Addr, path::Path};
+use std::{net::IpAddr, path::Path};
 
 use axum::{
     extract::State,
@@ -17,8 +17,8 @@ use uuid::Uuid;
 
 use crate::{
     config::models::{
-        validate_dynamic_dns_config, DynamicDnsConfig, DynamicDnsEntry, DynamicDnsProvider,
-        Interface,
+        validate_dynamic_dns_config_with_ipv6, AddressFamily, DynamicDnsConfig, DynamicDnsEntry,
+        DynamicDnsProvider, Interface,
     },
     state::AppState,
 };
@@ -60,6 +60,7 @@ pub struct DynamicDnsEntryResponse {
     pub enabled: bool,
     pub provider: DynamicDnsProvider,
     pub interface: String,
+    pub address_family: AddressFamily,
     pub hostname: String,
     pub username: Option<String>,
     pub password: String,
@@ -82,6 +83,8 @@ pub struct DynamicDnsEntryRequest {
     pub enabled: bool,
     pub provider: DynamicDnsProvider,
     pub interface: String,
+    #[serde(default)]
+    pub address_family: AddressFamily,
     pub hostname: String,
     pub username: Option<String>,
     pub password: Option<String>,
@@ -104,6 +107,7 @@ pub struct DynamicDnsRuntimeEntryStatus {
     pub hostname: String,
     pub provider: DynamicDnsProvider,
     pub interface: String,
+    pub address_family: AddressFamily,
     pub ip: Option<String>,
     pub success: bool,
     pub message: String,
@@ -146,6 +150,11 @@ pub async fn update_config(
         .load_dynamic_dns_config()
         .map_err(DynamicDnsApiError::StorageError)?
         .unwrap_or_default();
+    let ipv6_enabled = state
+        .config_store
+        .load_system_settings()
+        .map_err(DynamicDnsApiError::StorageError)?
+        .ipv6_enabled;
 
     let entries = req
         .entries
@@ -170,6 +179,7 @@ pub async fn update_config(
                 enabled: entry.enabled,
                 provider: entry.provider,
                 interface: entry.interface.trim().to_string(),
+                address_family: entry.address_family,
                 hostname: entry.hostname.trim().to_string(),
                 username: entry
                     .username
@@ -192,7 +202,7 @@ pub async fn update_config(
         entries,
     };
 
-    if let Err(msg) = validate_dynamic_dns_config(&cfg) {
+    if let Err(msg) = validate_dynamic_dns_config_with_ipv6(&cfg, ipv6_enabled) {
         return Err(DynamicDnsApiError::ValidationFailed(msg));
     }
 
@@ -249,6 +259,14 @@ pub(crate) async fn run_update_now(
             "dynamic DNS is disabled".into(),
         ));
     }
+    let ipv6_enabled = state
+        .config_store
+        .load_system_settings()
+        .map_err(DynamicDnsApiError::StorageError)?
+        .ipv6_enabled;
+    if let Err(msg) = validate_dynamic_dns_config_with_ipv6(&cfg, ipv6_enabled) {
+        return Err(DynamicDnsApiError::ValidationFailed(msg));
+    }
 
     let statuses = run_update_cycle(&state, &cfg).await?;
     let payload = DynamicDnsPersistedStatus {
@@ -279,6 +297,7 @@ fn redact_entry(entry: DynamicDnsEntry) -> DynamicDnsEntryResponse {
         enabled: entry.enabled,
         provider: entry.provider,
         interface: entry.interface,
+        address_family: entry.address_family,
         hostname: entry.hostname,
         username: entry.username,
         password: String::new(),
@@ -309,7 +328,7 @@ async fn run_update_cycle(
 
     for entry in cfg.entries.iter().filter(|entry| entry.enabled) {
         let now = Utc::now().to_rfc3339();
-        let ip = match interface_ipv4(&interfaces, &entry.interface) {
+        let ip = match interface_ip(&interfaces, &entry.interface, &entry.address_family) {
             Some(addr) => addr,
             None => {
                 statuses.push(DynamicDnsRuntimeEntryStatus {
@@ -317,9 +336,13 @@ async fn run_update_cycle(
                     hostname: entry.hostname.clone(),
                     provider: entry.provider.clone(),
                     interface: entry.interface.clone(),
+                    address_family: entry.address_family.clone(),
                     ip: None,
                     success: false,
-                    message: "interface does not have an IPv4 address".into(),
+                    message: format!(
+                        "interface does not have an {:?} address",
+                        entry.address_family
+                    ),
                     updated_at: now,
                 });
                 continue;
@@ -333,6 +356,7 @@ async fn run_update_cycle(
                 hostname: entry.hostname.clone(),
                 provider: entry.provider.clone(),
                 interface: entry.interface.clone(),
+                address_family: entry.address_family.clone(),
                 ip: Some(ip),
                 success: true,
                 message,
@@ -345,6 +369,7 @@ async fn run_update_cycle(
                     hostname: entry.hostname.clone(),
                     provider: entry.provider.clone(),
                     interface: entry.interface.clone(),
+                    address_family: entry.address_family.clone(),
                     ip: Some(ip),
                     success: false,
                     message,
@@ -357,14 +382,18 @@ async fn run_update_cycle(
     Ok(statuses)
 }
 
-fn interface_ipv4(interfaces: &[Interface], name: &str) -> Option<String> {
+fn interface_ip(interfaces: &[Interface], name: &str, family: &AddressFamily) -> Option<String> {
     interfaces
         .iter()
         .find(|iface| iface.name == name)
         .and_then(|iface| {
             iface.addresses.iter().find_map(|cidr| {
                 let ip = cidr.split('/').next()?.trim();
-                ip.parse::<Ipv4Addr>().ok().map(|addr| addr.to_string())
+                match (family, ip.parse::<IpAddr>().ok()?) {
+                    (AddressFamily::Ipv4, IpAddr::V4(addr)) => Some(addr.to_string()),
+                    (AddressFamily::Ipv6, IpAddr::V6(addr)) => Some(addr.to_string()),
+                    _ => None,
+                }
             })
         })
 }
@@ -379,10 +408,16 @@ async fn apply_entry_update(
 
     let mut request = match entry.provider {
         DynamicDnsProvider::DuckDns => {
+            let ip_param = if matches!(&entry.address_family, AddressFamily::Ipv6) {
+                "ipv6"
+            } else {
+                "ip"
+            };
             let url = format!(
-                "https://www.duckdns.org/update?domains={}&token={}&ip={}",
+                "https://www.duckdns.org/update?domains={}&token={}&{}={}",
                 entry.hostname.trim(),
                 password,
+                ip_param,
                 ip
             );
             client.get(url)

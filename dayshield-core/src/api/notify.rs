@@ -19,7 +19,7 @@ use axum::{
 use tracing::info;
 
 use crate::config::models::{validate_notify_config, NotifyCategory, NotifyConfig};
-use crate::notify::smtp::{send_email, NotifyError};
+use crate::notify::smtp::{send_email_with_ipv6, NotifyError};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -161,7 +161,13 @@ pub async fn send_test(
          If you received this, your SMTP configuration is working correctly.\n"
     );
 
-    send_email(&cfg, subject, &body)
+    let ipv6_enabled = state
+        .config_store
+        .load_system_settings()
+        .map_err(NotifyApiError::StorageError)?
+        .ipv6_enabled;
+
+    send_email_with_ipv6(&cfg, subject, &body, ipv6_enabled)
         .await
         .map_err(NotifyApiError::from)?;
 

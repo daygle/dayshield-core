@@ -206,7 +206,13 @@ pub(crate) async fn run_acme_renewal(state: &Arc<AppState>) -> Result<String, Ac
 
     info!(domains = ?cfg.domains, "acme: starting certificate issuance / renewal");
 
-    let engine = AcmeEngine::new(cfg.clone());
+    let ipv6_enabled = state
+        .config_store
+        .load_system_settings()
+        .map_err(AcmeApiError::StorageError)?
+        .ipv6_enabled;
+
+    let engine = AcmeEngine::new_with_ipv6(cfg.clone(), ipv6_enabled);
     if !engine.renewal_check().await.unwrap_or(true) {
         return Ok("certificate already valid; renewal not required".to_string());
     }

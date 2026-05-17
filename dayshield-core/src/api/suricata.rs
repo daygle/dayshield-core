@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::{
-    config::models::{is_valid_cidr, SuricataConfig},
+    config::models::{ensure_ipv6_allowed, is_valid_cidr, SuricataConfig},
     engine::suricata::apply_config,
     state::AppState,
 };
@@ -232,12 +232,22 @@ pub async fn update_config(
 
     // --- Validation --------------------------------------------------------
 
+    let ipv6_enabled = state
+        .config_store
+        .load_system_settings()
+        .map_err(SuricataError::StorageError)?
+        .ipv6_enabled;
+
     for cidr in cfg.home_nets.iter().chain(cfg.external_nets.iter()) {
         if !is_valid_cidr(cidr) {
             warn!(cidr = %cidr, "suricata: invalid CIDR");
             return Err(SuricataError::ValidationFailed(format!(
                 "invalid CIDR: {cidr} (expected IPv4/IPv6 CIDR notation, e.g. 192.168.1.0/24)"
             )));
+        }
+        if let Err(msg) = ensure_ipv6_allowed(cidr, ipv6_enabled, "Suricata network") {
+            warn!(cidr = %cidr, "suricata: IPv6 CIDR rejected while disabled");
+            return Err(SuricataError::ValidationFailed(msg));
         }
     }
 

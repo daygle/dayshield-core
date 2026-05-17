@@ -16,7 +16,7 @@
 //! # HTTP-01 challenge server
 //!
 //! [`AcmeEngine::order_certificate`] spins up a temporary Axum listener on
-//! `0.0.0.0:80` that serves the ACME key-authorization token.  The listener
+//! port 80 that serves the ACME key-authorization token.  The listener
 //! is shut down as soon as the order becomes `Ready` (or times out).
 //!
 //! # DNS-01 challenges
@@ -107,12 +107,21 @@ type ChallengeMap = Arc<RwLock<HashMap<String, String>>>;
 pub struct AcmeEngine {
     /// The ACME configuration in effect.
     pub config: AcmeConfig,
+    ipv6_enabled: bool,
 }
 
 impl AcmeEngine {
     /// Create a new [`AcmeEngine`] from the given configuration.
     pub fn new(config: AcmeConfig) -> Self {
-        Self { config }
+        Self::new_with_ipv6(config, false)
+    }
+
+    /// Create a new [`AcmeEngine`] with the current global IPv6 setting.
+    pub fn new_with_ipv6(config: AcmeConfig, ipv6_enabled: bool) -> Self {
+        Self {
+            config,
+            ipv6_enabled,
+        }
     }
 
     // ------------------------------------------------------------------
@@ -209,7 +218,7 @@ impl AcmeEngine {
     ///
     /// # HTTP-01
     ///
-    /// A temporary Axum server is bound on `0.0.0.0:80` while the ACME server
+    /// A temporary Axum server is bound on port 80 while the ACME server
     /// verifies the challenge.  This requires port 80 to be free and accessible
     /// from the public internet (or the ACME directory's vantage point).
     ///
@@ -239,7 +248,7 @@ impl AcmeEngine {
 
         let challenge_map: ChallengeMap = Arc::new(RwLock::new(HashMap::new()));
         let server_handle = if matches!(self.config.challenge_type, AcmeChallengeType::Http01) {
-            Some(start_http01_server(Arc::clone(&challenge_map)).await?)
+            Some(start_http01_server(Arc::clone(&challenge_map), self.ipv6_enabled).await?)
         } else {
             None
         };
@@ -489,6 +498,7 @@ async fn http01_challenge_handler(
 /// use or insufficient privileges).
 async fn start_http01_server(
     map: ChallengeMap,
+    ipv6_enabled: bool,
 ) -> Result<tokio::task::JoinHandle<()>, AcmeError> {
     let app = Router::new()
         .route(
@@ -497,11 +507,12 @@ async fn start_http01_server(
         )
         .with_state(map);
 
-    let listener = TcpListener::bind("0.0.0.0:80").await.map_err(|e| {
+    let bind_addr = if ipv6_enabled { "[::]:80" } else { "0.0.0.0:80" };
+    let listener = TcpListener::bind(bind_addr).await.map_err(|e| {
         AcmeError::Other(format!("failed to bind port 80 for HTTP-01 challenge: {e}"))
     })?;
 
-    info!("acme: HTTP-01 challenge server listening on 0.0.0.0:80");
+    info!(%bind_addr, "acme: HTTP-01 challenge server listening");
 
     let handle = tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {

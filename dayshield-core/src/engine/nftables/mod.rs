@@ -18,8 +18,9 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::models::{
-    Action, AliasType, FirewallAlias, FirewallChainPolicy, FirewallDirection, FirewallRule, FirewallSchedule,
-    FirewallSettings, LogPosition, NatConfig, NatProtocol, NatRuleType, OutboundMode, Protocol,
+    Action, AddressFamily, AliasType, FirewallAlias, FirewallChainPolicy, FirewallDirection, FirewallRule,
+    FirewallSchedule, FirewallSettings, LogPosition, NatConfig, NatProtocol, NatRuleType, OutboundMode,
+    Protocol,
 };
 
 const DEFAULT_BLOCK_LOG_RATE_PER_SECOND: u32 = 10;
@@ -120,11 +121,34 @@ pub fn generate_ruleset(
     firewall_settings: Option<&FirewallSettings>,
     resolved_url_tables: &HashMap<String, Vec<String>>,
 ) -> String {
+    generate_ruleset_with_ipv6(
+        rules,
+        nat_config,
+        aliases,
+        firewall_settings,
+        resolved_url_tables,
+        false,
+    )
+}
+
+/// Generate a complete nftables ruleset for the current IPv6 mode.
+pub fn generate_ruleset_with_ipv6(
+    rules: &[FirewallRule],
+    nat_config: Option<&NatConfig>,
+    aliases: &[FirewallAlias],
+    firewall_settings: Option<&FirewallSettings>,
+    resolved_url_tables: &HashMap<String, Vec<String>>,
+    ipv6_enabled: bool,
+) -> String {
     let settings = firewall_settings.cloned().unwrap_or_default();
     // Only emit rules that are enabled and whose schedule (if any) is currently active.
     let mut sorted: Vec<&FirewallRule> = rules
         .iter()
-        .filter(|r| r.enabled && is_schedule_active(r.schedule.as_ref()))
+        .filter(|r| {
+            r.enabled
+                && is_schedule_active(r.schedule.as_ref())
+                && (ipv6_enabled || !firewall_rule_uses_ipv6(r))
+        })
         .collect();
     sorted.sort_by_key(|r| r.priority);
 
@@ -157,7 +181,7 @@ pub fn generate_ruleset(
 
     // Emit named sets for each enabled alias.
     for alias in aliases.iter().filter(|a| a.enabled) {
-        let set_body = alias_set_body(alias, resolved_url_tables);
+        let set_body = alias_set_body(alias, resolved_url_tables, ipv6_enabled);
         if let Some(body) = set_body {
             out.push_str(&format!("    set {} {{\n", alias.name));
             out.push_str(&body);
@@ -183,19 +207,13 @@ pub fn generate_ruleset(
         ));
     }
     if settings.management_anti_lockout && !settings.management_ports.is_empty() {
-        let mut mgmt_parts: Vec<String> = Vec::new();
+        let mut base_parts: Vec<String> = Vec::new();
         if let Some(iface) = &settings.management_interface {
             if !iface.is_empty() {
-                mgmt_parts.push(format!("iifname \"{}\"", iface));
+                base_parts.push(format!("iifname \"{}\"", iface));
             }
         }
-        if !settings.management_allowed_sources.is_empty() {
-            mgmt_parts.push(format!(
-                "ip saddr {{ {} }}",
-                settings.management_allowed_sources.join(", ")
-            ));
-        }
-        mgmt_parts.push(format!(
+        let ports_part = format!(
             "tcp dport {{ {} }}",
             settings
                 .management_ports
@@ -203,9 +221,41 @@ pub fn generate_ruleset(
                 .map(u16::to_string)
                 .collect::<Vec<String>>()
                 .join(", ")
-        ));
-        mgmt_parts.push("accept".to_string());
-        out.push_str(&format!("        {}\n", mgmt_parts.join(" ")));
+        );
+        let v4_sources = settings
+            .management_allowed_sources
+            .iter()
+            .filter(|src| !src.contains(':'))
+            .cloned()
+            .collect::<Vec<String>>();
+        let v6_sources = settings
+            .management_allowed_sources
+            .iter()
+            .filter(|src| src.contains(':'))
+            .cloned()
+            .collect::<Vec<String>>();
+
+        if settings.management_allowed_sources.is_empty() {
+            let mut parts = base_parts.clone();
+            parts.push(ports_part);
+            parts.push("accept".to_string());
+            out.push_str(&format!("        {}\n", parts.join(" ")));
+        } else {
+            if !v4_sources.is_empty() {
+                let mut parts = base_parts.clone();
+                parts.push(format!("ip saddr {{ {} }}", v4_sources.join(", ")));
+                parts.push(ports_part.clone());
+                parts.push("accept".to_string());
+                out.push_str(&format!("        {}\n", parts.join(" ")));
+            }
+            if ipv6_enabled && !v6_sources.is_empty() {
+                let mut parts = base_parts.clone();
+                parts.push(format!("ip6 saddr {{ {} }}", v6_sources.join(", ")));
+                parts.push(ports_part);
+                parts.push("accept".to_string());
+                out.push_str(&format!("        {}\n", parts.join(" ")));
+            }
+        }
     }
     // ICMP is required for basic network operation regardless of user rules:
     //   echo-request        - inbound ping (diagonstics)
@@ -213,7 +263,9 @@ pub fn generate_ruleset(
     //   time-exceeded       - traceroute TTL expiry
     // Rate-limiting prevents ICMP flood abuse.
     out.push_str("        icmp type { echo-request, destination-unreachable, time-exceeded } limit rate 20/second accept\n");
-    out.push_str("        icmpv6 type { echo-request, destination-unreachable, time-exceeded, nd-neighbor-solicit, nd-neighbor-advert, mld-listener-query } accept\n");
+    if ipv6_enabled {
+        out.push_str("        icmpv6 type { echo-request, destination-unreachable, time-exceeded, nd-neighbor-solicit, nd-neighbor-advert, mld-listener-query } accept\n");
+    }
     for rule in &sorted {
         if rule_targets_chain(rule, FilterChain::Input) {
             out.push_str(&format!(
@@ -250,7 +302,12 @@ pub fn generate_ruleset(
         for rule in nat
             .rules
             .iter()
-            .filter(|r| r.enabled && r.auto_firewall_rule && matches!(r.rule_type, NatRuleType::Dnat))
+            .filter(|r| {
+                r.enabled
+                    && r.auto_firewall_rule
+                    && matches!(r.rule_type, NatRuleType::Dnat)
+                    && (ipv6_enabled || matches!(&r.address_family, AddressFamily::Ipv4))
+            })
         {
             if let Some(line) = format_dnat_forward_accept(rule) {
                 out.push_str(&format!("        {}\n", line));
@@ -299,10 +356,10 @@ pub fn generate_ruleset(
     out.push_str("}\n");
 
     // ------------------------------------------------------------------
-    // ip nat table (IPv4 only; only emitted when NAT is configured)
+    // NAT tables are family-specific (`ip` for IPv4 and `ip6` for IPv6).
     // ------------------------------------------------------------------
     if let Some(nat) = nat_config {
-        out.push_str(&generate_nat_table(nat, &settings.log_position));
+        out.push_str(&generate_nat_table(nat, &settings.log_position, ipv6_enabled));
     }
 
     info!(
@@ -332,16 +389,18 @@ pub async fn apply_rules(
     nat_config: Option<&NatConfig>,
     aliases: &[FirewallAlias],
     firewall_settings: Option<&FirewallSettings>,
+    ipv6_enabled: bool,
 ) -> Result<(), NftError> {
     // Resolve URL-table aliases (fetch + cache).
     let resolved_url_tables = resolve_url_tables(aliases).await;
 
-    let ruleset = generate_ruleset(
+    let ruleset = generate_ruleset_with_ipv6(
         rules,
         nat_config,
         aliases,
         firewall_settings,
         &resolved_url_tables,
+        ipv6_enabled,
     );
 
     // Unique temp file name based on milliseconds since UNIX epoch.
@@ -526,8 +585,9 @@ async fn resolve_url_tables(aliases: &[FirewallAlias]) -> HashMap<String, Vec<St
 fn alias_set_body(
     alias: &FirewallAlias,
     resolved_url_tables: &HashMap<String, Vec<String>>,
+    ipv6_enabled: bool,
 ) -> Option<String> {
-    let values: Vec<String> = match alias.alias_type {
+    let mut values: Vec<String> = match alias.alias_type {
         AliasType::Host | AliasType::Network => alias.values.clone(),
         AliasType::Port => alias.values.clone(),
         AliasType::UrlTable => resolved_url_tables
@@ -535,6 +595,10 @@ fn alias_set_body(
             .cloned()
             .unwrap_or_default(),
     };
+
+    if !ipv6_enabled && !matches!(alias.alias_type, AliasType::Port) {
+        values.retain(|value| !value.contains(':'));
+    }
 
     if values.is_empty() {
         return None;
@@ -581,6 +645,12 @@ fn chain_policy_str(policy: &FirewallChainPolicy) -> &'static str {
         FirewallChainPolicy::Drop => "drop",
         FirewallChainPolicy::Accept => "accept",
     }
+}
+
+fn firewall_rule_uses_ipv6(rule: &FirewallRule) -> bool {
+    rule.source.as_deref().map_or(false, |value| value.contains(':'))
+        || rule.destination.as_deref().map_or(false, |value| value.contains(':'))
+        || matches!(rule.protocol, Some(Protocol::Icmpv6))
 }
 
 /// Translate a single [`FirewallRule`] into an nftables rule statement.
@@ -775,7 +845,7 @@ fn format_dnat_forward_accept(nat: &crate::config::models::NatRule) -> Option<St
     }
 
     // Match the *translated* (internal) destination address.
-    parts.push(format!("ip daddr {}", addr));
+    parts.push(format!("{} daddr {}", nft_ip_keyword(&nat.address_family), addr));
 
     // Match the translated port (falls back to the original destination port
     // when no port translation is configured).
@@ -812,13 +882,13 @@ fn format_nat_prerouting(nat: &crate::config::models::NatRule) -> Option<String>
             if let Some(iface) = &nat.interface {
                 parts.push(format!("iifname \"{}\"", iface));
             }
-            // Source address (IPv4 only).
+            // Source address.
             if let Some(src) = &nat.source {
-                parts.push(format!("ip saddr {}", src));
+                parts.push(format!("{} saddr {}", nft_ip_keyword(&nat.address_family), src));
             }
-            // Destination address (IPv4 only).
+            // Destination address.
             if let Some(dst) = &nat.destination {
-                parts.push(format!("ip daddr {}", dst));
+                parts.push(format!("{} daddr {}", nft_ip_keyword(&nat.address_family), dst));
             }
             // Protocol + destination port.
             match nat.protocol {
@@ -842,11 +912,7 @@ fn format_nat_prerouting(nat: &crate::config::models::NatRule) -> Option<String>
             // Translation target.
             let translation = nat.translation.as_ref()?;
             let addr = translation.address.as_deref()?;
-            let target = match (translation.port, translation.port_end) {
-                (Some(p), Some(pe)) => format!("dnat to {}:{}-{}", addr, p, pe),
-                (Some(p), None) => format!("dnat to {}:{}", addr, p),
-                (None, _) => format!("dnat to {}", addr),
-            };
+            let target = format_nat_target("dnat", addr, translation.port, translation.port_end);
             parts.push(target);
             Some(parts.join(" "))
         }
@@ -860,7 +926,7 @@ fn format_nat_postrouting(nat: &crate::config::models::NatRule) -> Option<String
         NatRuleType::Masquerade => {
             let mut parts: Vec<String> = Vec::new();
             if let Some(src) = &nat.source {
-                parts.push(format!("ip saddr {}", src));
+                parts.push(format!("{} saddr {}", nft_ip_keyword(&nat.address_family), src));
             }
             if let Some(iface) = &nat.interface {
                 parts.push(format!("oifname \"{}\"", iface));
@@ -871,14 +937,14 @@ fn format_nat_postrouting(nat: &crate::config::models::NatRule) -> Option<String
         NatRuleType::Snat => {
             let mut parts: Vec<String> = Vec::new();
             if let Some(src) = &nat.source {
-                parts.push(format!("ip saddr {}", src));
+                parts.push(format!("{} saddr {}", nft_ip_keyword(&nat.address_family), src));
             }
             if let Some(iface) = &nat.interface {
                 parts.push(format!("oifname \"{}\"", iface));
             }
             let translation = nat.translation.as_ref()?;
             let addr = translation.address.as_deref()?;
-            parts.push(format!("snat to {}", addr));
+            parts.push(format_nat_target("snat", addr, translation.port, translation.port_end));
             Some(parts.join(" "))
         }
         NatRuleType::Dnat => None,
@@ -893,10 +959,34 @@ fn format_nat_postrouting(nat: &crate::config::models::NatRule) -> Option<String
 /// - `output`      - reflection DNAT rules (hairpin NAT) when enabled.
 ///
 /// Returns an empty string when no rules would be emitted.
-fn generate_nat_table(config: &NatConfig, log_position: &LogPosition) -> String {
+pub(crate) fn generate_nat_table(
+    config: &NatConfig,
+    log_position: &LogPosition,
+    ipv6_enabled: bool,
+) -> String {
+    let mut out = generate_nat_table_for_family(config, log_position, AddressFamily::Ipv4);
+    if ipv6_enabled {
+        out.push_str(&generate_nat_table_for_family(
+            config,
+            log_position,
+            AddressFamily::Ipv6,
+        ));
+    }
+    out
+}
+
+fn generate_nat_table_for_family(
+    config: &NatConfig,
+    log_position: &LogPosition,
+    family: AddressFamily,
+) -> String {
     // Sort user rules deterministically by priority.
     let mut sorted: Vec<&crate::config::models::NatRule> =
-        config.rules.iter().filter(|r| r.enabled).collect();
+        config
+            .rules
+            .iter()
+            .filter(|r| r.enabled && r.address_family == family)
+            .collect();
     sorted.sort_by_key(|r| r.priority);
 
     let has_auto_masquerade = matches!(
@@ -936,7 +1026,7 @@ fn generate_nat_table(config: &NatConfig, log_position: &LogPosition) -> String 
     }
 
     let mut out = String::new();
-    out.push_str("\ntable ip nat {\n");
+    out.push_str(&format!("\ntable {} nat {{\n", nft_table_family(&family)));
 
     // postrouting chain
     if has_postrouting {
@@ -1003,6 +1093,34 @@ fn generate_nat_table(config: &NatConfig, log_position: &LogPosition) -> String 
 
     out.push_str("}\n");
     out
+}
+
+fn nft_table_family(family: &AddressFamily) -> &'static str {
+    match family {
+        AddressFamily::Ipv4 => "ip",
+        AddressFamily::Ipv6 => "ip6",
+    }
+}
+
+fn nft_ip_keyword(family: &AddressFamily) -> &'static str {
+    match family {
+        AddressFamily::Ipv4 => "ip",
+        AddressFamily::Ipv6 => "ip6",
+    }
+}
+
+fn format_nat_target(action: &str, addr: &str, port: Option<u16>, port_end: Option<u16>) -> String {
+    let addr_for_port = if addr.contains(':') {
+        format!("[{addr}]")
+    } else {
+        addr.to_string()
+    };
+
+    match (port, port_end) {
+        (Some(p), Some(pe)) => format!("{action} to {addr_for_port}:{p}-{pe}"),
+        (Some(p), None) => format!("{action} to {addr_for_port}:{p}"),
+        (None, _) => format!("{action} to {addr}"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1123,6 +1241,7 @@ mod tests {
             address_family: AddressFamily::Ipv4,
             priority: 0,
             log: false,
+            auto_firewall_rule: true,
         }
     }
 
@@ -1148,6 +1267,7 @@ mod tests {
             address_family: AddressFamily::Ipv4,
             priority: 0,
             log: false,
+            auto_firewall_rule: true,
         }
     }
 
@@ -1211,7 +1331,7 @@ mod tests {
             destination: Some("10.0.0.1/32".into()),
             ..base_rule(0, Action::Accept)
         };
-        let rs = generate_ruleset(&[rule], None, &[], None, &HashMap::new());
+        let rs = generate_ruleset_with_ipv6(&[rule], None, &[], None, &HashMap::new(), true);
         assert!(rs.contains("ip saddr 192.168.1.0/24"));
         assert!(rs.contains("ip daddr 10.0.0.1/32"));
         assert!(rs.contains("accept"));
@@ -1337,7 +1457,7 @@ mod tests {
             source: Some("2001:db8::/32".into()),
             ..base_rule(0, Action::Accept)
         };
-        let rs = generate_ruleset(&[rule], None, &[], None, &HashMap::new());
+        let rs = generate_ruleset_with_ipv6(&[rule], None, &[], None, &HashMap::new(), true);
         assert!(rs.contains("ip6 saddr 2001:db8::/32"));
     }
 
@@ -1470,6 +1590,7 @@ mod tests {
             address_family: AddressFamily::Ipv4,
             priority: 0,
             log: false,
+            auto_firewall_rule: true,
         };
         let nat = NatConfig {
             outbound_mode: OutboundMode::Manual,
@@ -1505,7 +1626,7 @@ mod tests {
             rules: vec![dnat_rule("203.0.113.2/32", "192.168.1.10", Some(443))],
             nat_reflection: true,
         };
-        let rs = generate_ruleset(&[], Some(&nat), &[], &HashMap::new());
+        let rs = generate_ruleset(&[], Some(&nat), &[], None, &HashMap::new());
         assert!(rs.contains("hook output"), "global reflection must generate output chain");
     }
 
@@ -1521,7 +1642,7 @@ mod tests {
             rules: vec![rule_high, rule_low],
             nat_reflection: false,
         };
-        let rs = generate_ruleset(&[], Some(&nat), &[], &HashMap::new());
+        let rs = generate_ruleset(&[], Some(&nat), &[], None, &HashMap::new());
         let pos_low = rs.find("203.0.113.20").expect("low priority rule not found");
         let pos_high = rs.find("203.0.113.10").expect("high priority rule not found");
         assert!(pos_low < pos_high, "priority 5 rule must appear before priority 10 rule");
@@ -1537,7 +1658,7 @@ mod tests {
             rules: vec![rule],
             nat_reflection: false,
         };
-        let rs = generate_ruleset(&[], Some(&nat), &[], &HashMap::new());
+        let rs = generate_ruleset(&[], Some(&nat), &[], None, &HashMap::new());
         assert!(!rs.contains("table ip nat"), "disabled rule must not emit nat table");
     }
 
@@ -1549,7 +1670,7 @@ mod tests {
             rules: vec![],
             nat_reflection: false,
         };
-        let rs = generate_ruleset(&[], Some(&nat), &[], &HashMap::new());
+        let rs = generate_ruleset(&[], Some(&nat), &[], None, &HashMap::new());
         assert!(rs.contains("table ip nat"), "must use 'table ip nat' (IPv4 only)");
         assert!(!rs.contains("table inet nat"), "must not use 'table inet nat'");
     }
@@ -1569,7 +1690,7 @@ mod tests {
             ttl: None,
             enabled: true,
         };
-        let rs = generate_ruleset(&[], None, &[alias], &HashMap::new());
+        let rs = generate_ruleset(&[], None, &[alias], None, &HashMap::new());
         assert!(rs.contains("set web_servers"), "named set must appear");
         assert!(rs.contains("192.168.1.10"), "IP must appear in set");
         assert!(rs.contains("ipv4_addr"), "type must be ipv4_addr for IPv4 hosts");
@@ -1586,7 +1707,7 @@ mod tests {
             ttl: None,
             enabled: true,
         };
-        let rs = generate_ruleset(&[], None, &[alias], &HashMap::new());
+        let rs = generate_ruleset(&[], None, &[alias], None, &HashMap::new());
         assert!(rs.contains("set private_nets"));
         assert!(rs.contains("flags interval"), "network aliases need interval flag");
     }
@@ -1602,7 +1723,7 @@ mod tests {
             ttl: None,
             enabled: true,
         };
-        let rs = generate_ruleset(&[], None, &[alias], &HashMap::new());
+        let rs = generate_ruleset(&[], None, &[alias], None, &HashMap::new());
         assert!(rs.contains("set web_ports"));
         assert!(rs.contains("inet_service"), "port aliases must use inet_service type");
     }
@@ -1618,7 +1739,7 @@ mod tests {
             ttl: None,
             enabled: false,
         };
-        let rs = generate_ruleset(&[], None, &[alias], &HashMap::new());
+        let rs = generate_ruleset(&[], None, &[alias], None, &HashMap::new());
         assert!(!rs.contains("disabled_alias"), "disabled alias must not appear in ruleset");
     }
 
@@ -1635,7 +1756,7 @@ mod tests {
         };
         let mut resolved = HashMap::new();
         resolved.insert("blocklist".into(), vec!["198.51.100.1".into(), "198.51.100.2".into()]);
-        let rs = generate_ruleset(&[], None, &[alias], &resolved);
+        let rs = generate_ruleset(&[], None, &[alias], None, &resolved);
         assert!(rs.contains("set blocklist"));
         assert!(rs.contains("198.51.100.1"));
     }
@@ -1666,7 +1787,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_rules_does_not_panic_without_nft() {
-        let result = apply_rules(&[], None, &[], None).await;
+        let result = apply_rules(&[], None, &[], None, false).await;
         match result {
             Ok(()) => {}
             Err(NftError::ApplyFailed(_)) => {}

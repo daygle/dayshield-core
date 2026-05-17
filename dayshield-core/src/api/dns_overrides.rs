@@ -17,10 +17,10 @@ use tracing::{info, warn};
 
 use crate::{
     config::models::{
-        is_valid_ip, validate_dns_domain, validate_dns_hostname, DnsDomainOverride,
+        ensure_ipv6_allowed, is_valid_ip, validate_dns_domain, validate_dns_hostname, DnsDomainOverride,
         DnsHostOverride,
     },
-    engine::dns::apply_config,
+    engine::dns::apply_config_with_ipv6,
     state::AppState,
 };
 
@@ -136,6 +136,12 @@ pub async fn create_override(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateDnsOverrideRequest>,
 ) -> Result<impl IntoResponse, DnsOverrideError> {
+    let ipv6_enabled = state
+        .config_store
+        .load_system_settings()
+        .map_err(DnsOverrideError::StorageError)?
+        .ipv6_enabled;
+
     let (mut host_overrides, mut domain_overrides) = state
         .config_store
         .load_dns_overrides()
@@ -163,6 +169,11 @@ pub async fn create_override(
                     "invalid address {:?}: must be a valid IPv4 or IPv6 address",
                     req.target
                 )));
+            }
+            if let Err(msg) =
+                ensure_ipv6_allowed(&req.target, ipv6_enabled, "DNS host override target")
+            {
+                return Err(DnsOverrideError::ValidationFailed(msg));
             }
             if host_overrides.iter().any(|h| h.hostname == req.name) {
                 return Err(DnsOverrideError::ValidationFailed(format!(
@@ -192,6 +203,11 @@ pub async fn create_override(
                     "invalid forward_to {:?}: must be a valid IPv4 or IPv6 address",
                     req.target
                 )));
+            }
+            if let Err(msg) =
+                ensure_ipv6_allowed(&req.target, ipv6_enabled, "DNS domain override target")
+            {
+                return Err(DnsOverrideError::ValidationFailed(msg));
             }
             if domain_overrides.iter().any(|d| d.domain == req.name) {
                 return Err(DnsOverrideError::ValidationFailed(format!(
@@ -229,7 +245,7 @@ pub async fn create_override(
             .config_store
             .load_dot_config()
             .map_err(DnsOverrideError::StorageError)?;
-        apply_config(&dns_cfg, dot.as_ref())
+        apply_config_with_ipv6(&dns_cfg, dot.as_ref(), ipv6_enabled)
             .await
             .map_err(|e| DnsOverrideError::EngineError(e.to_string()))?;
         info!("dns_overrides: dns engine apply complete");
@@ -278,7 +294,12 @@ pub async fn delete_override(
             .config_store
             .load_dot_config()
             .map_err(DnsOverrideError::StorageError)?;
-        apply_config(&dns_cfg, dot.as_ref())
+        let ipv6_enabled = state
+            .config_store
+            .load_system_settings()
+            .map_err(DnsOverrideError::StorageError)?
+            .ipv6_enabled;
+        apply_config_with_ipv6(&dns_cfg, dot.as_ref(), ipv6_enabled)
             .await
             .map_err(|e| DnsOverrideError::EngineError(e.to_string()))?;
         info!("dns_overrides: dns engine apply complete after delete");

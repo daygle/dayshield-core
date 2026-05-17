@@ -24,8 +24,8 @@ use uuid::Uuid;
 
 use crate::{
     config::models::{
-        validate_nat_config, AddressFamily, NatConfig, NatProtocol, NatRule, NatRuleType,
-        NatTranslation, OutboundMode,
+        validate_nat_config_with_ipv6, validate_nat_rule_with_ipv6, AddressFamily, NatConfig,
+        NatProtocol, NatRule, NatRuleType, NatTranslation, OutboundMode, SystemConfig,
     },
     engine::nftables::{apply_rules, NftError},
     state::AppState,
@@ -102,6 +102,8 @@ pub struct CreateNatRuleRequest {
     #[serde(default)]
     pub nat_reflection: bool,
     #[serde(default)]
+    pub address_family: AddressFamily,
+    #[serde(default)]
     pub priority: i32,
     #[serde(default)]
     pub log: bool,
@@ -113,6 +115,14 @@ pub struct CreateNatRuleRequest {
 
 fn default_true() -> bool {
     true
+}
+
+fn config_ipv6_enabled(config: &SystemConfig) -> bool {
+    config
+        .system_settings
+        .as_ref()
+        .map(|settings| settings.ipv6_enabled)
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -150,8 +160,14 @@ pub async fn put_config(
     State(state): State<Arc<AppState>>,
     Json(cfg): Json<NatConfig>,
 ) -> Result<impl IntoResponse, NatError> {
+    let ipv6_enabled = state
+        .config_store
+        .load_system_settings()
+        .map_err(NatError::StorageError)?
+        .ipv6_enabled;
+
     // Validate before persisting.
-    if let Err(msg) = validate_nat_config(&cfg) {
+    if let Err(msg) = validate_nat_config_with_ipv6(&cfg, ipv6_enabled) {
         warn!(error = %msg, "nat: config validation failed");
         return Err(NatError::ValidationFailed(msg));
     }
@@ -179,6 +195,7 @@ pub async fn put_config(
         full_cfg.nat.as_ref(),
         &full_cfg.firewall_aliases,
         full_cfg.firewall_settings.as_ref(),
+        config_ipv6_enabled(&full_cfg),
     )
         .await
         .map_err(|e| NatError::EngineError(e.to_string()))?;
@@ -211,6 +228,12 @@ pub async fn create_rule(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateNatRuleRequest>,
 ) -> Result<impl IntoResponse, NatError> {
+    let ipv6_enabled = state
+        .config_store
+        .load_system_settings()
+        .map_err(NatError::StorageError)?
+        .ipv6_enabled;
+
     let rule = NatRule {
         id: Uuid::new_v4(),
         enabled: req.enabled,
@@ -224,14 +247,14 @@ pub async fn create_rule(
         destination_port: req.destination_port,
         translation: req.translation,
         nat_reflection: req.nat_reflection,
-        address_family: AddressFamily::Ipv4,
+        address_family: req.address_family,
         priority: req.priority,
         log: req.log,
         auto_firewall_rule: req.auto_firewall_rule,
     };
 
     // Validate the new rule.
-    if let Err(msg) = crate::config::models::validate_nat_rule(&rule) {
+    if let Err(msg) = validate_nat_rule_with_ipv6(&rule, ipv6_enabled) {
         warn!(id = %rule.id, error = %msg, "nat: rule validation failed");
         return Err(NatError::ValidationFailed(msg));
     }
@@ -263,6 +286,7 @@ pub async fn create_rule(
         full_cfg.nat.as_ref(),
         &full_cfg.firewall_aliases,
         full_cfg.firewall_settings.as_ref(),
+        config_ipv6_enabled(&full_cfg),
     )
         .await
         .map_err(|e| NatError::EngineError(e.to_string()))?;
@@ -311,6 +335,7 @@ pub async fn delete_rule(
         full_cfg.nat.as_ref(),
         &full_cfg.firewall_aliases,
         full_cfg.firewall_settings.as_ref(),
+        config_ipv6_enabled(&full_cfg),
     )
         .await
         .map_err(|e| NatError::EngineError(e.to_string()))?;
@@ -328,6 +353,12 @@ pub async fn update_rule(
     Path(id): Path<Uuid>,
     Json(req): Json<CreateNatRuleRequest>,
 ) -> Result<impl IntoResponse, NatError> {
+    let ipv6_enabled = state
+        .config_store
+        .load_system_settings()
+        .map_err(NatError::StorageError)?
+        .ipv6_enabled;
+
     let rule = NatRule {
         id,
         enabled: req.enabled,
@@ -341,13 +372,13 @@ pub async fn update_rule(
         destination_port: req.destination_port,
         translation: req.translation,
         nat_reflection: req.nat_reflection,
-        address_family: AddressFamily::Ipv4,
+        address_family: req.address_family,
         priority: req.priority,
         log: req.log,
         auto_firewall_rule: req.auto_firewall_rule,
     };
 
-    if let Err(msg) = crate::config::models::validate_nat_rule(&rule) {
+    if let Err(msg) = validate_nat_rule_with_ipv6(&rule, ipv6_enabled) {
         warn!(id = %id, error = %msg, "nat: rule validation failed");
         return Err(NatError::ValidationFailed(msg));
     }
@@ -383,6 +414,7 @@ pub async fn update_rule(
         full_cfg.nat.as_ref(),
         &full_cfg.firewall_aliases,
         full_cfg.firewall_settings.as_ref(),
+        config_ipv6_enabled(&full_cfg),
     )
         .await
         .map_err(|e| NatError::EngineError(e.to_string()))?;

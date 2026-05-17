@@ -19,9 +19,10 @@ use tracing::info;
 use crate::ntp::{
     apply::{apply_ntp_config, NtpError},
     config as ntp_config,
-    model::{validate_ntp_config, NtpConfig, NtpStatus},
+    model::{NtpConfig, NtpStatus},
     status::ntp_status,
 };
+use crate::config::models::validate_ntp_config_with_ipv6;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -88,7 +89,13 @@ pub async fn update_config(
     State(state): State<Arc<AppState>>,
     Json(req): Json<NtpConfig>,
 ) -> Result<impl IntoResponse, NtpApiError> {
-    if let Err(msg) = validate_ntp_config(&req) {
+    let ipv6_enabled = state
+        .config_store
+        .load_system_settings()
+        .map_err(NtpApiError::StorageError)?
+        .ipv6_enabled;
+
+    if let Err(msg) = validate_ntp_config_with_ipv6(&req, ipv6_enabled) {
         return Err(NtpApiError::ValidationFailed(msg));
     }
 

@@ -18,7 +18,7 @@ use tracing::{info, warn};
 
 use crate::{
     config::models::{
-        validate_cidr, validate_endpoint, validate_wg_interface_name, validate_wg_key,
+        ensure_ipv6_allowed, validate_cidr, validate_endpoint, validate_wg_interface_name, validate_wg_key,
         WireGuardInterface, WireGuardPeer,
     },
     engine::vpn::{apply_interface, generate_keypair, remove_interface},
@@ -133,6 +133,11 @@ pub async fn create_interface(
     Json(req): Json<CreateWireGuardInterfaceRequest>,
 ) -> Result<impl IntoResponse, WireGuardError> {
     // --- Validation --------------------------------------------------------
+    let ipv6_enabled = state
+        .config_store
+        .load_system_settings()
+        .map_err(WireGuardError::StorageError)?
+        .ipv6_enabled;
 
     if !validate_wg_interface_name(&req.name) {
         warn!(name = %req.name, "wireguard: invalid interface name");
@@ -167,6 +172,9 @@ pub async fn create_interface(
                 addr
             )));
         }
+        if let Err(msg) = ensure_ipv6_allowed(addr, ipv6_enabled, "WireGuard interface address") {
+            return Err(WireGuardError::ValidationFailed(msg));
+        }
     }
 
     let mut peers: Vec<WireGuardPeer> = Vec::new();
@@ -192,6 +200,9 @@ pub async fn create_interface(
                     p.name, cidr
                 )));
             }
+            if let Err(msg) = ensure_ipv6_allowed(cidr, ipv6_enabled, "WireGuard allowed_ip") {
+                return Err(WireGuardError::ValidationFailed(msg));
+            }
         }
         if let Some(ep) = &p.endpoint {
             if !validate_endpoint(ep) {
@@ -199,6 +210,9 @@ pub async fn create_interface(
                     "peer {:?}: invalid endpoint {:?} (expected host:port)",
                     p.name, ep
                 )));
+            }
+            if let Err(msg) = ensure_ipv6_allowed(ep, ipv6_enabled, "WireGuard endpoint") {
+                return Err(WireGuardError::ValidationFailed(msg));
             }
         }
         peers.push(WireGuardPeer {

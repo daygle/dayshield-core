@@ -829,6 +829,11 @@ impl AiRuntime {
             config.nat.as_ref(),
             &config.firewall_aliases,
             config.firewall_settings.as_ref(),
+            config
+                .system_settings
+                .as_ref()
+                .map(|settings| settings.ipv6_enabled)
+                .unwrap_or(false),
         )
         .await
         .context("failed to apply AI-enforced temporary block rules")?;

@@ -54,6 +54,15 @@ pub const DOT_KEY_PATH: &str = "/etc/dayshield/certs/dot.key";
 /// - `forward-zone:` block for each forwarder IP when `config.forwarders` is
 ///   non-empty (falls back to full recursion when the list is empty).
 pub fn generate_config(config: &DnsConfig, dot: Option<&DotConfig>) -> String {
+    generate_config_with_ipv6(config, dot, false)
+}
+
+/// Generate a complete Unbound configuration file for the current IPv6 mode.
+pub fn generate_config_with_ipv6(
+    config: &DnsConfig,
+    dot: Option<&DotConfig>,
+    ipv6_enabled: bool,
+) -> String {
     let mut out = String::new();
 
     out.push_str("# DayShield - Unbound configuration (auto-generated; do not edit by hand)\n\n");
@@ -67,6 +76,9 @@ pub fn generate_config(config: &DnsConfig, dot: Option<&DotConfig>) -> String {
     // Listen addresses for plain DNS.
     if config.listen_addresses.is_empty() {
         out.push_str("    interface: 0.0.0.0\n");
+        if ipv6_enabled {
+            out.push_str("    interface: ::0\n");
+        }
     } else {
         for addr in &config.listen_addresses {
             out.push_str(&format!("    interface: {addr}\n"));
@@ -75,7 +87,10 @@ pub fn generate_config(config: &DnsConfig, dot: Option<&DotConfig>) -> String {
 
     out.push_str(&format!("    port: {}\n", config.port));
     out.push_str("    do-ip4: yes\n");
-    out.push_str("    do-ip6: no\n");
+    out.push_str(&format!(
+        "    do-ip6: {}\n",
+        if ipv6_enabled { "yes" } else { "no" }
+    ));
     out.push_str("    do-udp: yes\n");
     out.push_str("    do-tcp: yes\n");
 
@@ -108,6 +123,9 @@ pub fn generate_config(config: &DnsConfig, dot: Option<&DotConfig>) -> String {
             // clients can connect.  Restrict access at the firewall layer if
             // finer-grained control is needed.
             out.push_str(&format!("    interface: 0.0.0.0@{}\n", dot.port));
+            if ipv6_enabled {
+                out.push_str(&format!("    interface: ::0@{}\n", dot.port));
+            }
         }
     }
 
@@ -154,10 +172,20 @@ pub fn generate_config(config: &DnsConfig, dot: Option<&DotConfig>) -> String {
 /// configuration file cannot be written, or if the reload / start command
 /// fails.
 pub async fn apply_config(config: &DnsConfig, dot: Option<&DotConfig>) -> Result<()> {
+    apply_config_with_ipv6(config, dot, false).await
+}
+
+/// Apply the provided DNS configuration using the current IPv6 mode.
+pub async fn apply_config_with_ipv6(
+    config: &DnsConfig,
+    dot: Option<&DotConfig>,
+    ipv6_enabled: bool,
+) -> Result<()> {
     info!(
         enabled = config.enabled,
         forwarders = config.forwarders.len(),
         dnssec = config.dnssec,
+        ipv6_enabled,
         "dns: applying config"
     );
 
@@ -177,7 +205,7 @@ pub async fn apply_config(config: &DnsConfig, dot: Option<&DotConfig>) -> Result
         }
     }
 
-    let conf_str = generate_config(config, dot);
+    let conf_str = generate_config_with_ipv6(config, dot, ipv6_enabled);
     write_config_atomic(UNBOUND_CONF_PATH, &conf_str)
         .with_context(|| {
             format!(

@@ -31,8 +31,8 @@ use uuid::Uuid;
 
 use crate::{
     config::models::{
-        is_valid_cidr, is_valid_interface_name, is_valid_port, Action, FirewallDirection, FirewallRule,
-        FirewallSchedule, FirewallSettings, Protocol,
+        ensure_ipv6_allowed, is_valid_cidr, is_valid_interface_name, is_valid_port, Action,
+        FirewallDirection, FirewallRule, FirewallSchedule, FirewallSettings, Protocol, SystemConfig,
     },
     engine::nftables::{apply_rules, get_rule_stats, NftError},
     state::AppState,
@@ -81,6 +81,12 @@ pub async fn update_settings(
     State(state): State<Arc<AppState>>,
     Json(mut settings): Json<FirewallSettings>,
 ) -> Result<impl IntoResponse, NftError> {
+    let ipv6_enabled = state
+        .config_store
+        .load_system_settings()
+        .map_err(NftError::StorageError)?
+        .ipv6_enabled;
+
     if settings.management_ports.is_empty() {
         return Err(NftError::ValidationFailed(
             "management_ports must contain at least one port".into(),
@@ -100,6 +106,9 @@ pub async fn update_settings(
                 "invalid management source CIDR: {}",
                 src
             )));
+        }
+        if let Err(msg) = ensure_ipv6_allowed(src, ipv6_enabled, "management source CIDR") {
+            return Err(NftError::ValidationFailed(msg));
         }
     }
     if let Some(iface) = settings.management_interface.as_ref() {
@@ -140,6 +149,7 @@ pub async fn update_settings(
             full_cfg.nat.as_ref(),
             &full_cfg.firewall_aliases,
             full_cfg.firewall_settings.as_ref(),
+            config_ipv6_enabled(&full_cfg),
         )
         .await?;
     }
@@ -171,6 +181,14 @@ fn default_true() -> bool { true }
 
 fn default_direction() -> FirewallDirection { FirewallDirection::Forward }
 
+fn config_ipv6_enabled(config: &SystemConfig) -> bool {
+    config
+        .system_settings
+        .as_ref()
+        .map(|settings| settings.ipv6_enabled)
+        .unwrap_or(false)
+}
+
 /// Handler: create a new firewall rule.
 ///
 /// Validates all fields, appends the rule to persistent storage, and
@@ -181,6 +199,11 @@ pub async fn create_rule(
     Json(req): Json<CreateRuleRequest>,
 ) -> Result<impl IntoResponse, NftError> {
     // --- Validation --------------------------------------------------------
+    let ipv6_enabled = state
+        .config_store
+        .load_system_settings()
+        .map_err(NftError::StorageError)?
+        .ipv6_enabled;
 
     if let Some(src) = &req.source {
         if !is_valid_cidr(src) {
@@ -188,6 +211,9 @@ pub async fn create_rule(
             return Err(NftError::ValidationFailed(format!(
                 "invalid source CIDR: {src}"
             )));
+        }
+        if let Err(msg) = ensure_ipv6_allowed(src, ipv6_enabled, "firewall source CIDR") {
+            return Err(NftError::ValidationFailed(msg));
         }
     }
 
@@ -198,6 +224,15 @@ pub async fn create_rule(
                 "invalid destination CIDR: {dst}"
             )));
         }
+        if let Err(msg) = ensure_ipv6_allowed(dst, ipv6_enabled, "firewall destination CIDR") {
+            return Err(NftError::ValidationFailed(msg));
+        }
+    }
+
+    if matches!(req.protocol.as_ref(), Some(Protocol::Icmpv6)) && !ipv6_enabled {
+        return Err(NftError::ValidationFailed(
+            "ICMPv6 firewall rules require system ipv6Enabled".into(),
+        ));
     }
 
     if let Some(sport) = req.source_port {
@@ -286,6 +321,7 @@ pub async fn create_rule(
             full_cfg.nat.as_ref(),
             &full_cfg.firewall_aliases,
             full_cfg.firewall_settings.as_ref(),
+            config_ipv6_enabled(&full_cfg),
         )
         .await?;
     }
@@ -306,11 +342,19 @@ pub async fn update_rule(
     Json(req): Json<CreateRuleRequest>,
 ) -> Result<impl IntoResponse, NftError> {
     // --- Validation --------------------------------------------------------
+    let ipv6_enabled = state
+        .config_store
+        .load_system_settings()
+        .map_err(NftError::StorageError)?
+        .ipv6_enabled;
 
     if let Some(src) = &req.source {
         if !is_valid_cidr(src) {
             warn!(src = %src, "firewall: invalid source CIDR");
             return Err(NftError::ValidationFailed(format!("invalid source CIDR: {src}")));
+        }
+        if let Err(msg) = ensure_ipv6_allowed(src, ipv6_enabled, "firewall source CIDR") {
+            return Err(NftError::ValidationFailed(msg));
         }
     }
     if let Some(dst) = &req.destination {
@@ -318,6 +362,14 @@ pub async fn update_rule(
             warn!(dst = %dst, "firewall: invalid destination CIDR");
             return Err(NftError::ValidationFailed(format!("invalid destination CIDR: {dst}")));
         }
+        if let Err(msg) = ensure_ipv6_allowed(dst, ipv6_enabled, "firewall destination CIDR") {
+            return Err(NftError::ValidationFailed(msg));
+        }
+    }
+    if matches!(req.protocol.as_ref(), Some(Protocol::Icmpv6)) && !ipv6_enabled {
+        return Err(NftError::ValidationFailed(
+            "ICMPv6 firewall rules require system ipv6Enabled".into(),
+        ));
     }
     if let Some(sport) = req.source_port {
         if !is_valid_port(sport) {
@@ -399,6 +451,7 @@ pub async fn update_rule(
             full_cfg.nat.as_ref(),
             &full_cfg.firewall_aliases,
             full_cfg.firewall_settings.as_ref(),
+            config_ipv6_enabled(&full_cfg),
         )
         .await?;
     }
@@ -462,6 +515,11 @@ pub async fn create_interface_rule(
     req.interface = Some(interface_name.clone());
 
     // --- Validation --------------------------------------------------------
+    let ipv6_enabled = state
+        .config_store
+        .load_system_settings()
+        .map_err(NftError::StorageError)?
+        .ipv6_enabled;
 
     if let Some(src) = &req.source {
         if !is_valid_cidr(src) {
@@ -469,6 +527,9 @@ pub async fn create_interface_rule(
             return Err(NftError::ValidationFailed(format!(
                 "invalid source CIDR: {src}"
             )));
+        }
+        if let Err(msg) = ensure_ipv6_allowed(src, ipv6_enabled, "firewall source CIDR") {
+            return Err(NftError::ValidationFailed(msg));
         }
     }
 
@@ -479,6 +540,15 @@ pub async fn create_interface_rule(
                 "invalid destination CIDR: {dst}"
             )));
         }
+        if let Err(msg) = ensure_ipv6_allowed(dst, ipv6_enabled, "firewall destination CIDR") {
+            return Err(NftError::ValidationFailed(msg));
+        }
+    }
+
+    if matches!(req.protocol.as_ref(), Some(Protocol::Icmpv6)) && !ipv6_enabled {
+        return Err(NftError::ValidationFailed(
+            "ICMPv6 firewall rules require system ipv6Enabled".into(),
+        ));
     }
 
     if let Some(sport) = req.source_port {
@@ -564,6 +634,7 @@ pub async fn create_interface_rule(
             full_cfg.nat.as_ref(),
             &full_cfg.firewall_aliases,
             full_cfg.firewall_settings.as_ref(),
+            config_ipv6_enabled(&full_cfg),
         )
         .await?;
     }
@@ -622,6 +693,7 @@ pub async fn delete_interface_rule(
             full_cfg.nat.as_ref(),
             &full_cfg.firewall_aliases,
             full_cfg.firewall_settings.as_ref(),
+            config_ipv6_enabled(&full_cfg),
         )
         .await?;
     }
@@ -671,6 +743,7 @@ pub async fn delete_rule(
             full_cfg.nat.as_ref(),
             &full_cfg.firewall_aliases,
             full_cfg.firewall_settings.as_ref(),
+            config_ipv6_enabled(&full_cfg),
         )
         .await?;
     }

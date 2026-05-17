@@ -307,6 +307,15 @@ pub async fn list_kernel_interfaces() -> Result<Vec<KernelInterface>, InterfaceE
 /// on bad input, and [`InterfaceError::ApplyFailed`] if an `ip(8)` command
 /// fails at runtime.
 pub async fn apply_interface(config: &Interface) -> Result<(), InterfaceError> {
+    apply_interface_with_ipv6(config, false).await
+}
+
+/// Apply a single [`Interface`] configuration with awareness of the global
+/// IPv6 setting.
+pub async fn apply_interface_with_ipv6(
+    config: &Interface,
+    ipv6_enabled: bool,
+) -> Result<(), InterfaceError> {
     let name = &config.name;
 
     if !is_valid_interface_name(name) {
@@ -335,6 +344,8 @@ pub async fn apply_interface(config: &Interface) -> Result<(), InterfaceError> {
         name = %name,
         enabled = config.enabled,
         dhcp4 = config.dhcp4,
+        dhcp6 = config.dhcp6,
+        ipv6_enabled,
         addresses = ?config.addresses,
         "interfaces: applying interface configuration"
     );
@@ -372,9 +383,10 @@ pub async fn apply_interface(config: &Interface) -> Result<(), InterfaceError> {
             Some(WanMode::Pppoe) => {
                 // Ensure DHCP client is not competing with PPPoE on the same WAN.
                 stop_dhcp_client(name).await;
+                stop_dhcp6_client(name).await;
                 let username = config.pppoe_username.as_deref().unwrap_or("");
                 let password = config.pppoe_password.as_deref().unwrap_or("");
-                start_pppoe(name, username, password).await?;
+                start_pppoe(name, username, password, ipv6_enabled).await?;
             }
             _ => {
                 if config.dhcp4 {
@@ -382,16 +394,39 @@ pub async fn apply_interface(config: &Interface) -> Result<(), InterfaceError> {
                 } else {
                     // Ensure no stale dhclient is running before applying static config.
                     stop_dhcp_client(name).await;
-                    for cidr in &config.addresses {
-                        if !is_valid_cidr(cidr) {
-                            return Err(InterfaceError::InvalidCIDR(cidr.clone()));
-                        }
-                        debug!(name = %name, cidr = %cidr, "interfaces: adding address");
-                        run_ip(&["addr", "add", cidr, "dev", name]).await?;
+                }
+
+                if ipv6_enabled && config.dhcp6 {
+                    start_dhcp6_client(name).await?;
+                } else {
+                    stop_dhcp6_client(name).await;
+                }
+
+                for cidr in &config.addresses {
+                    if !ipv6_enabled && cidr.contains(':') {
+                        return Err(InterfaceError::InvalidCIDR(cidr.clone()));
                     }
-                    // Apply static default gateway if configured.
-                    if let Some(gw_ip) = &config.gateway {
-                        info!(name = %name, gateway = %gw_ip, "interfaces: applying static default route");
+                    if config.dhcp4 && !cidr.contains(':') {
+                        continue;
+                    }
+                    if !is_valid_cidr(cidr) {
+                        return Err(InterfaceError::InvalidCIDR(cidr.clone()));
+                    }
+                    debug!(name = %name, cidr = %cidr, "interfaces: adding address");
+                    run_ip(&["addr", "add", cidr, "dev", name]).await?;
+                }
+
+                // Apply static default gateway if configured.
+                if let Some(gw_ip) = &config.gateway {
+                    if !ipv6_enabled && gw_ip.contains(':') {
+                        return Err(InterfaceError::ApplyFailed(
+                            "IPv6 gateway requires system ipv6Enabled".to_string(),
+                        ));
+                    }
+                    info!(name = %name, gateway = %gw_ip, "interfaces: applying static default route");
+                    if gw_ip.contains(':') {
+                        run_ip(&["-6", "route", "replace", "default", "via", gw_ip, "dev", name]).await?;
+                    } else {
                         run_ip(&["route", "replace", "default", "via", gw_ip, "dev", name]).await?;
                     }
                 }
@@ -401,6 +436,7 @@ pub async fn apply_interface(config: &Interface) -> Result<(), InterfaceError> {
         // Release any active DHCP or PPPoE session before taking the interface down.
         stop_pppoe(name).await;
         stop_dhcp_client(name).await;
+        stop_dhcp6_client(name).await;
         info!(name = %name, "interfaces: bringing interface down");
         run_ip(&["link", "set", "dev", name, "down"]).await?;
     }
@@ -422,6 +458,14 @@ pub async fn apply_interface(config: &Interface) -> Result<(), InterfaceError> {
 /// Returns on the first error encountered; partial application may have
 /// occurred.
 pub async fn sync_interfaces(configured: &[Interface]) -> Result<(), InterfaceError> {
+    sync_interfaces_with_ipv6(configured, false).await
+}
+
+/// Reconcile interface configuration using the current IPv6 mode.
+pub async fn sync_interfaces_with_ipv6(
+    configured: &[Interface],
+    ipv6_enabled: bool,
+) -> Result<(), InterfaceError> {
     info!(count = configured.len(), "interfaces: starting sync");
 
     let kernel = list_kernel_interfaces().await?;
@@ -438,19 +482,25 @@ pub async fn sync_interfaces(configured: &[Interface]) -> Result<(), InterfaceEr
         let kernel_addrs: &[String] = kernel_iface
             .map(|k| k.addresses.as_slice())
             .unwrap_or(&[]);
+        let desired_addrs = config
+            .addresses
+            .iter()
+            .filter(|addr| ipv6_enabled || !addr.contains(':'))
+            .cloned()
+            .collect::<Vec<String>>();
         let addrs_match = !config.dhcp4
-            && config.addresses.len() == kernel_addrs.len()
-            && config.addresses.iter().all(|a| kernel_addrs.contains(a));
+            && desired_addrs.len() == kernel_addrs.len()
+            && desired_addrs.iter().all(|a| kernel_addrs.contains(a));
 
         if !already_up || !addrs_match {
-            apply_interface(config).await?;
+            apply_interface_with_ipv6(config, ipv6_enabled).await?;
         }
 
         // Remove stale static addresses from the kernel.
         if config.enabled && !config.dhcp4 {
             if let Some(ki) = kernel_iface {
                 for kernel_addr in &ki.addresses {
-                    if !config.addresses.contains(kernel_addr) {
+                    if !desired_addrs.contains(kernel_addr) {
                         warn!(
                             name = %config.name,
                             address = %kernel_addr,
@@ -499,6 +549,23 @@ async fn start_dhcp_client(name: &str) -> Result<(), InterfaceError> {
     Ok(())
 }
 
+/// Start `dhclient` for `name` to acquire IPv6 configuration via DHCPv6.
+async fn start_dhcp6_client(name: &str) -> Result<(), InterfaceError> {
+    let pid_file = format!("/run/dhclient6.{name}.pid");
+
+    stop_dhcp6_client(name).await;
+
+    info!(name = %name, pid_file = %pid_file, "interfaces: starting dhclient -6");
+
+    Command::new("dhclient")
+        .args(["-6", "-pf", &pid_file, name])
+        .spawn()
+        .map_err(|e| {
+            InterfaceError::ApplyFailed(format!("failed to spawn dhclient -6 for {name}: {e}"))
+        })?;
+    Ok(())
+}
+
 /// Stop `dhclient` for `name`, releasing the DHCP lease.
 ///
 /// Runs `dhclient -r` for a graceful release, then removes the PID file.
@@ -537,6 +604,38 @@ async fn stop_dhcp_client(name: &str) {
     }
 }
 
+/// Stop `dhclient -6` for `name`, releasing the DHCPv6 lease.
+async fn stop_dhcp6_client(name: &str) {
+    let pid_file = format!("/run/dhclient6.{name}.pid");
+
+    let result = Command::new("dhclient")
+        .args(["-6", "-r", "-pf", &pid_file, name])
+        .output()
+        .await;
+
+    match result {
+        Ok(out) if out.status.success() => {
+            info!(name = %name, "interfaces: dhclient -6 released DHCPv6 lease");
+        }
+        Ok(out) => {
+            debug!(
+                name = %name,
+                stderr = %String::from_utf8_lossy(&out.stderr),
+                "interfaces: dhclient -6 -r exited non-zero (may not have been running)"
+            );
+        }
+        Err(e) => {
+            debug!(name = %name, error = %e, "interfaces: dhclient -6 not found or not spawnable");
+        }
+    }
+
+    if let Err(e) = std::fs::remove_file(&pid_file) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            debug!(name = %name, error = %e, "interfaces: could not remove dhclient6 PID file");
+        }
+    }
+}
+
 /// Write PPPoE peer config and start `pppd` for `wan_iface`.
 ///
 /// Creates:
@@ -545,7 +644,12 @@ async fn stop_dhcp_client(name: &str) {
 ///
 /// Spawns `pppd call wan-<wan_iface>` as a background process.  `ppp0` will
 /// appear once the ISP authenticates.
-async fn start_pppoe(wan_iface: &str, username: &str, password: &str) -> Result<(), InterfaceError> {
+async fn start_pppoe(
+    wan_iface: &str,
+    username: &str,
+    password: &str,
+    ipv6_enabled: bool,
+) -> Result<(), InterfaceError> {
     use tokio::fs;
 
     if username.trim().is_empty() || password.is_empty() {
@@ -574,9 +678,10 @@ async fn start_pppoe(wan_iface: &str, username: &str, password: &str) -> Result<
         .map_err(|e| InterfaceError::ApplyFailed(format!("pppoe: create /etc/ppp/peers: {e}")))?;
 
     // Write peer config
+    let ipv6_line = if ipv6_enabled { "" } else { "noipv6\n" };
     let peer_cfg = format!(
         "plugin rp-pppoe.so {wan_iface}\nuser \"{escaped_username}\"\nnoauth\ndefaultroute\n\
-replacedefaultroute\nhide-password\npersist\nmaxfail 0\nholdoff 5\nnoipv6\n"
+replacedefaultroute\nhide-password\npersist\nmaxfail 0\nholdoff 5\n{ipv6_line}"
     );
     fs::write(&peer_path, &peer_cfg)
         .await

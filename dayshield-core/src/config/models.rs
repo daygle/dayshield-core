@@ -161,6 +161,16 @@ pub fn is_valid_ip(addr: &str) -> bool {
     addr.parse::<std::net::IpAddr>().is_ok()
 }
 
+/// Return `true` if `addr` is a valid IPv4 address (without prefix length).
+pub fn is_valid_ipv4_addr(addr: &str) -> bool {
+    addr.parse::<std::net::Ipv4Addr>().is_ok()
+}
+
+/// Return `true` if `addr` is a valid IPv6 address (without prefix length).
+pub fn is_valid_ipv6_addr(addr: &str) -> bool {
+    addr.parse::<std::net::Ipv6Addr>().is_ok()
+}
+
 /// Return `true` if `start` and `end` are valid IPv4 addresses and
 /// `start` ≤ `end` in numeric order.
 pub fn is_valid_ipv4_range(start: &str, end: &str) -> bool {
@@ -237,6 +247,50 @@ pub fn is_valid_cidr(cidr: &str) -> bool {
         return prefix_len <= 128;
     }
     false
+}
+
+/// Return `true` if `value` is a valid IPv6 CIDR string.
+pub fn is_valid_ipv6_cidr(value: &str) -> bool {
+    if let Some((ip_str, prefix_str)) = value.split_once('/') {
+        if let (Ok(_), Ok(prefix)) = (
+            ip_str.parse::<std::net::Ipv6Addr>(),
+            prefix_str.parse::<u8>(),
+        ) {
+            return prefix <= 128;
+        }
+    }
+    false
+}
+
+/// Return `true` if `value` is a valid IPv6 address or IPv6 CIDR.
+pub fn is_valid_ipv6_cidr_or_addr(value: &str) -> bool {
+    is_valid_ipv6_addr(value) || is_valid_ipv6_cidr(value)
+}
+
+/// Return `true` when a setting is explicitly an IPv6 address, IPv6 CIDR, or
+/// bracketed IPv6 endpoint like `[2001:db8::1]:51820`.
+pub fn value_uses_ipv6(value: &str) -> bool {
+    let value = value.trim();
+    if is_valid_ipv6_addr(value) || is_valid_ipv6_cidr(value) {
+        return true;
+    }
+    if let Some(rest) = value.strip_prefix('[') {
+        if let Some((addr, _tail)) = rest.split_once(']') {
+            return is_valid_ipv6_addr(addr);
+        }
+    }
+    false
+}
+
+/// Reject explicit IPv6 values unless the global IPv6 setting is enabled.
+pub fn ensure_ipv6_allowed(value: &str, ipv6_enabled: bool, context: &str) -> Result<(), String> {
+    if !ipv6_enabled && value_uses_ipv6(value) {
+        return Err(format!(
+            "{context} uses IPv6 value {:?}, but system ipv6Enabled is false",
+            value
+        ));
+    }
+    Ok(())
 }
 
 /// Return `true` if `mtu` is within the acceptable range (68–65 535 bytes).
@@ -497,18 +551,19 @@ pub enum NatProtocol {
     Any,
 }
 
-/// Address family.  IPv4 only; IPv6 is explicitly unsupported.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+/// Address family for rules that need family-specific nftables syntax.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AddressFamily {
     #[default]
     Ipv4,
+    Ipv6,
 }
 
 /// Translated address and/or port for SNAT / DNAT rules.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NatTranslation {
-    /// IPv4 address to translate to.
+    /// IP address to translate to.
     pub address: Option<String>,
     /// Single port to translate to (or lower bound of a port range).
     pub port: Option<u16>,
@@ -543,9 +598,9 @@ pub struct NatRule {
     pub rule_type: NatRuleType,
     /// WAN or LAN interface to match (outbound for masquerade/SNAT; inbound for DNAT).
     pub interface: Option<String>,
-    /// Source IPv4 address or CIDR filter (`None` = any).
+    /// Source address or CIDR filter (`None` = any).
     pub source: Option<String>,
-    /// Destination IPv4 address or CIDR filter (`None` = any).
+    /// Destination address or CIDR filter (`None` = any).
     pub destination: Option<String>,
     /// Protocol filter.
     #[serde(default)]
@@ -559,7 +614,7 @@ pub struct NatRule {
     /// Enable NAT reflection (hairpin NAT) for this rule.
     #[serde(default)]
     pub nat_reflection: bool,
-    /// Address family - IPv4 only; IPv6 values are rejected by the validator.
+    /// Address family for source, destination, and translation addresses.
     #[serde(default)]
     pub address_family: AddressFamily,
     /// Rule priority - lower values are evaluated first.
@@ -607,11 +662,6 @@ impl Default for NatConfig {
 // Validation helpers - NAT
 // ---------------------------------------------------------------------------
 
-/// Return `true` if `addr` is a valid IPv4 address (without prefix length).
-pub fn is_valid_ipv4_addr(addr: &str) -> bool {
-    addr.parse::<std::net::Ipv4Addr>().is_ok()
-}
-
 /// Return `true` if `value` is a valid IPv4 address or an IPv4 CIDR prefix.
 ///
 /// Rejects IPv6 addresses and IPv6 CIDRs.
@@ -630,24 +680,46 @@ pub fn is_valid_ipv4_cidr_or_addr(value: &str) -> bool {
     false
 }
 
+fn is_valid_nat_addr_for_family(value: &str, family: &AddressFamily) -> bool {
+    match family {
+        AddressFamily::Ipv4 => is_valid_ipv4_addr(value),
+        AddressFamily::Ipv6 => is_valid_ipv6_addr(value),
+    }
+}
+
+fn is_valid_nat_cidr_or_addr_for_family(value: &str, family: &AddressFamily) -> bool {
+    match family {
+        AddressFamily::Ipv4 => is_valid_ipv4_cidr_or_addr(value),
+        AddressFamily::Ipv6 => is_valid_ipv6_cidr_or_addr(value),
+    }
+}
+
 /// Validate a single [`NatRule`].
 ///
 /// Returns `Ok(())` on success or `Err` with a descriptive message.
 pub fn validate_nat_rule(rule: &NatRule) -> Result<(), String> {
-    // IPv4 boundary: reject IPv6 in source / destination.
+    validate_nat_rule_with_ipv6(rule, false)
+}
+
+/// Validate a single [`NatRule`] with awareness of the global IPv6 setting.
+pub fn validate_nat_rule_with_ipv6(rule: &NatRule, ipv6_enabled: bool) -> Result<(), String> {
+    if matches!(&rule.address_family, AddressFamily::Ipv6) && !ipv6_enabled {
+        return Err("IPv6 NAT requires system ipv6Enabled to be true".into());
+    }
+
     if let Some(src) = &rule.source {
-        if !is_valid_ipv4_cidr_or_addr(src) {
+        if !is_valid_nat_cidr_or_addr_for_family(src, &rule.address_family) {
             return Err(format!(
-                "source {:?} is not a valid IPv4 address/CIDR (IPv6 not supported)",
-                src
+                "source {:?} is not a valid {:?} address/CIDR",
+                src, rule.address_family
             ));
         }
     }
     if let Some(dst) = &rule.destination {
-        if !is_valid_ipv4_cidr_or_addr(dst) {
+        if !is_valid_nat_cidr_or_addr_for_family(dst, &rule.address_family) {
             return Err(format!(
-                "destination {:?} is not a valid IPv4 address/CIDR (IPv6 not supported)",
-                dst
+                "destination {:?} is not a valid {:?} address/CIDR",
+                dst, rule.address_family
             ));
         }
     }
@@ -672,10 +744,10 @@ pub fn validate_nat_rule(rule: &NatRule) -> Result<(), String> {
             let addr = translation.address.as_deref().ok_or_else(|| {
                 format!("{:?} rule translation must specify an address", rule.rule_type)
             })?;
-            if !is_valid_ipv4_addr(addr) {
+            if !is_valid_nat_addr_for_family(addr, &rule.address_family) {
                 return Err(format!(
-                    "translation address {:?} is not a valid IPv4 address",
-                    addr
+                    "translation address {:?} is not a valid {:?} address",
+                    addr, rule.address_family
                 ));
             }
             if let Some(port) = translation.port {
@@ -707,6 +779,15 @@ pub fn validate_nat_rule(rule: &NatRule) -> Result<(), String> {
 /// Return `Ok(())` if `config` is a valid [`NatConfig`], or `Err` with a
 /// descriptive message.
 pub fn validate_nat_config(config: &NatConfig) -> Result<(), String> {
+    validate_nat_config_with_ipv6(config, false)
+}
+
+/// Return `Ok(())` if `config` is a valid [`NatConfig`] for the current IPv6
+/// mode, or `Err` with a descriptive message.
+pub fn validate_nat_config_with_ipv6(
+    config: &NatConfig,
+    ipv6_enabled: bool,
+) -> Result<(), String> {
     for iface in &config.wan_interfaces {
         if !is_valid_interface_name(iface) {
             return Err(format!(
@@ -716,7 +797,7 @@ pub fn validate_nat_config(config: &NatConfig) -> Result<(), String> {
         }
     }
     for rule in &config.rules {
-        if let Err(msg) = validate_nat_rule(rule) {
+        if let Err(msg) = validate_nat_rule_with_ipv6(rule, ipv6_enabled) {
             return Err(format!("NAT rule {}: {}", rule.id, msg));
         }
     }
@@ -1686,6 +1767,9 @@ pub struct SystemSettings {
     /// TCP port for the DayShield web UI / REST API.
     #[serde(default = "default_web_port")]
     pub web_port: u16,
+    /// Globally enable IPv6 support across managed services.
+    #[serde(default)]
+    pub ipv6_enabled: bool,
     /// ACME domain whose certificate should be used for the management UI.
     pub management_tls_acme_domain: Option<String>,
 }
@@ -1707,6 +1791,7 @@ impl Default for SystemSettings {
             ssh_enabled: default_ssh_enabled(),
             ssh_port:    default_ssh_port(),
             web_port:    default_web_port(),
+            ipv6_enabled: false,
             management_tls_acme_domain: None,
         }
     }
@@ -1728,10 +1813,10 @@ impl Default for SystemSettings {
 pub struct NtpConfig {
     /// Whether the NTP subsystem is enabled.
     pub enabled: bool,
-    /// IPv4 addresses or hostnames of upstream NTP servers.
+    /// IP addresses or hostnames of upstream NTP servers.
     ///
     /// At least one entry is required when `enabled` is `true`.
-    /// IPv6 addresses are rejected by the validator.
+    /// IPv6 addresses require the global `ipv6Enabled` setting.
     pub upstream_servers: Vec<String>,
     /// Whether to also serve NTP time to LAN clients.
     pub serve_clients: bool,
@@ -1759,13 +1844,19 @@ impl Default for NtpConfig {
 ///
 /// Rejects bare IPv6 addresses (square-bracket notation and plain `::` form).
 pub fn validate_ntp_server(server: &str) -> bool {
+    validate_ntp_server_with_ipv6(server, false)
+}
+
+/// Return `true` if `server` is a valid IP address or hostname for the current
+/// IPv6 mode.
+pub fn validate_ntp_server_with_ipv6(server: &str, ipv6_enabled: bool) -> bool {
     // Reject explicit IPv6 (bracket form used in URIs).
     if server.starts_with('[') {
         return false;
     }
     // Reject bare IPv6 addresses.
     if server.parse::<std::net::Ipv6Addr>().is_ok() {
-        return false;
+        return ipv6_enabled;
     }
     // Accept valid IPv4 addresses.
     if server.parse::<std::net::Ipv4Addr>().is_ok() {
@@ -1778,6 +1869,14 @@ pub fn validate_ntp_server(server: &str) -> bool {
 /// Return `Ok(())` if `config` is a valid [`NtpConfig`], or `Err` with a
 /// descriptive message describing the first validation failure found.
 pub fn validate_ntp_config(config: &NtpConfig) -> Result<(), String> {
+    validate_ntp_config_with_ipv6(config, false)
+}
+
+/// Return `Ok(())` if `config` is valid for the current IPv6 mode.
+pub fn validate_ntp_config_with_ipv6(
+    config: &NtpConfig,
+    ipv6_enabled: bool,
+) -> Result<(), String> {
     if !config.enabled {
         return Ok(());
     }
@@ -1785,10 +1884,10 @@ pub fn validate_ntp_config(config: &NtpConfig) -> Result<(), String> {
         return Err("ntp upstream_servers must contain at least one entry when enabled".into());
     }
     for server in &config.upstream_servers {
-        if !validate_ntp_server(server) {
+        if !validate_ntp_server_with_ipv6(server, ipv6_enabled) {
             return Err(format!(
                 "ntp upstream_servers contains invalid entry {:?} \
-                 (must be an IPv4 address or hostname, not IPv6)",
+                 (must be a valid IP address or hostname; IPv6 requires system ipv6Enabled)",
                 server
             ));
         }
@@ -1834,8 +1933,11 @@ pub struct DynamicDnsEntry {
     pub enabled: bool,
     /// Dynamic DNS provider type.
     pub provider: DynamicDnsProvider,
-    /// Interface name used to source the IPv4 address to publish.
+    /// Interface name used to source the address to publish.
     pub interface: String,
+    /// Address family to publish.
+    #[serde(default)]
+    pub address_family: AddressFamily,
     /// Hostname / record identifier used by the provider.
     pub hostname: String,
     /// Optional provider account username.
@@ -1877,6 +1979,13 @@ impl Default for DynamicDnsConfig {
 }
 
 pub fn validate_dynamic_dns_config(config: &DynamicDnsConfig) -> Result<(), String> {
+    validate_dynamic_dns_config_with_ipv6(config, false)
+}
+
+pub fn validate_dynamic_dns_config_with_ipv6(
+    config: &DynamicDnsConfig,
+    ipv6_enabled: bool,
+) -> Result<(), String> {
     if !config.enabled {
         return Ok(());
     }
@@ -1896,6 +2005,13 @@ pub fn validate_dynamic_dns_config(config: &DynamicDnsConfig) -> Result<(), Stri
 
         if !entry.enabled {
             continue;
+        }
+
+        if matches!(&entry.address_family, AddressFamily::Ipv6) && !ipv6_enabled {
+            return Err(format!(
+                "dynamic DNS entry {} uses IPv6 but system ipv6Enabled is false",
+                entry.id
+            ));
         }
 
         if !is_valid_interface_name(&entry.interface) {

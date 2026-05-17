@@ -167,6 +167,11 @@ pub async fn create_alias(
         full_cfg.nat.as_ref(),
         &full_cfg.firewall_aliases,
         full_cfg.firewall_settings.as_ref(),
+        full_cfg
+            .system_settings
+            .as_ref()
+            .map(|settings| settings.ipv6_enabled)
+            .unwrap_or(false),
     )
         .await
         .map_err(|e| AliasError::EngineError(e.to_string()))?;
@@ -215,6 +220,11 @@ pub async fn delete_alias(
         full_cfg.nat.as_ref(),
         &full_cfg.firewall_aliases,
         full_cfg.firewall_settings.as_ref(),
+        full_cfg
+            .system_settings
+            .as_ref()
+            .map(|settings| settings.ipv6_enabled)
+            .unwrap_or(false),
     )
         .await
         .map_err(|e| AliasError::EngineError(e.to_string()))?;

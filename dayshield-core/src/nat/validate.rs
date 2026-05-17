@@ -74,6 +74,7 @@ mod tests {
             address_family: AddressFamily::Ipv4,
             priority: 0,
             log: false,
+            auto_firewall_rule: true,
         }
     }
 
@@ -98,6 +99,7 @@ mod tests {
             address_family: AddressFamily::Ipv4,
             priority: 0,
             log: false,
+            auto_firewall_rule: true,
         }
     }
 

@@ -23,6 +23,11 @@ use tracing::{info, warn};
 
 use crate::{
     config::models::SystemSettings,
+    engine::{
+        dns::apply_config_with_ipv6 as apply_dns_config,
+        ipv6::apply_ipv6_setting,
+        nftables::apply_rules,
+    },
     state::AppState,
     update::{self, UpdateComponent, UpdateSettings},
 };
@@ -104,15 +109,48 @@ pub async fn update_config(
     State(state): State<Arc<AppState>>,
     Json(settings): Json<SystemSettings>,
 ) -> Result<impl IntoResponse, SystemApiError> {
+    let previous = state
+        .config_store
+        .load_system_settings()
+        .unwrap_or_default();
+
     state
         .config_store
         .save_system_settings(settings.clone())
         .map_err(SystemApiError::StorageError)?;
 
+    if previous.ipv6_enabled != settings.ipv6_enabled {
+        apply_ipv6_setting(settings.ipv6_enabled)
+            .await
+            .map_err(|e| SystemApiError::CommandError(format!("failed to apply IPv6 setting: {e:#}")))?;
+
+        let full_cfg = state
+            .config_store
+            .load()
+            .map_err(SystemApiError::StorageError)?;
+
+        apply_rules(
+            &full_cfg.firewall_rules,
+            full_cfg.nat.as_ref(),
+            &full_cfg.firewall_aliases,
+            full_cfg.firewall_settings.as_ref(),
+            settings.ipv6_enabled,
+        )
+        .await
+        .map_err(|e| SystemApiError::CommandError(format!("failed to reapply firewall rules: {e}")))?;
+
+        if let Some(dns) = full_cfg.dns.as_ref() {
+            apply_dns_config(dns, full_cfg.dot.as_ref(), settings.ipv6_enabled)
+                .await
+                .map_err(|e| SystemApiError::CommandError(format!("failed to reapply DNS config: {e:#}")))?;
+        }
+    }
+
     info!(
         hostname = %settings.hostname,
         timezone = %settings.timezone,
         ssh_enabled = settings.ssh_enabled,
+        ipv6_enabled = settings.ipv6_enabled,
         "system: settings updated via API"
     );
 

@@ -56,6 +56,73 @@ pub enum Ipv6Mode {
     TrackInterface,
 }
 
+/// Router Advertisement flag mode for downstream interfaces that advertise
+/// a tracked IPv6 prefix.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RouterAdvertisementMode {
+    /// Advertise the router/prefix without SLAAC or DHCPv6 flags.
+    RouterOnly,
+    /// SLAAC only: A flag.
+    #[default]
+    Unmanaged,
+    /// Stateful DHCPv6: M + O flags.
+    Managed,
+    /// Stateful DHCPv6 plus SLAAC: M + O + A flags.
+    Assisted,
+    /// Stateless DHCPv6 plus SLAAC: O + A flags.
+    Stateless,
+}
+
+/// Concrete radvd flags derived from a [`RouterAdvertisementMode`].
+pub struct RouterAdvertisementFlags {
+    pub managed: bool,
+    pub other: bool,
+    pub autonomous: bool,
+}
+
+impl RouterAdvertisementMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RouterAdvertisementMode::RouterOnly => "router_only",
+            RouterAdvertisementMode::Unmanaged => "unmanaged",
+            RouterAdvertisementMode::Managed => "managed",
+            RouterAdvertisementMode::Assisted => "assisted",
+            RouterAdvertisementMode::Stateless => "stateless",
+        }
+    }
+
+    pub fn flags(&self) -> RouterAdvertisementFlags {
+        match self {
+            RouterAdvertisementMode::RouterOnly => RouterAdvertisementFlags {
+                managed: false,
+                other: false,
+                autonomous: false,
+            },
+            RouterAdvertisementMode::Unmanaged => RouterAdvertisementFlags {
+                managed: false,
+                other: false,
+                autonomous: true,
+            },
+            RouterAdvertisementMode::Managed => RouterAdvertisementFlags {
+                managed: true,
+                other: true,
+                autonomous: false,
+            },
+            RouterAdvertisementMode::Assisted => RouterAdvertisementFlags {
+                managed: true,
+                other: true,
+                autonomous: true,
+            },
+            RouterAdvertisementMode::Stateless => RouterAdvertisementFlags {
+                managed: false,
+                other: true,
+                autonomous: true,
+            },
+        }
+    }
+}
+
 /// Represents a managed network interface.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Interface {
@@ -99,6 +166,9 @@ pub struct Interface {
     /// Optional delegated prefix length hint for tracked prefixes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegated_prefix_len: Option<u8>,
+    /// Router Advertisement flag mode used when `ipv6_mode = track_interface`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ra_mode: Option<RouterAdvertisementMode>,
     /// DHCPv6-PD prefix size hint to request from the ISP.
     ///
     /// When set on a WAN interface with `ipv6_mode = dhcp6`, the engine starts
@@ -148,6 +218,10 @@ impl Interface {
                 Ipv6Mode::Static
             }
         })
+    }
+
+    pub fn effective_ra_mode(&self) -> RouterAdvertisementMode {
+        self.ra_mode.clone().unwrap_or_default()
     }
 }
 

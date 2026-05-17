@@ -8,8 +8,8 @@
 //!
 //! When LAN hosts connect to a DayShield-managed segment, radvd broadcasts
 //! Router Advertisement (RA) messages that carry the delegated /64 prefix.
-//! Hosts use SLAAC to auto-configure their own global IPv6 addresses from
-//! that advertisement.
+//! The per-interface RA mode controls whether clients use SLAAC, stateful
+//! DHCPv6, stateless DHCPv6, or router-only advertisements.
 //!
 //! # radvd.conf format
 //!
@@ -31,13 +31,15 @@
 //! };
 //! ```
 
-use std::net::Ipv6Addr;
+use std::{net::Ipv6Addr, process::Stdio, time::Duration};
 
 use tokio::process::Command;
+use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
 const RADVD_CONF_PATH: &str = "/etc/radvd.conf";
 const RADVD_PID_PATH: &str = "/run/radvd.pid";
+const RADVD_VALIDATE_PID_PATH: &str = "/run/radvd-validate.pid";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -56,6 +58,9 @@ pub struct PrefixAssignment {
     /// `AdvOtherConfigFlag` — set `true` alongside `managed` so hosts also
     /// fetch DNS servers and other config via DHCPv6.
     pub other: bool,
+    /// `AdvAutonomous` (A flag) for the advertised prefix. When set, clients
+    /// may form SLAAC addresses from the advertised prefix.
+    pub autonomous: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -98,8 +103,7 @@ fn generate_radvd_conf(assignments: &[PrefixAssignment]) -> String {
         let network = network_from_cidr(&a.prefix);
         let managed_flag = if a.managed { "on" } else { "off" };
         let other_flag = if a.other { "on" } else { "off" };
-        // When managed-mode is on, hosts use DHCPv6 for addresses — SLAAC is disabled.
-        let autonomous = if a.managed { "off" } else { "on" };
+        let autonomous = if a.autonomous { "on" } else { "off" };
         conf.push_str(&format!(
             r#"interface {iface} {{
     AdvSendAdvert on;
@@ -166,6 +170,10 @@ fn network_from_cidr(cidr: &str) -> String {
 // ---------------------------------------------------------------------------
 
 async fn reload_or_start_radvd() -> anyhow::Result<()> {
+    if !validate_radvd_config().await? {
+        return Ok(());
+    }
+
     // Try SIGHUP reload if already running.
     if let Ok(pid_str) = std::fs::read_to_string(RADVD_PID_PATH) {
         let pid = pid_str.trim();
@@ -183,25 +191,6 @@ async fn reload_or_start_radvd() -> anyhow::Result<()> {
     // Not running or reload failed — start fresh.
     stop_radvd().await.ok();
 
-    // Validate config before starting.
-    let test = Command::new("radvd")
-        .args(["-C", RADVD_CONF_PATH, "-n", "-d", "1"])
-        .output()
-        .await;
-
-    match test {
-        Ok(out) if !out.status.success() => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            anyhow::bail!("radvd config test failed: {stderr}");
-        }
-        Err(e) => {
-            // radvd not installed — log warning but do not fail the apply.
-            warn!(error = %e, "radvd: binary not found; skipping RA advertisements");
-            return Ok(());
-        }
-        _ => {}
-    }
-
     let result = Command::new("radvd")
         .args(["-C", RADVD_CONF_PATH, "-p", RADVD_PID_PATH])
         .spawn();
@@ -218,6 +207,48 @@ async fn reload_or_start_radvd() -> anyhow::Result<()> {
     }
 }
 
+async fn validate_radvd_config() -> anyhow::Result<bool> {
+    let mut child = match Command::new("radvd")
+        .args([
+            "-C",
+            RADVD_CONF_PATH,
+            "-p",
+            RADVD_VALIDATE_PID_PATH,
+            "-n",
+            "-d",
+            "1",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            // radvd not installed - log warning but do not fail the apply.
+            warn!(error = %e, "radvd: binary not found; skipping RA advertisements");
+            let _ = std::fs::remove_file(RADVD_VALIDATE_PID_PATH);
+            return Ok(false);
+        }
+    };
+
+    let result = match timeout(Duration::from_secs(2), child.wait()).await {
+        Ok(Ok(status)) if status.success() => Ok(true),
+        Ok(Ok(status)) => Err(anyhow::anyhow!("radvd config test failed with status {status}")),
+        Ok(Err(e)) => Err(anyhow::anyhow!("radvd config test failed: {e}")),
+        Err(_) => {
+            // A valid foreground radvd keeps running. If it survived the probe
+            // window, the config parsed; stop the probe and start the daemon.
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            Ok(true)
+        }
+    };
+
+    let _ = std::fs::remove_file(RADVD_VALIDATE_PID_PATH);
+    result
+}
+
 async fn stop_radvd() -> anyhow::Result<()> {
     // Try graceful kill by PID file.
     if let Ok(pid_str) = std::fs::read_to_string(RADVD_PID_PATH) {
@@ -227,6 +258,7 @@ async fn stop_radvd() -> anyhow::Result<()> {
         }
     }
     let _ = std::fs::remove_file(RADVD_PID_PATH);
+    let _ = std::fs::remove_file(RADVD_CONF_PATH);
 
     // pkill fallback.
     let _ = Command::new("pkill").args(["radvd"]).output().await;
@@ -260,6 +292,9 @@ mod tests {
         let assignments = vec![PrefixAssignment {
             iface: "eth1".to_string(),
             prefix: "2001:db8:0:3::1/64".to_string(),
+            managed: false,
+            other: false,
+            autonomous: true,
         }];
         let conf = generate_radvd_conf(&assignments);
         assert!(conf.contains("interface eth1"));
@@ -274,10 +309,16 @@ mod tests {
             PrefixAssignment {
                 iface: "eth1".to_string(),
                 prefix: "2001:db8:0:1::1/64".to_string(),
+                managed: false,
+                other: false,
+                autonomous: true,
             },
             PrefixAssignment {
                 iface: "eth2".to_string(),
                 prefix: "2001:db8:0:2::1/64".to_string(),
+                managed: true,
+                other: true,
+                autonomous: false,
             },
         ];
         let conf = generate_radvd_conf(&assignments);
@@ -285,5 +326,32 @@ mod tests {
         assert!(conf.contains("interface eth2"));
         assert!(conf.contains("2001:db8:0:1::/64"));
         assert!(conf.contains("2001:db8:0:2::/64"));
+    }
+
+    #[test]
+    fn generate_conf_preserves_independent_ra_flags() {
+        let assignments = vec![PrefixAssignment {
+            iface: "eth1".to_string(),
+            prefix: "2001:db8:0:3::1/64".to_string(),
+            managed: true,
+            other: true,
+            autonomous: true,
+        }];
+        let conf = generate_radvd_conf(&assignments);
+        assert!(conf.contains("AdvManagedFlag on"));
+        assert!(conf.contains("AdvOtherConfigFlag on"));
+        assert!(conf.contains("AdvAutonomous on"));
+
+        let assignments = vec![PrefixAssignment {
+            iface: "eth1".to_string(),
+            prefix: "2001:db8:0:3::1/64".to_string(),
+            managed: false,
+            other: false,
+            autonomous: false,
+        }];
+        let conf = generate_radvd_conf(&assignments);
+        assert!(conf.contains("AdvManagedFlag off"));
+        assert!(conf.contains("AdvOtherConfigFlag off"));
+        assert!(conf.contains("AdvAutonomous off"));
     }
 }

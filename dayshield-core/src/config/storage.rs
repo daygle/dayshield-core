@@ -381,6 +381,11 @@ impl ConfigStore {
                         );
                     }
                 }
+            } else if iface.ra_mode.is_some() {
+                anyhow::bail!(
+                    "Interface {:?} sets ra_mode but is not using ipv6_mode = track_interface",
+                    iface.name
+                );
             }
             // ia_pd_hint_len is only valid on WAN DHCPv6 interfaces.
             if let Some(hint_len) = iface.ia_pd_hint_len {
@@ -1648,6 +1653,7 @@ mod tests {
             track_source_interface: None,
             track_prefix_id: None,
             delegated_prefix_len: None,
+            ra_mode: None,
             ia_pd_hint_len: None,
             vlan: None,
             parent_interface: None,
@@ -1778,6 +1784,7 @@ mod tests {
             track_source_interface: None,
             track_prefix_id: None,
             delegated_prefix_len: None,
+            ra_mode: None,
             ia_pd_hint_len: None,
             vlan: None,
             parent_interface: None,
@@ -1811,6 +1818,7 @@ mod tests {
             track_source_interface: None,
             track_prefix_id: None,
             delegated_prefix_len: None,
+            ra_mode: None,
             ia_pd_hint_len: None,
             vlan: None,
             parent_interface: None,
@@ -1844,6 +1852,7 @@ mod tests {
             track_source_interface: None,
             track_prefix_id: None,
             delegated_prefix_len: None,
+            ra_mode: None,
             ia_pd_hint_len: None,
             vlan: None,
             parent_interface: None,
@@ -1877,6 +1886,7 @@ mod tests {
             track_source_interface: None,
             track_prefix_id: None,
             delegated_prefix_len: None,
+            ra_mode: None,
             ia_pd_hint_len: None,
             vlan: Some(100),
             parent_interface: None,
@@ -1910,6 +1920,7 @@ mod tests {
             track_source_interface: None,
             track_prefix_id: None,
             delegated_prefix_len: None,
+            ra_mode: None,
             ia_pd_hint_len: None,
             vlan: Some(100),
             parent_interface: Some("eth9".into()),
@@ -1944,6 +1955,7 @@ mod tests {
             track_source_interface: None,
             track_prefix_id: None,
             delegated_prefix_len: None,
+            ra_mode: None,
             ia_pd_hint_len: None,
             vlan: Some(100),
             parent_interface: Some("eth0".into()),

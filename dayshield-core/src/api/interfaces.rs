@@ -20,12 +20,15 @@ use tracing::{info, warn};
 use crate::{
     config::models::{
         ensure_ipv6_allowed, is_valid_cidr, is_valid_interface_name, is_valid_mss, is_valid_mtu,
-        is_valid_vlan_id, Ipv6Mode,
+        is_valid_vlan_id, Ipv6Mode, RouterAdvertisementMode,
         WanMode,
         Gateway, Interface,
     },
     engine::gateway::list_kernel_gateways_with_ipv6,
-    engine::interfaces::{apply_interface_with_ipv6, list_kernel_interfaces, InterfaceError, KernelInterface},
+    engine::interfaces::{
+        apply_interface_with_ipv6, list_kernel_interfaces, refresh_router_advertisements,
+        InterfaceError, KernelInterface,
+    },
     engine::nftables::apply_rules,
     state::AppState,
 };
@@ -182,6 +185,7 @@ pub struct InterfaceResponse {
     pub track_source_interface: Option<String>,
     pub track_prefix_id: Option<u8>,
     pub delegated_prefix_len: Option<u8>,
+    pub ra_mode: Option<String>,
     pub ia_pd_hint_len: Option<u8>,
     /// Runtime-resolved IPv6 prefix (read-only).
     /// For `dhcp6` WAN interfaces with `ia_pd_hint_len` set: the delegated prefix from the ISP.
@@ -242,12 +246,20 @@ impl InterfaceResponse {
             }
         });
 
+        let effective_ipv6_mode = iface.effective_ipv6_mode();
         let ipv6_mode = iface.ipv6_mode.as_ref().map(|m| match m {
             Ipv6Mode::Static => "static".to_string(),
             Ipv6Mode::Dhcp6 => "dhcp6".to_string(),
             Ipv6Mode::Slaac => "slaac".to_string(),
             Ipv6Mode::TrackInterface => "track_interface".to_string(),
         });
+        let ra_mode = if matches!(effective_ipv6_mode, Ipv6Mode::TrackInterface)
+            || iface.ra_mode.is_some()
+        {
+            Some(iface.effective_ra_mode().as_str().to_string())
+        } else {
+            None
+        };
 
         // Infer type from config (vlan if vlan tag present, else ethernet)
         let r#type = if iface.vlan.is_some() {
@@ -268,6 +280,7 @@ impl InterfaceResponse {
             track_source_interface: iface.track_source_interface.clone(),
             track_prefix_id: iface.track_prefix_id,
             delegated_prefix_len: iface.delegated_prefix_len,
+            ra_mode,
             ia_pd_hint_len: iface.ia_pd_hint_len,
             resolved_ipv6_prefix: None, // populated by enrich_with_runtime()
             mtu: iface.mtu,
@@ -340,6 +353,7 @@ pub struct InterfaceRequest {
     pub track_source_interface: Option<String>,
     pub track_prefix_id: Option<u8>,
     pub delegated_prefix_len: Option<u8>,
+    pub ra_mode: Option<String>,
     pub ia_pd_hint_len: Option<u8>,
     pub mtu: Option<u16>,
     pub mss: Option<u16>,
@@ -356,6 +370,25 @@ pub struct InterfaceRequest {
 }
 
 impl InterfaceRequest {
+    fn parse_ra_mode(value: &str) -> Option<RouterAdvertisementMode> {
+        match value {
+            "router_only" => Some(RouterAdvertisementMode::RouterOnly),
+            "unmanaged" => Some(RouterAdvertisementMode::Unmanaged),
+            "managed" => Some(RouterAdvertisementMode::Managed),
+            "assisted" => Some(RouterAdvertisementMode::Assisted),
+            "stateless" => Some(RouterAdvertisementMode::Stateless),
+            _ => None,
+        }
+    }
+
+    fn has_valid_ra_mode(&self) -> bool {
+        self.ra_mode
+            .as_deref()
+            .map(Self::parse_ra_mode)
+            .map(|mode| mode.is_some())
+            .unwrap_or(true)
+    }
+
     /// Convert from API request format to backend `Interface`.
     pub fn to_interface(self) -> Interface {
         // Build addresses from ipv4_address and ipv4_prefix
@@ -380,6 +413,10 @@ impl InterfaceRequest {
             Some("static") => Some(Ipv6Mode::Static),
             _ => None,
         };
+        let ra_mode = self
+            .ra_mode
+            .as_deref()
+            .and_then(Self::parse_ra_mode);
 
         let effective_mode = ipv6_mode.clone().unwrap_or_else(|| {
             if self.dhcp6.unwrap_or(false) {
@@ -408,6 +445,7 @@ impl InterfaceRequest {
             track_source_interface: self.track_source_interface,
             track_prefix_id: self.track_prefix_id,
             delegated_prefix_len: self.delegated_prefix_len,
+            ra_mode,
             ia_pd_hint_len: self.ia_pd_hint_len,
             vlan: self.vlan,
             parent_interface: self.parent_interface,
@@ -495,6 +533,13 @@ pub async fn create_interface(
     State(state): State<Arc<AppState>>,
     Json(req): Json<InterfaceRequest>,
 ) -> Result<impl IntoResponse, InterfaceError> {
+    if !req.has_valid_ra_mode() {
+        return Err(InterfaceError::ApplyFailed(
+            "raMode must be one of router_only, unmanaged, managed, assisted, or stateless"
+                .to_string(),
+        ));
+    }
+
     let iface = req.to_interface();
     let ipv6_enabled = state
         .config_store
@@ -585,6 +630,10 @@ pub async fn create_interface(
                 ));
             }
         }
+    } else if iface.ra_mode.is_some() {
+        return Err(InterfaceError::ApplyFailed(
+            "raMode requires ipv6Mode = track_interface".to_string(),
+        ));
     }
 
     if let Some(gateway) = &iface.gateway {
@@ -708,6 +757,7 @@ pub async fn create_interface(
     // --- Apply -------------------------------------------------------------
 
     apply_interface_with_ipv6(&iface, ipv6_enabled).await?;
+    refresh_router_advertisements(&ifaces_to_save, ipv6_enabled).await;
 
     if nat_wan_changed {
         apply_full_nftables_rules(&state).await?;
@@ -802,6 +852,13 @@ pub async fn delete_interface(
         info!(%name, "interfaces: synchronized auto-managed gateways from WAN interfaces");
     }
 
+    let ipv6_enabled = state
+        .config_store
+        .load_system_settings()
+        .map_err(InterfaceError::StorageError)?
+        .ipv6_enabled;
+    refresh_router_advertisements(&ifaces_to_save, ipv6_enabled).await;
+
     info!(%name, count = deleted_names.len(), "interfaces: deleted interface(s)");
 
     Ok(StatusCode::NO_CONTENT)
@@ -826,6 +883,7 @@ mod tests {
             track_source_interface: None,
             track_prefix_id: None,
             delegated_prefix_len: None,
+            ra_mode: None,
             ia_pd_hint_len: None,
             mtu: Some(1500),
             mss: None,
@@ -863,6 +921,7 @@ mod tests {
             track_source_interface: None,
             track_prefix_id: None,
             delegated_prefix_len: None,
+            ra_mode: None,
             ia_pd_hint_len: None,
             vlan: Some(100),
             parent_interface: Some("eth0".into()),

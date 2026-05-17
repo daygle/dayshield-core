@@ -25,6 +25,7 @@ use crate::{
     config::models::SystemSettings,
     engine::{
         dns::apply_config_with_ipv6 as apply_dns_config,
+        interfaces::refresh_router_advertisements,
         ipv6::apply_ipv6_setting,
         nftables::apply_rules,
     },
@@ -144,6 +145,8 @@ pub async fn update_config(
                 .await
                 .map_err(|e| SystemApiError::CommandError(format!("failed to reapply DNS config: {e:#}")))?;
         }
+
+        refresh_router_advertisements(&full_cfg.interfaces, settings.ipv6_enabled).await;
     }
 
     info!(

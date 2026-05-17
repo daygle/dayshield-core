@@ -600,79 +600,89 @@ pub async fn sync_interfaces_with_ipv6(
 
     info!("interfaces: sync complete");
 
-    // -----------------------------------------------------------------------
-    // Phase 2: Resolve tracked prefixes and apply radvd for LAN interfaces
-    // using ipv6_mode = track_interface.
-    // -----------------------------------------------------------------------
-    if ipv6_enabled {
-        let mut radvd_assignments: Vec<radvd::PrefixAssignment> = Vec::new();
+    refresh_router_advertisements(configured, ipv6_enabled).await;
 
-        for config in configured {
-            if !config.enabled {
-                continue;
-            }
-            if !matches!(config.effective_ipv6_mode(), Ipv6Mode::TrackInterface) {
-                continue;
-            }
-            let Some(src) = config.track_source_interface.as_deref() else {
-                continue;
-            };
-            let target_len = config.delegated_prefix_len.unwrap_or(64);
-            let prefix_id = config.track_prefix_id.unwrap_or(0);
+    Ok(())
+}
 
-            match prefix_delegation::read_delegated_prefix(src) {
-                Some(delegated) => {
-                    match prefix_delegation::compute_track_address(&delegated, prefix_id, target_len, 1) {
-                        Some(assigned) => {
-                            // Assign address (replace any previous track-assigned address).
-                            if let Err(e) = assign_ipv6_address_exclusive(&config.name, &assigned).await {
-                                warn!(
-                                    name = %config.name,
-                                    addr = %assigned,
-                                    error = %e,
-                                    "interfaces: failed to set tracked prefix"
-                                );
-                            } else {
-                                info!(
-                                    name = %config.name,
-                                    assigned = %assigned,
-                                    source = %src,
-                                    "interfaces: applied tracked IPv6 prefix"
-                                );
-                                radvd_assignments.push(radvd::PrefixAssignment {
-                                    iface: config.name.clone(),
-                                    prefix: assigned,
-                                });
-                            }
-                        }
-                        None => {
+/// Resolve tracked prefixes and refresh radvd advertisements for downstream
+/// interfaces. Empty assignments stop radvd, which also clears stale RA config
+/// when IPv6 is globally disabled or the last tracked interface is removed.
+pub async fn refresh_router_advertisements(configured: &[Interface], ipv6_enabled: bool) {
+    if !ipv6_enabled {
+        if let Err(e) = radvd::apply_radvd(&[]).await {
+            warn!(error = %e, "interfaces: failed to stop radvd after IPv6 disable");
+        }
+        return;
+    }
+
+    let mut radvd_assignments: Vec<radvd::PrefixAssignment> = Vec::new();
+
+    for config in configured {
+        if !config.enabled {
+            continue;
+        }
+        if !matches!(config.effective_ipv6_mode(), Ipv6Mode::TrackInterface) {
+            continue;
+        }
+        let Some(src) = config.track_source_interface.as_deref() else {
+            continue;
+        };
+        let target_len = config.delegated_prefix_len.unwrap_or(64);
+        let prefix_id = config.track_prefix_id.unwrap_or(0);
+
+        match prefix_delegation::read_delegated_prefix(src) {
+            Some(delegated) => {
+                match prefix_delegation::compute_track_address(&delegated, prefix_id, target_len, 1) {
+                    Some(assigned) => {
+                        if let Err(e) = assign_ipv6_address_exclusive(&config.name, &assigned).await {
                             warn!(
                                 name = %config.name,
-                                delegated = %delegated,
-                                prefix_id,
-                                target_len,
-                                "interfaces: could not compute tracked prefix from delegated"
+                                addr = %assigned,
+                                error = %e,
+                                "interfaces: failed to set tracked prefix"
                             );
+                        } else {
+                            info!(
+                                name = %config.name,
+                                assigned = %assigned,
+                                source = %src,
+                                "interfaces: applied tracked IPv6 prefix"
+                            );
+                            let flags = config.effective_ra_mode().flags();
+                            radvd_assignments.push(radvd::PrefixAssignment {
+                                iface: config.name.clone(),
+                                prefix: assigned,
+                                managed: flags.managed,
+                                other: flags.other,
+                                autonomous: flags.autonomous,
+                            });
                         }
                     }
-                }
-                None => {
-                    debug!(
-                        name = %config.name,
-                        source = %src,
-                        "interfaces: delegated prefix not yet available; will retry on next sync"
-                    );
+                    None => {
+                        warn!(
+                            name = %config.name,
+                            delegated = %delegated,
+                            prefix_id,
+                            target_len,
+                            "interfaces: could not compute tracked prefix from delegated"
+                        );
+                    }
                 }
             }
-        }
-
-        // Update radvd with current set of assignments (stops radvd if empty).
-        if let Err(e) = radvd::apply_radvd(&radvd_assignments).await {
-            warn!(error = %e, "interfaces: radvd apply failed (non-fatal)");
+            None => {
+                debug!(
+                    name = %config.name,
+                    source = %src,
+                    "interfaces: delegated prefix not yet available; will retry on next sync"
+                );
+            }
         }
     }
 
-    Ok(())
+    if let Err(e) = radvd::apply_radvd(&radvd_assignments).await {
+        warn!(error = %e, "interfaces: radvd apply failed (non-fatal)");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1054,6 +1064,7 @@ mod tests {
             track_source_interface: None,
             track_prefix_id: None,
             delegated_prefix_len: None,
+            ra_mode: None,
             ia_pd_hint_len: None,
             vlan: None,
             parent_interface: None,

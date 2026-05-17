@@ -405,6 +405,11 @@ impl InterfaceRequest {
             Some("dhcp") => Some(crate::config::models::WanMode::Dhcp),
             _ => None,
         };
+        let mtu = if matches!(wan_mode, Some(crate::config::models::WanMode::Pppoe)) {
+            Some(self.mtu.unwrap_or(1492))
+        } else {
+            self.mtu
+        };
 
         let ipv6_mode = match self.ipv6_mode.as_deref() {
             Some("dhcp6") => Some(Ipv6Mode::Dhcp6),
@@ -435,7 +440,7 @@ impl InterfaceRequest {
             name: self.name,
             description: self.description,
             addresses,
-            mtu: self.mtu,
+            mtu,
             mss: self.mss,
             enabled: self.enabled,
             dhcp4: self.dhcp4,
@@ -663,6 +668,13 @@ pub async fn create_interface(
     }
 
     if matches!(iface.wan_mode, Some(WanMode::Pppoe)) {
+        if let Some(mtu) = iface.mtu {
+            if !(576..=1492).contains(&mtu) {
+                return Err(InterfaceError::ApplyFailed(
+                    "pppoe mode requires MTU between 576 and 1492".to_string(),
+                ));
+            }
+        }
         let user_ok = iface
             .pppoe_username
             .as_deref()

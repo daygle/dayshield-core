@@ -15,7 +15,7 @@
 //! | GET    | `/dhcp/leases`                            | List active leases from dnsmasq      |
 //! | GET    | `/dhcp/pools`                             | List DHCP scopes as pool view        |
 
-use std::sync::Arc;
+use std::{net::Ipv6Addr, sync::Arc};
 
 use axum::{
     extract::{Path, State},
@@ -1120,7 +1120,7 @@ fn to_flat_response_v6(cfg: &Dhcp6Config) -> Dhcp6FlatConfigResponse {
 }
 
 fn derive_subnet_from_ipv6_addr(addr: &str) -> String {
-    if let Ok(ip) = addr.parse::<std::net::Ipv6Addr>() {
+    if let Ok(ip) = addr.parse::<Ipv6Addr>() {
         let seg = ip.segments();
         return format!("{:x}:{:x}:{:x}:{:x}::/64", seg[0], seg[1], seg[2], seg[3]);
     }
@@ -1128,49 +1128,323 @@ fn derive_subnet_from_ipv6_addr(addr: &str) -> String {
 }
 
 fn is_valid_ipv6_range(start: &str, end: &str) -> bool {
-    match (
-        start.parse::<std::net::Ipv6Addr>(),
-        end.parse::<std::net::Ipv6Addr>(),
-    ) {
+    match (start.parse::<Ipv6Addr>(), end.parse::<Ipv6Addr>()) {
         (Ok(s), Ok(e)) => u128::from(s) <= u128::from(e),
         _ => false,
     }
 }
 
 fn validate_dhcp6_scope(scope: &Dhcp6Scope) -> Result<(), DhcpError> {
-    if !scope.subnet.is_empty() && !is_valid_ipv6_cidr(&scope.subnet) {
+    if scope.subnet.trim().is_empty() {
+        return Err(DhcpError::ValidationFailed(
+            "subnet is required when a DHCPv6 scope is configured".to_string(),
+        ));
+    }
+    if !is_valid_ipv6_cidr(&scope.subnet) {
         return Err(DhcpError::ValidationFailed(format!(
             "invalid subnet: {}",
             scope.subnet
         )));
     }
-    if !scope.pool_start.is_empty() && !is_valid_ipv6_addr(&scope.pool_start) {
+    if scope.pool_start.trim().is_empty() {
+        return Err(DhcpError::ValidationFailed(
+            "rangeStart is required when a DHCPv6 scope is configured".to_string(),
+        ));
+    }
+    if !is_valid_ipv6_addr(&scope.pool_start) {
         return Err(DhcpError::ValidationFailed(format!(
             "invalid rangeStart: {}",
             scope.pool_start
         )));
     }
-    if !scope.pool_end.is_empty() && !is_valid_ipv6_addr(&scope.pool_end) {
+    if scope.pool_end.trim().is_empty() {
+        return Err(DhcpError::ValidationFailed(
+            "rangeEnd is required when a DHCPv6 scope is configured".to_string(),
+        ));
+    }
+    if !is_valid_ipv6_addr(&scope.pool_end) {
         return Err(DhcpError::ValidationFailed(format!(
             "invalid rangeEnd: {}",
             scope.pool_end
         )));
     }
-    if !scope.pool_start.is_empty()
-        && !scope.pool_end.is_empty()
-        && !is_valid_ipv6_range(&scope.pool_start, &scope.pool_end)
-    {
+    if !is_valid_ipv6_range(&scope.pool_start, &scope.pool_end) {
         return Err(DhcpError::ValidationFailed(format!(
             "rangeStart {} must be <= rangeEnd {}",
             scope.pool_start, scope.pool_end
         )));
+    }
+    if scope.lease_seconds == 0 {
+        return Err(DhcpError::ValidationFailed(
+            "leaseTime must be greater than 0".to_string(),
+        ));
     }
     for dns in &scope.dns_servers {
         if !is_valid_ipv6_addr(dns) {
             return Err(DhcpError::ValidationFailed(format!("invalid DNS server: {dns}")));
         }
     }
+    for reservation in &scope.reservations {
+        if !is_valid_duid(&reservation.duid) {
+            return Err(DhcpError::ValidationFailed(format!(
+                "invalid DUID in reservation {}: {}",
+                reservation.id, reservation.duid
+            )));
+        }
+        if !is_valid_ipv6_addr(&reservation.ip_address) {
+            return Err(DhcpError::ValidationFailed(format!(
+                "invalid IPv6 address in reservation {}: {}",
+                reservation.id, reservation.ip_address
+            )));
+        }
+        if !ipv6_addr_in_cidr(&reservation.ip_address, &scope.subnet) {
+            return Err(DhcpError::ValidationFailed(format!(
+                "reservation IPv6 address {} is outside subnet {}",
+                reservation.ip_address, scope.subnet
+            )));
+        }
+    }
     Ok(())
+}
+
+fn validate_dhcp6_config_for_apply(cfg: &Dhcp6Config) -> Result<(), DhcpError> {
+    if cfg.enabled {
+        if cfg.interface.trim().is_empty() {
+            return Err(DhcpError::ValidationFailed(
+                "interface is required when DHCPv6 is enabled".to_string(),
+            ));
+        }
+        if cfg.scopes.is_empty() {
+            return Err(DhcpError::ValidationFailed(
+                "at least one DHCPv6 scope is required when DHCPv6 is enabled".to_string(),
+            ));
+        }
+    }
+
+    for scope in &cfg.scopes {
+        validate_dhcp6_scope(scope)?;
+    }
+
+    Ok(())
+}
+
+fn dhcp6_request_has_scope_values(req: &UpdateDhcp6FlatRequest) -> bool {
+    req.subnet.as_deref().is_some_and(|s| !s.trim().is_empty())
+        || req.range_start.as_deref().is_some_and(|s| !s.trim().is_empty())
+        || req.range_end.as_deref().is_some_and(|s| !s.trim().is_empty())
+        || req
+            .dns_servers
+            .as_ref()
+            .is_some_and(|servers| !servers.is_empty())
+        || req
+            .domain_name
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+}
+
+fn apply_dhcp6_scope_request(cfg: &mut Dhcp6Config, req: UpdateDhcp6FlatRequest) {
+    if cfg.scopes.is_empty() {
+        if !cfg.enabled && !dhcp6_request_has_scope_values(&req) {
+            return;
+        }
+
+        let subnet = req
+            .subnet
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string())
+            .or_else(|| {
+                req.range_start
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(derive_subnet_from_ipv6_addr)
+            })
+            .unwrap_or_else(|| "fd00::/64".to_string());
+
+        cfg.scopes.push(Dhcp6Scope {
+            id: Uuid::new_v4(),
+            subnet,
+            pool_start: String::new(),
+            pool_end: String::new(),
+            dns_servers: vec![],
+            lease_seconds: 86400,
+            domain_name: None,
+            reservations: vec![],
+        });
+    }
+
+    let scope = &mut cfg.scopes[0];
+    if let Some(v) = req.subnet.filter(|s| !s.trim().is_empty()) {
+        scope.subnet = v.trim().to_string();
+    }
+    if let Some(v) = req.range_start {
+        scope.pool_start = v.trim().to_string();
+    }
+    if let Some(v) = req.range_end {
+        scope.pool_end = v.trim().to_string();
+    }
+    if let Some(v) = req.dns_servers {
+        scope.dns_servers = v
+            .into_iter()
+            .map(|dns| dns.trim().to_string())
+            .filter(|dns| !dns.is_empty())
+            .collect();
+    }
+    if let Some(v) = req.lease_time {
+        scope.lease_seconds = v;
+    }
+    if let Some(v) = req.domain_name {
+        let domain = v.trim().to_string();
+        scope.domain_name = if domain.is_empty() { None } else { Some(domain) };
+    }
+}
+
+fn ipv6_addr_in_cidr(addr: &str, cidr: &str) -> bool {
+    let Some((network, prefix_text)) = cidr.split_once('/') else {
+        return false;
+    };
+    let Ok(addr) = addr.parse::<Ipv6Addr>() else {
+        return false;
+    };
+    let Ok(network) = network.parse::<Ipv6Addr>() else {
+        return false;
+    };
+    let Ok(prefix) = prefix_text.parse::<u32>() else {
+        return false;
+    };
+    if prefix > 128 {
+        return false;
+    }
+
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u128::MAX << (128 - prefix)
+    };
+
+    (u128::from(addr) & mask) == (u128::from(network) & mask)
+}
+
+fn dhcp6_static_response(reservation: &Dhcp6Reservation) -> Dhcp6StaticLeaseResponse {
+    Dhcp6StaticLeaseResponse {
+        id: reservation.id.to_string(),
+        duid: reservation.duid.clone(),
+        ip_address: reservation.ip_address.clone(),
+        hostname: reservation.hostname.clone().unwrap_or_default(),
+        description: reservation.description.clone(),
+    }
+}
+
+fn normalize_dhcp6_reservation_duid(
+    req: &CreateDhcp6StaticLeaseRequest,
+) -> Result<String, DhcpError> {
+    let duid = if let Some(d) = req.duid.as_deref().filter(|s| !s.trim().is_empty()) {
+        d.trim().to_ascii_lowercase()
+    } else if let Some(mac) = req.mac.as_deref().filter(|s| !s.trim().is_empty()) {
+        let mac = mac.trim().to_ascii_lowercase();
+        if !is_valid_mac(&mac) {
+            return Err(DhcpError::ValidationFailed(format!(
+                "invalid MAC address: {mac} (expected aa:bb:cc:dd:ee:ff)"
+            )));
+        }
+        format!("00:03:00:01:{mac}")
+    } else {
+        return Err(DhcpError::ValidationFailed(
+            "either 'duid' or 'mac' must be provided".to_string(),
+        ));
+    };
+
+    if !is_valid_duid(&duid) {
+        return Err(DhcpError::ValidationFailed(format!(
+            "invalid DUID: {duid}"
+        )));
+    }
+
+    Ok(duid)
+}
+
+fn add_dhcp6_reservation(
+    cfg: &mut Dhcp6Config,
+    req: CreateDhcp6StaticLeaseRequest,
+    interface_name: Option<&str>,
+) -> Result<Dhcp6StaticLeaseResponse, DhcpError> {
+    if let Some(interface_name) = interface_name {
+        if cfg.interface != interface_name {
+            if cfg.interface.is_empty() {
+                cfg.interface = interface_name.to_string();
+            } else {
+                return Err(DhcpError::ValidationFailed(format!(
+                    "DHCPv6 config is for interface {}, not {}",
+                    cfg.interface, interface_name
+                )));
+            }
+        }
+    }
+
+    let duid = normalize_dhcp6_reservation_duid(&req)?;
+    let ip_address = req.ip_address.trim().to_string();
+
+    if !is_valid_ipv6_addr(&ip_address) {
+        return Err(DhcpError::ValidationFailed(format!(
+            "invalid IPv6 address: {}",
+            req.ip_address
+        )));
+    }
+
+    if cfg.scopes.is_empty() {
+        return Err(DhcpError::ValidationFailed(
+            "configure a DHCPv6 scope before adding static reservations".to_string(),
+        ));
+    }
+
+    if cfg
+        .scopes
+        .iter()
+        .flat_map(|scope| scope.reservations.iter())
+        .any(|reservation| reservation.duid.eq_ignore_ascii_case(&duid))
+    {
+        return Err(DhcpError::ValidationFailed(format!(
+            "DUID {duid} already has a DHCPv6 reservation"
+        )));
+    }
+
+    if cfg
+        .scopes
+        .iter()
+        .flat_map(|scope| scope.reservations.iter())
+        .any(|reservation| reservation.ip_address.eq_ignore_ascii_case(&ip_address))
+    {
+        return Err(DhcpError::ValidationFailed(format!(
+            "IPv6 address {ip_address} already has a DHCPv6 reservation"
+        )));
+    }
+
+    let Some(scope_index) = cfg
+        .scopes
+        .iter()
+        .position(|scope| ipv6_addr_in_cidr(&ip_address, &scope.subnet))
+    else {
+        return Err(DhcpError::ValidationFailed(format!(
+            "reserved IPv6 address {ip_address} is outside the configured DHCPv6 scopes"
+        )));
+    };
+
+    let reservation = Dhcp6Reservation {
+        id: Uuid::new_v4(),
+        duid,
+        ip_address,
+        hostname: req
+            .hostname
+            .map(|h| h.trim().to_string())
+            .filter(|h| !h.is_empty()),
+        description: req.description.unwrap_or_default().trim().to_string(),
+    };
+
+    let resp = dhcp6_static_response(&reservation);
+    cfg.scopes[scope_index].reservations.push(reservation);
+    validate_dhcp6_config_for_apply(cfg)?;
+
+    Ok(resp)
 }
 
 /// Return the DHCPv6 configuration in a flat format compatible with the UI.
@@ -1201,43 +1475,10 @@ pub async fn update_config_v6(
         .unwrap_or_else(default_dhcp6_cfg);
 
     if let Some(v) = req.enabled { cfg.enabled = v; }
-    if let Some(v) = req.interface { cfg.interface = v; }
+    if let Some(v) = req.interface.as_deref() { cfg.interface = v.trim().to_string(); }
 
-    if cfg.scopes.is_empty() {
-        let subnet = req
-            .subnet
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-            .or_else(|| {
-                req.range_start
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .map(derive_subnet_from_ipv6_addr)
-            })
-            .unwrap_or_else(|| "fd00::/64".to_string());
-
-        cfg.scopes.push(Dhcp6Scope {
-            id: Uuid::new_v4(),
-            subnet,
-            pool_start: String::new(),
-            pool_end: String::new(),
-            dns_servers: vec![],
-            lease_seconds: 86400,
-            domain_name: None,
-            reservations: vec![],
-        });
-    }
-
-    let scope = &mut cfg.scopes[0];
-    if let Some(v) = req.subnet.filter(|s| !s.is_empty()) { scope.subnet = v; }
-    if let Some(v) = req.range_start { scope.pool_start = v; }
-    if let Some(v) = req.range_end { scope.pool_end = v; }
-    if let Some(v) = req.dns_servers { scope.dns_servers = v; }
-    if let Some(v) = req.lease_time { scope.lease_seconds = v; }
-    if let Some(v) = req.domain_name { scope.domain_name = if v.is_empty() { None } else { Some(v) }; }
-
-    validate_dhcp6_scope(scope)?;
+    apply_dhcp6_scope_request(&mut cfg, req);
+    validate_dhcp6_config_for_apply(&cfg)?;
 
     state
         .config_store
@@ -1303,41 +1544,8 @@ pub async fn update_interface_dhcp6_config(
     cfg.interface = interface_name;
     if let Some(v) = req.enabled { cfg.enabled = v; }
 
-    if cfg.scopes.is_empty() {
-        let subnet = req
-            .subnet
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-            .or_else(|| {
-                req.range_start
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .map(derive_subnet_from_ipv6_addr)
-            })
-            .unwrap_or_else(|| "fd00::/64".to_string());
-
-        cfg.scopes.push(Dhcp6Scope {
-            id: Uuid::new_v4(),
-            subnet,
-            pool_start: String::new(),
-            pool_end: String::new(),
-            dns_servers: vec![],
-            lease_seconds: 86400,
-            domain_name: None,
-            reservations: vec![],
-        });
-    }
-
-    let scope = &mut cfg.scopes[0];
-    if let Some(v) = req.subnet.filter(|s| !s.is_empty()) { scope.subnet = v; }
-    if let Some(v) = req.range_start { scope.pool_start = v; }
-    if let Some(v) = req.range_end { scope.pool_end = v; }
-    if let Some(v) = req.dns_servers { scope.dns_servers = v; }
-    if let Some(v) = req.lease_time { scope.lease_seconds = v; }
-    if let Some(v) = req.domain_name { scope.domain_name = if v.is_empty() { None } else { Some(v) }; }
-
-    validate_dhcp6_scope(scope)?;
+    apply_dhcp6_scope_request(&mut cfg, req);
+    validate_dhcp6_config_for_apply(&cfg)?;
 
     state
         .config_store
@@ -1385,6 +1593,34 @@ pub async fn list_dhcp6_static_leases(
 }
 
 // ---------------------------------------------------------------------------
+// GET /interfaces/{name}/dhcp6/static-leases
+// ---------------------------------------------------------------------------
+
+/// Return DUID -> IPv6 reservations for a specific DHCPv6 interface.
+pub async fn list_interface_dhcp6_static_leases(
+    State(state): State<Arc<AppState>>,
+    Path(interface_name): Path<String>,
+) -> Result<impl IntoResponse, DhcpError> {
+    let cfg = state
+        .config_store
+        .load_dhcp6_config()
+        .map_err(DhcpError::StorageError)?
+        .unwrap_or_else(default_dhcp6_cfg);
+
+    let leases: Vec<Dhcp6StaticLeaseResponse> = if cfg.interface == interface_name {
+        cfg.scopes
+            .iter()
+            .flat_map(|s| s.reservations.iter())
+            .map(dhcp6_static_response)
+            .collect()
+    } else {
+        vec![]
+    };
+
+    Ok(Json(serde_json::json!({ "success": true, "data": leases })))
+}
+
+// ---------------------------------------------------------------------------
 // POST /dhcp6/static-leases
 // ---------------------------------------------------------------------------
 
@@ -1396,69 +1632,13 @@ pub async fn create_dhcp6_static_lease(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateDhcp6StaticLeaseRequest>,
 ) -> Result<impl IntoResponse, DhcpError> {
-    let duid = if let Some(d) = req.duid.as_deref().filter(|s| !s.is_empty()) {
-        d.to_string()
-    } else if let Some(mac) = req.mac.as_deref().filter(|s| !s.is_empty()) {
-        if !is_valid_mac(mac) {
-            return Err(DhcpError::ValidationFailed(format!(
-                "invalid MAC address: {mac} (expected aa:bb:cc:dd:ee:ff)"
-            )));
-        }
-        format!("00:03:00:01:{mac}")
-    } else {
-        return Err(DhcpError::ValidationFailed(
-            "either 'duid' or 'mac' must be provided".to_string(),
-        ));
-    };
-
-    if !is_valid_duid(&duid) {
-        return Err(DhcpError::ValidationFailed(format!(
-            "invalid DUID: {duid}"
-        )));
-    }
-    if !is_valid_ipv6_addr(&req.ip_address) {
-        return Err(DhcpError::ValidationFailed(format!(
-            "invalid IPv6 address: {}",
-            req.ip_address
-        )));
-    }
-
     let mut cfg = state
         .config_store
         .load_dhcp6_config()
         .map_err(DhcpError::StorageError)?
         .unwrap_or_else(default_dhcp6_cfg);
 
-    if cfg.scopes.is_empty() {
-        cfg.scopes.push(Dhcp6Scope {
-            id: Uuid::new_v4(),
-            subnet: derive_subnet_from_ipv6_addr(&req.ip_address),
-            pool_start: String::new(),
-            pool_end: String::new(),
-            dns_servers: vec![],
-            lease_seconds: 86400,
-            domain_name: None,
-            reservations: vec![],
-        });
-    }
-
-    let reservation = Dhcp6Reservation {
-        id: Uuid::new_v4(),
-        duid: duid.clone(),
-        ip_address: req.ip_address.clone(),
-        hostname: req.hostname.filter(|h| !h.is_empty()),
-        description: req.description.unwrap_or_default(),
-    };
-
-    let resp = Dhcp6StaticLeaseResponse {
-        id: reservation.id.to_string(),
-        duid: reservation.duid.clone(),
-        ip_address: reservation.ip_address.clone(),
-        hostname: reservation.hostname.clone().unwrap_or_default(),
-        description: reservation.description.clone(),
-    };
-
-    cfg.scopes[0].reservations.push(reservation);
+    let resp = add_dhcp6_reservation(&mut cfg, req, None)?;
 
     state
         .config_store
@@ -1469,7 +1649,47 @@ pub async fn create_dhcp6_static_lease(
         .await
         .map_err(|e| DhcpError::EngineError(e.to_string()))?;
 
-    info!(duid = %duid, ip = %req.ip_address, "dhcp6: static lease created");
+    info!(duid = %resp.duid, ip = %resp.ip_address, "dhcp6: static lease created");
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "success": true, "data": resp })),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// POST /interfaces/{name}/dhcp6/static-leases
+// ---------------------------------------------------------------------------
+
+/// Add a DUID -> IPv6 reservation for a specific DHCPv6 interface.
+pub async fn create_interface_dhcp6_static_lease(
+    State(state): State<Arc<AppState>>,
+    Path(interface_name): Path<String>,
+    Json(req): Json<CreateDhcp6StaticLeaseRequest>,
+) -> Result<impl IntoResponse, DhcpError> {
+    let mut cfg = state
+        .config_store
+        .load_dhcp6_config()
+        .map_err(DhcpError::StorageError)?
+        .unwrap_or_else(default_dhcp6_cfg);
+
+    let resp = add_dhcp6_reservation(&mut cfg, req, Some(&interface_name))?;
+
+    state
+        .config_store
+        .save_dhcp6_config(cfg.clone())
+        .map_err(DhcpError::StorageError)?;
+
+    apply_dhcp6_config(&cfg)
+        .await
+        .map_err(|e| DhcpError::EngineError(e.to_string()))?;
+
+    info!(
+        duid = %resp.duid,
+        ip = %resp.ip_address,
+        interface = %interface_name,
+        "dhcp6: static lease created for interface"
+    );
 
     Ok((
         StatusCode::CREATED,
@@ -1526,6 +1746,63 @@ pub async fn delete_dhcp6_static_lease(
 }
 
 // ---------------------------------------------------------------------------
+// DELETE /interfaces/{name}/dhcp6/static-leases/{id}
+// ---------------------------------------------------------------------------
+
+/// Remove a DHCPv6 static reservation by UUID for a specific interface.
+pub async fn delete_interface_dhcp6_static_lease(
+    State(state): State<Arc<AppState>>,
+    Path((interface_name, id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, DhcpError> {
+    let target = id.parse::<Uuid>().map_err(|_| {
+        DhcpError::ValidationFailed(format!("invalid lease ID: {id}"))
+    })?;
+
+    let mut cfg = state
+        .config_store
+        .load_dhcp6_config()
+        .map_err(DhcpError::StorageError)?
+        .unwrap_or_else(default_dhcp6_cfg);
+
+    if cfg.interface != interface_name {
+        return Err(DhcpError::ValidationFailed(format!(
+            "DHCPv6 config is for interface {}, not {}",
+            cfg.interface, interface_name
+        )));
+    }
+
+    let mut found = false;
+    for scope in &mut cfg.scopes {
+        let before = scope.reservations.len();
+        scope.reservations.retain(|r| r.id != target);
+        if scope.reservations.len() < before {
+            found = true;
+        }
+    }
+
+    if !found {
+        return Err(DhcpError::ValidationFailed(format!(
+            "DHCPv6 static lease {id} not found in interface {interface_name}"
+        )));
+    }
+
+    validate_dhcp6_config_for_apply(&cfg)?;
+
+    state
+        .config_store
+        .save_dhcp6_config(cfg.clone())
+        .map_err(DhcpError::StorageError)?;
+
+    apply_dhcp6_config(&cfg)
+        .await
+        .map_err(|e| DhcpError::EngineError(e.to_string()))?;
+
+    info!(%id, interface = %interface_name, "dhcp6: static lease deleted from interface");
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
 // GET /dhcp6/leases
 // ---------------------------------------------------------------------------
 
@@ -1564,7 +1841,13 @@ pub async fn list_active_dhcp6_leases(
             if cols.len() < 14 {
                 return None;
             }
+            if cols[4].trim() != "0" {
+                return None;
+            }
             let address     = cols[0].to_string();
+            if !is_valid_ipv6_addr(&address) {
+                return None;
+            }
             let duid        = cols[1].to_string();
             let expire: u64 = cols[7].parse().ok()?;
             let hostname    = cols[11].to_string();

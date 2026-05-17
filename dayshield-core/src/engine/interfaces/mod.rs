@@ -387,10 +387,12 @@ pub async fn apply_interface_with_ipv6(
                 // Ensure DHCP client is not competing with PPPoE on the same WAN.
                 stop_dhcp_client(name).await;
                 stop_dhcp6_client(name).await;
+                stop_dhcp6_pd_client(name).await;
                 set_ipv6_ra_accept(name, false).await?;
                 let username = config.pppoe_username.as_deref().unwrap_or("");
                 let password = config.pppoe_password.as_deref().unwrap_or("");
-                start_pppoe(name, username, password, ipv6_enabled).await?;
+                let ppp_mtu = config.mtu.unwrap_or(1492).clamp(576, 1492);
+                start_pppoe(name, username, password, ipv6_enabled, ppp_mtu).await?;
             }
             _ => {
                 let ipv6_mode = config.effective_ipv6_mode();
@@ -938,6 +940,7 @@ async fn start_pppoe(
     username: &str,
     password: &str,
     ipv6_enabled: bool,
+    ppp_mtu: u16,
 ) -> Result<(), InterfaceError> {
     use tokio::fs;
 
@@ -959,6 +962,7 @@ async fn start_pppoe(
 
     let peer_name = format!("wan-{wan_iface}");
     let peer_path = format!("/etc/ppp/peers/{peer_name}");
+    let pid_file = format!("/run/ppp-{peer_name}.pid");
     let secrets_line = format!("\"{}\" * \"{}\" *\n", escaped_username, escaped_password);
 
     // Ensure /etc/ppp exists
@@ -967,10 +971,15 @@ async fn start_pppoe(
         .map_err(|e| InterfaceError::ApplyFailed(format!("pppoe: create /etc/ppp/peers: {e}")))?;
 
     // Write peer config
-    let ipv6_line = if ipv6_enabled { "" } else { "noipv6\n" };
+    let ipv6_line = if ipv6_enabled {
+        "+ipv6\ndefaultroute6\n"
+    } else {
+        "noipv6\n"
+    };
     let peer_cfg = format!(
-        "plugin rp-pppoe.so {wan_iface}\nuser \"{escaped_username}\"\nnoauth\ndefaultroute\n\
-replacedefaultroute\nhide-password\npersist\nmaxfail 0\nholdoff 5\n{ipv6_line}"
+        "plugin rp-pppoe.so {wan_iface}\nuser \"{escaped_username}\"\nlinkname {peer_name}\n\
+pidfile {pid_file}\nnoipdefault\nnoauth\ndefaultroute\nreplacedefaultroute\n\
+hide-password\npersist\nmaxfail 0\nholdoff 5\nmtu {ppp_mtu}\nmru {ppp_mtu}\n{ipv6_line}"
     );
     fs::write(&peer_path, &peer_cfg)
         .await
@@ -1011,7 +1020,19 @@ replacedefaultroute\nhide-password\npersist\nmaxfail 0\nholdoff 5\n{ipv6_line}"
 /// Stop `pppd` for the given WAN interface, if running.
 async fn stop_pppoe(wan_iface: &str) {
     let peer_name = format!("wan-{wan_iface}");
-    // Best-effort: pkill any pppd calling this peer
+    let pid_file = format!("/run/ppp-{peer_name}.pid");
+
+    if let Ok(pid_text) = tokio::fs::read_to_string(&pid_file).await {
+        if let Ok(pid) = pid_text.trim().parse::<u32>() {
+            let _ = Command::new("kill")
+                .args([pid.to_string()])
+                .output()
+                .await;
+        }
+        let _ = tokio::fs::remove_file(&pid_file).await;
+    }
+
+    // Best-effort fallback for sessions started before pidfile support.
     let _ = Command::new("pkill")
         .args(["-f", &format!("pppd call {peer_name}")])
         .output()

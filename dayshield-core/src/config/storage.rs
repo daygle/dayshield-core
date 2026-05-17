@@ -685,6 +685,14 @@ impl ConfigStore {
 
         // DHCPv6 config validation.
         if let Some(dhcp6) = &config.dhcp6 {
+            if dhcp6.enabled {
+                if dhcp6.interface.trim().is_empty() {
+                    anyhow::bail!("DHCPv6 interface is required when DHCPv6 is enabled");
+                }
+                if dhcp6.scopes.is_empty() {
+                    anyhow::bail!("DHCPv6 requires at least one scope when enabled");
+                }
+            }
             for scope in &dhcp6.scopes {
                 if !crate::config::models::is_valid_ipv6_cidr(&scope.subnet) {
                     anyhow::bail!(

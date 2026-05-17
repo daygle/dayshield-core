@@ -614,7 +614,84 @@ fn default_firewall_direction() -> FirewallDirection {
     FirewallDirection::Forward
 }
 
-/// A single stateless firewall rule that will be compiled into nftables.
+/// Address family selector for firewall rules in the `inet` filter table.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FirewallAddressFamily {
+    Ipv4,
+    Ipv6,
+    #[default]
+    #[serde(alias = "both", alias = "dual", alias = "any")]
+    Ipv4Ipv6,
+}
+
+/// Per-rule connection/state limits.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FirewallStateLimits {
+    /// Maximum concurrent conntrack entries matched by this rule.
+    #[serde(default, alias = "maxStates", skip_serializing_if = "Option::is_none")]
+    pub max_states: Option<u32>,
+    /// Maximum tracked source nodes. Stored for UI/config parity; enforcement
+    /// requires nftables dynamic sets and is intentionally conservative.
+    #[serde(default, alias = "maxSourceNodes", skip_serializing_if = "Option::is_none")]
+    pub max_source_nodes: Option<u32>,
+    /// Maximum concurrent conntrack entries per source.
+    #[serde(default, alias = "maxSourceStates", skip_serializing_if = "Option::is_none")]
+    pub max_source_states: Option<u32>,
+    /// Maximum concurrent connections per source.
+    #[serde(default, alias = "maxSourceConnections", skip_serializing_if = "Option::is_none")]
+    pub max_source_connections: Option<u32>,
+    /// Maximum new connections in the configured window for traffic matching this rule.
+    #[serde(
+        default,
+        alias = "maxNewConnections",
+        alias = "maxNewConnectionsCount",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_new_connections: Option<u32>,
+    /// New-connection rate window in seconds.
+    #[serde(
+        default,
+        alias = "maxNewConnectionsSeconds",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_new_connections_seconds: Option<u32>,
+    /// Maximum new connections per source in the configured window.
+    #[serde(
+        default,
+        alias = "maxNewConnectionsPerSource",
+        alias = "maxNewConnectionsPerSourceCount",
+        alias = "maxNewConnectionsSource",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_new_connections_per_source: Option<u32>,
+    /// Per-source new-connection rate window in seconds.
+    #[serde(
+        default,
+        alias = "maxNewConnectionsPerSourceSeconds",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_new_connections_per_source_seconds: Option<u32>,
+}
+
+impl FirewallStateLimits {
+    pub fn is_empty(&self) -> bool {
+        self.max_states.is_none()
+            && self.max_source_nodes.is_none()
+            && self.max_source_states.is_none()
+            && self.max_source_connections.is_none()
+            && self.max_new_connections.is_none()
+            && self.max_new_connections_seconds.is_none()
+            && self.max_new_connections_per_source.is_none()
+            && self.max_new_connections_per_source_seconds.is_none()
+    }
+}
+
+fn firewall_state_limits_is_empty(limits: &FirewallStateLimits) -> bool {
+    limits.is_empty()
+}
+
+/// A single firewall rule that will be compiled into nftables.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FirewallRule {
     /// Unique identifier.
@@ -633,6 +710,9 @@ pub struct FirewallRule {
     pub source_port: Option<u16>,
     /// Destination port; `None` means any.
     pub destination_port: Option<u16>,
+    /// IP family the rule applies to.
+    #[serde(default, alias = "ipFamily")]
+    pub ip_family: FirewallAddressFamily,
     /// Action to take when the rule matches.
     pub action: Action,
     /// Which chain the rule is emitted into.
@@ -648,6 +728,9 @@ pub struct FirewallRule {
     /// Optional time-based schedule; `None` means always active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<FirewallSchedule>,
+    /// Optional per-rule state/connection limits.
+    #[serde(default, skip_serializing_if = "firewall_state_limits_is_empty")]
+    pub state_limits: FirewallStateLimits,
 }
 
 // ---------------------------------------------------------------------------

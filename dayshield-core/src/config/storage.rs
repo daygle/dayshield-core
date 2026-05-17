@@ -501,13 +501,35 @@ impl ConfigStore {
                     rule.priority
                 );
             }
-            if matches!(
-                rule.protocol.as_ref(),
-                Some(crate::config::models::Protocol::Icmpv6)
-            ) && !ipv6_enabled
+            if matches!(rule.ip_family, crate::config::models::FirewallAddressFamily::Ipv6)
+                && !ipv6_enabled
+            {
+                anyhow::bail!(
+                    "Firewall rule {} uses IPv6 family but system ipv6Enabled is false",
+                    rule.id
+                );
+            }
+            if matches!(rule.protocol.as_ref(), Some(crate::config::models::Protocol::Icmpv6))
+                && !ipv6_enabled
             {
                 anyhow::bail!(
                     "Firewall rule {} uses ICMPv6 but system ipv6Enabled is false",
+                    rule.id
+                );
+            }
+            if matches!(rule.protocol.as_ref(), Some(crate::config::models::Protocol::Icmpv6))
+                && matches!(rule.ip_family, crate::config::models::FirewallAddressFamily::Ipv4)
+            {
+                anyhow::bail!(
+                    "Firewall rule {} uses ICMPv6 but ip_family is ipv4",
+                    rule.id
+                );
+            }
+            if matches!(rule.protocol.as_ref(), Some(crate::config::models::Protocol::Icmp))
+                && matches!(rule.ip_family, crate::config::models::FirewallAddressFamily::Ipv6)
+            {
+                anyhow::bail!(
+                    "Firewall rule {} uses ICMP but ip_family is ipv6",
                     rule.id
                 );
             }
@@ -527,6 +549,29 @@ impl ConfigStore {
                     &format!("Firewall rule {} destination", rule.id),
                 ) {
                     anyhow::bail!("{msg}");
+                }
+            }
+            for (label, value) in [
+                ("max_states", rule.state_limits.max_states),
+                ("max_source_nodes", rule.state_limits.max_source_nodes),
+                ("max_source_states", rule.state_limits.max_source_states),
+                ("max_source_connections", rule.state_limits.max_source_connections),
+                ("max_new_connections", rule.state_limits.max_new_connections),
+                (
+                    "max_new_connections_seconds",
+                    rule.state_limits.max_new_connections_seconds,
+                ),
+                (
+                    "max_new_connections_per_source",
+                    rule.state_limits.max_new_connections_per_source,
+                ),
+                (
+                    "max_new_connections_per_source_seconds",
+                    rule.state_limits.max_new_connections_per_source_seconds,
+                ),
+            ] {
+                if value == Some(0) {
+                    anyhow::bail!("Firewall rule {} {} must be greater than 0", rule.id, label);
                 }
             }
         }
@@ -2014,6 +2059,8 @@ mod tests {
             log: false,
             enabled: true,
             schedule: None,
+            ip_family: crate::config::models::FirewallAddressFamily::Ipv4Ipv6,
+            state_limits: crate::config::models::FirewallStateLimits::default(),
         }
     }
 
@@ -2085,6 +2132,8 @@ mod tests {
             log: false,
             enabled: true,
             schedule: None,
+            ip_family: crate::config::models::FirewallAddressFamily::Ipv4Ipv6,
+            state_limits: crate::config::models::FirewallStateLimits::default(),
         };
 
         let result = store.save_firewall_rules(vec![bad_rule]);

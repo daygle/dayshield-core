@@ -17,6 +17,7 @@
 //! | `exp` | number | Unix timestamp - expires at (+8 h)  |
 
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
@@ -92,11 +93,19 @@ pub fn load_or_create_key(path: &Path) -> Result<Vec<u8>, AuthError> {
             .map_err(|e| AuthError::StorageError(format!("remove corrupted key: {e}")))?;
     }
 
-    // Write with restricted permissions.
+    // Write with restricted permissions where the platform exposes Unix modes.
+    #[cfg(unix)]
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
+        .open(path)
+        .map_err(|e| AuthError::StorageError(format!("create key file: {e}")))?;
+
+    #[cfg(not(unix))]
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
         .open(path)
         .map_err(|e| AuthError::StorageError(format!("create key file: {e}")))?;
 

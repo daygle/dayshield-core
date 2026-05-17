@@ -32,7 +32,8 @@ use uuid::Uuid;
 use crate::{
     config::models::{
         ensure_ipv6_allowed, is_valid_cidr, is_valid_interface_name, is_valid_port, Action,
-        FirewallDirection, FirewallRule, FirewallSchedule, FirewallSettings, Protocol, SystemConfig,
+        FirewallAddressFamily, FirewallDirection, FirewallRule, FirewallSchedule,
+        FirewallSettings, FirewallStateLimits, Protocol, SystemConfig,
     },
     engine::nftables::{apply_rules, get_rule_stats, NftError},
     state::AppState,
@@ -167,6 +168,8 @@ pub struct CreateRuleRequest {
     pub protocol: Option<Protocol>,
     pub source_port: Option<u16>,
     pub destination_port: Option<u16>,
+    #[serde(default)]
+    pub ip_family: FirewallAddressFamily,
     pub action: Action,
     #[serde(default = "default_direction")]
     pub direction: FirewallDirection, // Now supports Both
@@ -175,6 +178,8 @@ pub struct CreateRuleRequest {
     #[serde(default = "default_true")]
     pub enabled: bool,
     pub schedule: Option<FirewallSchedule>,
+    #[serde(default)]
+    pub state_limits: FirewallStateLimits,
 }
 
 fn default_true() -> bool { true }
@@ -187,6 +192,125 @@ fn config_ipv6_enabled(config: &SystemConfig) -> bool {
         .as_ref()
         .map(|settings| settings.ipv6_enabled)
         .unwrap_or(false)
+}
+
+fn validate_rule_request(req: &CreateRuleRequest, ipv6_enabled: bool) -> Result<(), NftError> {
+    if matches!(req.ip_family, FirewallAddressFamily::Ipv6) && !ipv6_enabled {
+        return Err(NftError::ValidationFailed(
+            "IPv6 firewall rules require system ipv6Enabled".into(),
+        ));
+    }
+
+    if matches!(req.protocol.as_ref(), Some(Protocol::Icmpv6)) && !ipv6_enabled {
+        return Err(NftError::ValidationFailed(
+            "ICMPv6 firewall rules require system ipv6Enabled".into(),
+        ));
+    }
+    if matches!(req.protocol.as_ref(), Some(Protocol::Icmpv6))
+        && matches!(req.ip_family, FirewallAddressFamily::Ipv4)
+    {
+        return Err(NftError::ValidationFailed(
+            "ICMPv6 rules cannot use ipFamily=ipv4".into(),
+        ));
+    }
+    if matches!(req.protocol.as_ref(), Some(Protocol::Icmp))
+        && matches!(req.ip_family, FirewallAddressFamily::Ipv6)
+    {
+        return Err(NftError::ValidationFailed(
+            "ICMP rules cannot use ipFamily=ipv6".into(),
+        ));
+    }
+
+    if let Some(src) = &req.source {
+        if !is_valid_cidr(src) {
+            warn!(src = %src, "firewall: invalid source CIDR");
+            return Err(NftError::ValidationFailed(format!("invalid source CIDR: {src}")));
+        }
+        if let Err(msg) = ensure_ipv6_allowed(src, ipv6_enabled, "firewall source CIDR") {
+            return Err(NftError::ValidationFailed(msg));
+        }
+        if src.contains(':') && matches!(req.ip_family, FirewallAddressFamily::Ipv4) {
+            return Err(NftError::ValidationFailed(
+                "IPv6 source cannot use ipFamily=ipv4".into(),
+            ));
+        }
+        if !src.contains(':') && matches!(req.ip_family, FirewallAddressFamily::Ipv6) {
+            return Err(NftError::ValidationFailed(
+                "IPv4 source cannot use ipFamily=ipv6".into(),
+            ));
+        }
+    }
+
+    if let Some(dst) = &req.destination {
+        if !is_valid_cidr(dst) {
+            warn!(dst = %dst, "firewall: invalid destination CIDR");
+            return Err(NftError::ValidationFailed(format!("invalid destination CIDR: {dst}")));
+        }
+        if let Err(msg) = ensure_ipv6_allowed(dst, ipv6_enabled, "firewall destination CIDR") {
+            return Err(NftError::ValidationFailed(msg));
+        }
+        if dst.contains(':') && matches!(req.ip_family, FirewallAddressFamily::Ipv4) {
+            return Err(NftError::ValidationFailed(
+                "IPv6 destination cannot use ipFamily=ipv4".into(),
+            ));
+        }
+        if !dst.contains(':') && matches!(req.ip_family, FirewallAddressFamily::Ipv6) {
+            return Err(NftError::ValidationFailed(
+                "IPv4 destination cannot use ipFamily=ipv6".into(),
+            ));
+        }
+    }
+
+    if let Some(sport) = req.source_port {
+        if !is_valid_port(sport) {
+            warn!(port = sport, "firewall: invalid source port");
+            return Err(NftError::ValidationFailed(format!(
+                "invalid source port: {sport} (must be 1-65535)"
+            )));
+        }
+    }
+    if let Some(dport) = req.destination_port {
+        if !is_valid_port(dport) {
+            warn!(port = dport, "firewall: invalid destination port");
+            return Err(NftError::ValidationFailed(format!(
+                "invalid destination port: {dport} (must be 1-65535)"
+            )));
+        }
+    }
+    if let Some(iface) = &req.interface {
+        if !is_valid_interface_name(iface) {
+            warn!(iface = %iface, "firewall: invalid interface name");
+            return Err(NftError::ValidationFailed(format!("invalid interface name: {iface}")));
+        }
+    }
+
+    for (label, value) in [
+        ("maxStates", req.state_limits.max_states),
+        ("maxSourceNodes", req.state_limits.max_source_nodes),
+        ("maxSourceStates", req.state_limits.max_source_states),
+        ("maxSourceConnections", req.state_limits.max_source_connections),
+        ("maxNewConnections", req.state_limits.max_new_connections),
+        (
+            "maxNewConnectionsSeconds",
+            req.state_limits.max_new_connections_seconds,
+        ),
+        (
+            "maxNewConnectionsPerSource",
+            req.state_limits.max_new_connections_per_source,
+        ),
+        (
+            "maxNewConnectionsPerSourceSeconds",
+            req.state_limits.max_new_connections_per_source_seconds,
+        ),
+    ] {
+        if value == Some(0) {
+            return Err(NftError::ValidationFailed(format!(
+                "{label} must be greater than 0"
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 /// Handler: create a new firewall rule.
@@ -204,6 +328,7 @@ pub async fn create_rule(
         .load_system_settings()
         .map_err(NftError::StorageError)?
         .ipv6_enabled;
+    validate_rule_request(&req, ipv6_enabled)?;
 
     if let Some(src) = &req.source {
         if !is_valid_cidr(src) {
@@ -273,12 +398,14 @@ pub async fn create_rule(
         protocol: req.protocol,
         source_port: req.source_port,
         destination_port: req.destination_port,
+        ip_family: req.ip_family,
         action: req.action,
         direction: req.direction,
         interface: req.interface,
         log: req.log,
         enabled: req.enabled,
         schedule: req.schedule,
+        state_limits: req.state_limits,
     };
 
     info!(
@@ -347,6 +474,7 @@ pub async fn update_rule(
         .load_system_settings()
         .map_err(NftError::StorageError)?
         .ipv6_enabled;
+    validate_rule_request(&req, ipv6_enabled)?;
 
     if let Some(src) = &req.source {
         if !is_valid_cidr(src) {
@@ -405,12 +533,14 @@ pub async fn update_rule(
         protocol: req.protocol,
         source_port: req.source_port,
         destination_port: req.destination_port,
+        ip_family: req.ip_family,
         action: req.action,
         direction: req.direction,
         interface: req.interface,
         log: req.log,
         enabled: req.enabled,
         schedule: req.schedule,
+        state_limits: req.state_limits,
     };
 
     info!(
@@ -459,6 +589,62 @@ pub async fn update_rule(
     info!(id = %id, "firewall: nftables engine apply complete after update");
 
     Ok(Json(updated))
+}
+
+/// Handler: clone an existing firewall rule by UUID.
+///
+/// Copies all rule fields, assigns a fresh id, appends " (copy)" to the
+/// description when present, persists, and re-applies the nftables ruleset.
+pub async fn clone_rule(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, NftError> {
+    let cloned = {
+        let mut rules = state.firewall_rules.write().await;
+        let original = rules
+            .iter()
+            .find(|rule| rule.id == id)
+            .cloned()
+            .ok_or_else(|| NftError::NotFound(id.to_string()))?;
+
+        let mut cloned = original;
+        cloned.id = Uuid::new_v4();
+        cloned.description = cloned
+            .description
+            .map(|description| format!("{description} (copy)"));
+
+        rules.push(cloned.clone());
+
+        if let Err(e) = state.config_store.save_firewall_rules(rules.clone()) {
+            rules.pop();
+            return Err(NftError::StorageError(e));
+        }
+
+        cloned
+    };
+
+    info!(source_id = %id, cloned_id = %cloned.id, "firewall: rule cloned");
+
+    let full_cfg = state
+        .config_store
+        .load()
+        .map_err(NftError::StorageError)?;
+
+    {
+        let rules = state.firewall_rules.read().await;
+        apply_rules(
+            &rules,
+            full_cfg.nat.as_ref(),
+            &full_cfg.firewall_aliases,
+            full_cfg.firewall_settings.as_ref(),
+            config_ipv6_enabled(&full_cfg),
+        )
+        .await?;
+    }
+
+    info!(id = %cloned.id, "firewall: nftables engine apply complete after clone");
+
+    Ok((StatusCode::CREATED, Json(cloned)))
 }
 
 /// Handler: return per-rule hit counters read from nftables.
@@ -520,6 +706,7 @@ pub async fn create_interface_rule(
         .load_system_settings()
         .map_err(NftError::StorageError)?
         .ipv6_enabled;
+    validate_rule_request(&req, ipv6_enabled)?;
 
     if let Some(src) = &req.source {
         if !is_valid_cidr(src) {
@@ -590,12 +777,14 @@ pub async fn create_interface_rule(
         protocol: req.protocol,
         source_port: req.source_port,
         destination_port: req.destination_port,
+        ip_family: req.ip_family,
         action: req.action,
         direction: req.direction,
         interface: Some(interface_name.clone()),
         log: req.log,
         enabled: req.enabled,
         schedule: req.schedule,
+        state_limits: req.state_limits,
     };
 
     info!(

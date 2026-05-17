@@ -371,7 +371,13 @@ pub async fn status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::{password::hash_password_with_params, storage::save_user, model::User};
+    use crate::auth::{model::User, password::hash_password_with_params, storage::save_user};
+
+    fn test_state(dir: &Path) -> Arc<AppState> {
+        let config_dir = dir.join("config");
+        let (state, _) = AppState::with_config_dir(config_dir);
+        Arc::new(state)
+    }
 
     /// Write an admin record with a fast-hashed password to `path`.
     fn seed_admin(path: &Path, password: &str) {
@@ -386,13 +392,14 @@ mod tests {
         let admin_path = dir.path().join("admin.json");
         let key_path = dir.path().join("session.key");
         seed_admin(&admin_path, "correct-password");
+        let state = test_state(dir.path());
 
         let req = LoginRequest {
             username: "admin".into(),
             password: "correct-password".into(),
         };
 
-        let resp = login_with_paths(req, &admin_path, &key_path)
+        let resp = login_with_paths(state, req, &admin_path, &key_path)
             .await
             .expect("login must succeed");
 
@@ -406,13 +413,14 @@ mod tests {
         let admin_path = dir.path().join("admin.json");
         let key_path = dir.path().join("session.key");
         seed_admin(&admin_path, "correct-password");
+        let state = test_state(dir.path());
 
         let req = LoginRequest {
             username: "admin".into(),
             password: "wrong-password".into(),
         };
 
-        let result = login_with_paths(req, &admin_path, &key_path).await;
+        let result = login_with_paths(state, req, &admin_path, &key_path).await;
         assert!(
             matches!(result, Err(AuthApiError::InvalidCredentials)),
             "wrong password must be rejected"
@@ -424,13 +432,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let admin_path = dir.path().join("admin.json"); // no file
         let key_path = dir.path().join("session.key");
+        let state = test_state(dir.path());
 
         let req = LoginRequest {
             username: "ghost".into(),
             password: "any".into(),
         };
 
-        let result = login_with_paths(req, &admin_path, &key_path).await;
+        let result = login_with_paths(state, req, &admin_path, &key_path).await;
         assert!(matches!(result, Err(AuthApiError::InvalidCredentials)));
     }
 
@@ -441,12 +450,13 @@ mod tests {
         seed_admin(&admin_path, "old-password");
 
         let user = AuthenticatedUser { username: "admin".into() };
+        let sec = crate::config::models::AdminSecuritySettings::default();
         let req = ChangePasswordRequest {
             old_password: "old-password".into(),
             new_password: "new-password-123".into(),
         };
 
-        change_password_with_path(user, req, &admin_path)
+        change_password_with_path(user, req, &sec, &admin_path)
             .await
             .expect("change password must succeed");
 
@@ -462,12 +472,13 @@ mod tests {
         seed_admin(&admin_path, "correct-old-password");
 
         let user = AuthenticatedUser { username: "admin".into() };
+        let sec = crate::config::models::AdminSecuritySettings::default();
         let req = ChangePasswordRequest {
             old_password: "wrong-old".into(),
             new_password: "new-password-123".into(),
         };
 
-        let result = change_password_with_path(user, req, &admin_path).await;
+        let result = change_password_with_path(user, req, &sec, &admin_path).await;
         assert!(matches!(result, Err(AuthApiError::InvalidCredentials)));
     }
 
@@ -478,12 +489,17 @@ mod tests {
         seed_admin(&admin_path, "old-password");
 
         let user = AuthenticatedUser { username: "admin".into() };
+        let sec = crate::config::models::AdminSecuritySettings::default();
         let req = ChangePasswordRequest {
             old_password: "old-password".into(),
             new_password: "short".into(),
         };
 
-        let result = change_password_with_path(user, req, &admin_path).await;
-        assert!(matches!(result, Err(AuthApiError::BadRequest(_))));
+        let result = change_password_with_path(user, req, &sec, &admin_path).await;
+        match result {
+            Err(AuthApiError::BadRequest(_)) => {}
+            Err(other) => panic!("expected bad request, got {other}"),
+            Ok(_) => panic!("short password should be rejected"),
+        };
     }
 }

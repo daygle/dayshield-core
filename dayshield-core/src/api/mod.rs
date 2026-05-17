@@ -72,8 +72,10 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `DELETE /gateways/{name}`                             - delete a gateway
 /// - `GET  /firewall/rules`                                - list firewall rules
 /// - `POST /firewall/rules`                                - add a new firewall rule
+/// - `POST /firewall/rules/{id}/clone`                     - clone a firewall rule
 /// - `GET  /firewall/aliases`                              - list firewall aliases
 /// - `POST /firewall/aliases`                              - create a firewall alias
+/// - `PUT  /firewall/aliases/{name}`                       - update a firewall alias
 /// - `DELETE /firewall/aliases/{name}`                     - delete a firewall alias
 /// - `GET  /dns/config`                                    - get DNS (Unbound) configuration
 /// - `POST /dns/config`                                    - update DNS (Unbound) configuration
@@ -188,6 +190,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Firewall rules
         .route("/firewall/rules", get(firewall::list_rules))
         .route("/firewall/rules", post(firewall::create_rule))
+        .route("/firewall/rules/{id}/clone", post(firewall::clone_rule))
         .route("/firewall/rules/{id}", put(firewall::update_rule))
         .route("/firewall/rules/{id}", delete(firewall::delete_rule))
         .route("/firewall/settings", get(firewall::get_settings))
@@ -200,6 +203,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Firewall aliases
         .route("/firewall/aliases", get(aliases::list_aliases))
         .route("/firewall/aliases", post(aliases::create_alias))
+        .route("/firewall/aliases/{name}", put(aliases::update_alias))
         .route("/firewall/aliases/{name}", delete(aliases::delete_alias))
         // DNS config
         .route("/dns/config", get(dns::get_config))

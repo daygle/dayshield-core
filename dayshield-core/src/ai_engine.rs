@@ -821,6 +821,12 @@ impl AiRuntime {
                 log: true,
                 enabled: true,
                 schedule: None,
+                ip_family: if block.ip.contains(':') {
+                    crate::config::models::FirewallAddressFamily::Ipv6
+                } else {
+                    crate::config::models::FirewallAddressFamily::Ipv4
+                },
+                state_limits: crate::config::models::FirewallStateLimits::default(),
             });
         }
 
@@ -992,6 +998,8 @@ mod tests {
             risk_score_block_threshold: 0.8,
             escalation_window_seconds: 300,
             block_duration_seconds: 60,
+            training_enabled: true,
+            model_learning_rate: 0.25,
         };
 
         assert_eq!(compute_escalated_block(1, &policy), (Some(60), false, false));

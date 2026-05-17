@@ -104,7 +104,7 @@ pub struct CreateNatRuleRequest {
     #[serde(default)]
     pub address_family: AddressFamily,
     #[serde(default)]
-    pub priority: i32,
+    pub priority: Option<i32>,
     #[serde(default)]
     pub log: bool,
     #[serde(default = "default_true")]
@@ -123,6 +123,16 @@ fn config_ipv6_enabled(config: &SystemConfig) -> bool {
         .as_ref()
         .map(|settings| settings.ipv6_enabled)
         .unwrap_or(false)
+}
+
+fn next_nat_priority(config: &NatConfig) -> i32 {
+    config
+        .rules
+        .iter()
+        .map(|rule| rule.priority)
+        .max()
+        .map(|priority| priority.saturating_add(10))
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -234,6 +244,14 @@ pub async fn create_rule(
         .map_err(NatError::StorageError)?
         .ipv6_enabled;
 
+    // Load current config before building the rule so hidden UI priority can
+    // still produce deterministic ordering.
+    let mut cfg = state
+        .config_store
+        .load_nat_config()
+        .map_err(NatError::StorageError)?
+        .unwrap_or_default();
+
     let rule = NatRule {
         id: Uuid::new_v4(),
         enabled: req.enabled,
@@ -248,7 +266,7 @@ pub async fn create_rule(
         translation: req.translation,
         nat_reflection: req.nat_reflection,
         address_family: req.address_family,
-        priority: req.priority,
+        priority: req.priority.unwrap_or_else(|| next_nat_priority(&cfg)),
         log: req.log,
         auto_firewall_rule: req.auto_firewall_rule,
     };
@@ -258,13 +276,6 @@ pub async fn create_rule(
         warn!(id = %rule.id, error = %msg, "nat: rule validation failed");
         return Err(NatError::ValidationFailed(msg));
     }
-
-    // Load current config, append, and save.
-    let mut cfg = state
-        .config_store
-        .load_nat_config()
-        .map_err(NatError::StorageError)?
-        .unwrap_or_default();
 
     cfg.rules.push(rule.clone());
 
@@ -359,6 +370,20 @@ pub async fn update_rule(
         .map_err(NatError::StorageError)?
         .ipv6_enabled;
 
+    let mut cfg = state
+        .config_store
+        .load_nat_config()
+        .map_err(NatError::StorageError)?
+        .unwrap_or_default();
+
+    let pos = cfg
+        .rules
+        .iter()
+        .position(|r| r.id == id)
+        .ok_or(NatError::NotFound(id))?;
+
+    let priority = req.priority.unwrap_or(cfg.rules[pos].priority);
+
     let rule = NatRule {
         id,
         enabled: req.enabled,
@@ -373,7 +398,7 @@ pub async fn update_rule(
         translation: req.translation,
         nat_reflection: req.nat_reflection,
         address_family: req.address_family,
-        priority: req.priority,
+        priority,
         log: req.log,
         auto_firewall_rule: req.auto_firewall_rule,
     };
@@ -382,18 +407,6 @@ pub async fn update_rule(
         warn!(id = %id, error = %msg, "nat: rule validation failed");
         return Err(NatError::ValidationFailed(msg));
     }
-
-    let mut cfg = state
-        .config_store
-        .load_nat_config()
-        .map_err(NatError::StorageError)?
-        .unwrap_or_default();
-
-    let pos = cfg
-        .rules
-        .iter()
-        .position(|r| r.id == id)
-        .ok_or(NatError::NotFound(id))?;
 
     cfg.rules[pos] = rule.clone();
 

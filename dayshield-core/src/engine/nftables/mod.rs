@@ -18,9 +18,9 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::models::{
-    Action, AddressFamily, AliasType, FirewallAlias, FirewallChainPolicy, FirewallDirection, FirewallRule,
-    FirewallSchedule, FirewallSettings, LogPosition, NatConfig, NatProtocol, NatRuleType, OutboundMode,
-    Protocol,
+    Action, AddressFamily, AliasType, FirewallAddressFamily, FirewallAlias, FirewallChainPolicy,
+    FirewallDirection, FirewallRule, FirewallSchedule, FirewallSettings, LogPosition, NatConfig,
+    NatProtocol, NatRuleType, OutboundMode, Protocol,
 };
 
 const DEFAULT_BLOCK_LOG_RATE_PER_SECOND: u32 = 10;
@@ -648,6 +648,13 @@ fn chain_policy_str(policy: &FirewallChainPolicy) -> &'static str {
 }
 
 fn firewall_rule_uses_ipv6(rule: &FirewallRule) -> bool {
+    if matches!(rule.ip_family, FirewallAddressFamily::Ipv6 | FirewallAddressFamily::Ipv4Ipv6) {
+        return matches!(rule.ip_family, FirewallAddressFamily::Ipv6)
+            || rule.source.as_deref().map_or(false, |value| value.contains(':'))
+            || rule.destination.as_deref().map_or(false, |value| value.contains(':'))
+            || matches!(rule.protocol, Some(Protocol::Icmpv6));
+    }
+
     rule.source.as_deref().map_or(false, |value| value.contains(':'))
         || rule.destination.as_deref().map_or(false, |value| value.contains(':'))
         || matches!(rule.protocol, Some(Protocol::Icmpv6))
@@ -664,6 +671,12 @@ fn format_rule(rule: &FirewallRule, chain: FilterChain, log_position: &LogPositi
             FilterChain::Input | FilterChain::Forward => "iifname",
         };
         parts.push(format!("{} \"{}\"", matcher, iif));
+    }
+
+    match rule.ip_family {
+        FirewallAddressFamily::Ipv4 => parts.push("meta nfproto ipv4".to_string()),
+        FirewallAddressFamily::Ipv6 => parts.push("meta nfproto ipv6".to_string()),
+        FirewallAddressFamily::Ipv4Ipv6 => {}
     }
 
     // Resolve the l4 protocol string (None for "any").
@@ -712,6 +725,14 @@ fn format_rule(rule: &FirewallRule, chain: FilterChain, log_position: &LogPositi
         parts.push(format!("{} dport {}", p, dport));
     }
 
+    if matches!(rule.action, Action::Accept | Action::Log) {
+        if let Some(rate) = rule.state_limits.max_new_connections {
+            let seconds = rule.state_limits.max_new_connections_seconds.unwrap_or(1);
+            parts.push("ct state new".to_string());
+            parts.push(format!("limit rate {}", nft_rate(rate, seconds)));
+        }
+    }
+
     // Optional log statement before the verdict.
     if rule.log && matches!(log_position, LogPosition::Before) {
         parts.push(format!("log prefix \"dayshield[{}]: \"", rule.id));
@@ -734,6 +755,16 @@ fn format_rule(rule: &FirewallRule, chain: FilterChain, log_position: &LogPositi
     parts.push(action.to_string());
 
     parts.join(" ")
+}
+
+fn nft_rate(count: u32, seconds: u32) -> String {
+    match seconds {
+        0 | 1 => format!("{count}/second"),
+        60 => format!("{count}/minute"),
+        3600 => format!("{count}/hour"),
+        86400 => format!("{count}/day"),
+        window => format!("{}/second", count.div_ceil(window)),
+    }
 }
 
 fn rule_targets_chain(rule: &FirewallRule, chain: FilterChain) -> bool {
@@ -1220,6 +1251,8 @@ mod tests {
             log: false,
             enabled: true,
             schedule: None,
+            ip_family: FirewallAddressFamily::Ipv4Ipv6,
+            state_limits: crate::config::models::FirewallStateLimits::default(),
         }
     }
 

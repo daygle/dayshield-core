@@ -272,6 +272,7 @@ fn restore_subsystem(store: &ConfigStore, sub: &Subsystem, bytes: &[u8]) -> Resu
 mod tests {
     use super::*;
     use crate::backup::create::create_backup;
+    use crate::backup::model::BackupType;
     use tempfile::TempDir;
 
     fn setup() -> (TempDir, TempDir, ConfigStore) {
@@ -286,7 +287,7 @@ mod tests {
         let (_cfg, backup_dir, store) = setup();
 
         let (path, _meta) =
-            create_backup(&store, None, false, None, backup_dir.path()).unwrap();
+            create_backup(&store, None, false, None, backup_dir.path(), BackupType::Manual).unwrap();
         let bytes = std::fs::read(&path).unwrap();
 
         let meta = restore_backup(&store, &bytes, None, None).unwrap();
@@ -297,8 +298,15 @@ mod tests {
     fn roundtrip_encrypted() {
         let (_cfg, backup_dir, store) = setup();
 
-        let (path, _meta) =
-            create_backup(&store, None, true, Some("hunter2"), backup_dir.path()).unwrap();
+        let (path, _meta) = create_backup(
+            &store,
+            None,
+            true,
+            Some("hunter2"),
+            backup_dir.path(),
+            BackupType::Manual,
+        )
+        .unwrap();
         let bytes = std::fs::read(&path).unwrap();
 
         let meta = restore_backup(&store, &bytes, Some("hunter2"), None).unwrap();
@@ -309,8 +317,15 @@ mod tests {
     fn wrong_passphrase_fails() {
         let (_cfg, backup_dir, store) = setup();
 
-        let (path, _meta) =
-            create_backup(&store, None, true, Some("correct"), backup_dir.path()).unwrap();
+        let (path, _meta) = create_backup(
+            &store,
+            None,
+            true,
+            Some("correct"),
+            backup_dir.path(),
+            BackupType::Manual,
+        )
+        .unwrap();
         let bytes = std::fs::read(&path).unwrap();
 
         assert!(restore_backup(&store, &bytes, Some("wrong"), None).is_err());
@@ -321,7 +336,7 @@ mod tests {
         let (_cfg, backup_dir, store) = setup();
 
         let (path, _meta) =
-            create_backup(&store, None, false, None, backup_dir.path()).unwrap();
+            create_backup(&store, None, false, None, backup_dir.path(), BackupType::Manual).unwrap();
         let mut bytes = std::fs::read(&path).unwrap();
 
         // Flip a byte somewhere in the config section (past the first 1024 bytes).
@@ -343,6 +358,7 @@ mod tests {
             false,
             None,
             backup_dir.path(),
+            BackupType::Manual,
         )
         .unwrap();
         let bytes = std::fs::read(&path).unwrap();

@@ -2,6 +2,7 @@
 //!
 //! - `GET  /firewall/aliases`       - list all aliases
 //! - `POST /firewall/aliases`       - create a new alias
+//! - `PUT  /firewall/aliases/{name}` - update an existing alias
 //! - `DELETE /firewall/aliases/{name}` - remove an alias by name
 
 use std::sync::Arc;
@@ -76,6 +77,19 @@ pub struct CreateAliasRequest {
     pub values: Vec<String>,
     pub ttl: Option<u64>,
     pub enabled: bool,
+}
+
+/// Request body for `PUT /firewall/aliases/{name}`.
+#[derive(serde::Deserialize)]
+pub struct UpdateAliasRequest {
+    /// Optional copy of the path name. Alias renames are intentionally not
+    /// supported because firewall rules reference aliases by name.
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub alias_type: Option<AliasType>,
+    pub values: Option<Vec<String>>,
+    pub ttl: Option<u64>,
+    pub enabled: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -156,29 +170,89 @@ pub async fn create_alias(
 
     // --- Apply -------------------------------------------------------------
 
-    let full_cfg = state
-        .config_store
-        .load()
-        .map_err(AliasError::StorageError)?;
-    let fw_rules = full_cfg.firewall_rules.clone();
-
-    apply_rules(
-        &fw_rules,
-        full_cfg.nat.as_ref(),
-        &full_cfg.firewall_aliases,
-        full_cfg.firewall_settings.as_ref(),
-        full_cfg
-            .system_settings
-            .as_ref()
-            .map(|settings| settings.ipv6_enabled)
-            .unwrap_or(false),
-    )
-        .await
-        .map_err(|e| AliasError::EngineError(e.to_string()))?;
+    apply_current_rules(&state).await?;
 
     info!(name = %alias.name, "aliases: nftables engine apply complete");
 
     Ok((StatusCode::CREATED, Json(alias)))
+}
+
+/// Handler: update an existing firewall alias by name.
+///
+/// Alias names are immutable so existing firewall rules keep referring to the
+/// same set. The editable fields are description, type, values, TTL, and
+/// enabled state.
+pub async fn update_alias(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(req): Json<UpdateAliasRequest>,
+) -> Result<impl IntoResponse, AliasError> {
+    if !validate_alias_name(&name) {
+        return Err(AliasError::ValidationFailed(format!(
+            "invalid alias name {:?}: must be 1-63 chars, start with a letter or _, \
+             contain only [A-Za-z0-9_]",
+            name
+        )));
+    }
+
+    if let Some(req_name) = &req.name {
+        if req_name != &name {
+            return Err(AliasError::ValidationFailed(format!(
+                "alias rename is not supported; path name {:?} does not match body name {:?}",
+                name, req_name
+            )));
+        }
+    }
+
+    let mut aliases = state
+        .config_store
+        .load_firewall_aliases()
+        .map_err(AliasError::StorageError)?;
+
+    let alias = aliases
+        .iter_mut()
+        .find(|alias| alias.name == name)
+        .ok_or_else(|| AliasError::NotFound(name.clone()))?;
+
+    if let Some(description) = req.description {
+        alias.description = if description.trim().is_empty() {
+            None
+        } else {
+            Some(description)
+        };
+    }
+    if let Some(alias_type) = req.alias_type {
+        alias.alias_type = alias_type;
+    }
+    if let Some(values) = req.values {
+        alias.values = values;
+    }
+    if let Some(ttl) = req.ttl {
+        alias.ttl = Some(ttl);
+    }
+    if let Some(enabled) = req.enabled {
+        alias.enabled = enabled;
+    }
+
+    if let Err(msg) = validate_alias_values(alias) {
+        warn!(name = %alias.name, "aliases: invalid updated alias values");
+        return Err(AliasError::ValidationFailed(msg));
+    }
+
+    let updated = alias.clone();
+
+    state
+        .config_store
+        .save_firewall_aliases(aliases)
+        .map_err(AliasError::StorageError)?;
+
+    info!(name = %updated.name, kind = ?updated.alias_type, "aliases: updated alias");
+
+    apply_current_rules(&state).await?;
+
+    info!(name = %updated.name, "aliases: nftables engine apply complete");
+
+    Ok(Json(updated))
 }
 
 /// Handler: delete a firewall alias by name.
@@ -209,6 +283,12 @@ pub async fn delete_alias(
     info!(name = %name, "aliases: deleted alias");
 
     // Re-apply nftables ruleset without the removed alias.
+    apply_current_rules(&state).await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn apply_current_rules(state: &Arc<AppState>) -> Result<(), AliasError> {
     let full_cfg = state
         .config_store
         .load()
@@ -226,8 +306,8 @@ pub async fn delete_alias(
             .map(|settings| settings.ipv6_enabled)
             .unwrap_or(false),
     )
-        .await
+    .await
         .map_err(|e| AliasError::EngineError(e.to_string()))?;
 
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
 }

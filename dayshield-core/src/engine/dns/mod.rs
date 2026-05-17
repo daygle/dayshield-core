@@ -435,7 +435,7 @@ async fn start_unbound() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::models::{DnsLocalRecord};
+    use crate::config::models::DnsLocalRecord;
 
     fn base_config() -> DnsConfig {
         DnsConfig {
@@ -453,8 +453,11 @@ mod tests {
         DotConfig {
             enabled: true,
             port: 853,
-            cert_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n".into(),
-            key_pem: "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n".into(),
+            lan_only: true,
+            cert_pem: Some("-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n".to_string()),
+            key_pem: Some("-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n".to_string()),
+            acme_domain: None,
+            acme_cert_storage_path: None,
         }
     }
 
@@ -531,6 +534,16 @@ mod tests {
     }
 
     #[test]
+    fn generate_config_with_ipv6_includes_default_ipv6_listen() {
+        let mut cfg = base_config();
+        cfg.listen_addresses.clear();
+        let out = generate_config_with_ipv6(&cfg, None, true);
+        assert!(out.contains("interface: 0.0.0.0"));
+        assert!(out.contains("interface: ::0"));
+        assert!(out.contains("do-ip6: yes"));
+    }
+
+    #[test]
     fn generate_config_dot_enabled() {
         let cfg = base_config();
         let dot = dot_config();
@@ -565,6 +578,16 @@ mod tests {
         let out = generate_config(&cfg, Some(&dot));
         assert!(out.contains("ssl-port: 8853"));
         assert!(out.contains("interface: 0.0.0.0@8853"));
+    }
+
+    #[test]
+    fn generate_config_dot_adds_ipv6_listener_when_ipv6_enabled() {
+        let cfg = base_config();
+        let dot = dot_config();
+        let out = generate_config_with_ipv6(&cfg, Some(&dot), true);
+        assert!(out.contains("ssl-port: 853"));
+        assert!(out.contains("interface: 0.0.0.0@853"));
+        assert!(out.contains("interface: ::0@853"));
     }
 }
 

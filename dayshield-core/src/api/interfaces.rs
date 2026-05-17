@@ -29,7 +29,6 @@ use crate::{
         apply_interface_with_ipv6, list_kernel_interfaces, refresh_router_advertisements,
         InterfaceError, KernelInterface,
     },
-    engine::nftables::apply_rules,
     state::AppState,
 };
 
@@ -146,24 +145,9 @@ fn sync_auto_gateways_from_interfaces(
 }
 
 async fn apply_full_nftables_rules(state: &Arc<AppState>) -> Result<(), InterfaceError> {
-    let full_cfg = state
-        .config_store
-        .load()
-        .map_err(InterfaceError::StorageError)?;
-    let fw_rules = full_cfg.firewall_rules.clone();
-    apply_rules(
-        &fw_rules,
-        full_cfg.nat.as_ref(),
-        &full_cfg.firewall_aliases,
-        full_cfg.firewall_settings.as_ref(),
-        full_cfg
-            .system_settings
-            .as_ref()
-            .map(|settings| settings.ipv6_enabled)
-            .unwrap_or(false),
-    )
-    .await
-    .map_err(|e| InterfaceError::ApplyFailed(e.to_string()))
+    crate::captive_portal::apply_current_ruleset_nft(&state.config_store)
+        .await
+        .map_err(|e| InterfaceError::ApplyFailed(e.to_string()))
 }
 
 // ---------------------------------------------------------------------------

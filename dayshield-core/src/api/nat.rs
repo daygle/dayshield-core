@@ -25,9 +25,8 @@ use uuid::Uuid;
 use crate::{
     config::models::{
         validate_nat_config_with_ipv6, validate_nat_rule_with_ipv6, AddressFamily, NatConfig,
-        NatProtocol, NatRule, NatRuleType, NatTranslation, OutboundMode, SystemConfig,
+        NatProtocol, NatRule, NatRuleType, NatTranslation, OutboundMode,
     },
-    engine::nftables::{apply_rules, NftError},
     state::AppState,
 };
 
@@ -117,14 +116,6 @@ fn default_true() -> bool {
     true
 }
 
-fn config_ipv6_enabled(config: &SystemConfig) -> bool {
-    config
-        .system_settings
-        .as_ref()
-        .map(|settings| settings.ipv6_enabled)
-        .unwrap_or(false)
-}
-
 fn next_nat_priority(config: &NatConfig) -> i32 {
     config
         .rules
@@ -195,18 +186,7 @@ pub async fn put_config(
     );
 
     // Re-apply the full ruleset.
-    let full_cfg = state
-        .config_store
-        .load()
-        .map_err(NatError::StorageError)?;
-    let fw_rules = full_cfg.firewall_rules.clone();
-    apply_rules(
-        &fw_rules,
-        full_cfg.nat.as_ref(),
-        &full_cfg.firewall_aliases,
-        full_cfg.firewall_settings.as_ref(),
-        config_ipv6_enabled(&full_cfg),
-    )
+    crate::captive_portal::apply_current_ruleset_nft(&state.config_store)
         .await
         .map_err(|e| NatError::EngineError(e.to_string()))?;
 
@@ -287,18 +267,7 @@ pub async fn create_rule(
     info!(id = %rule.id, rule_type = ?rule.rule_type, "nat: rule created");
 
     // Re-apply the full ruleset.
-    let full_cfg = state
-        .config_store
-        .load()
-        .map_err(NatError::StorageError)?;
-    let fw_rules = full_cfg.firewall_rules.clone();
-    apply_rules(
-        &fw_rules,
-        full_cfg.nat.as_ref(),
-        &full_cfg.firewall_aliases,
-        full_cfg.firewall_settings.as_ref(),
-        config_ipv6_enabled(&full_cfg),
-    )
+    crate::captive_portal::apply_current_ruleset_nft(&state.config_store)
         .await
         .map_err(|e| NatError::EngineError(e.to_string()))?;
 
@@ -336,18 +305,7 @@ pub async fn delete_rule(
     info!(%id, "nat: rule deleted");
 
     // Re-apply the full ruleset.
-    let full_cfg = state
-        .config_store
-        .load()
-        .map_err(NatError::StorageError)?;
-    let fw_rules = full_cfg.firewall_rules.clone();
-    apply_rules(
-        &fw_rules,
-        full_cfg.nat.as_ref(),
-        &full_cfg.firewall_aliases,
-        full_cfg.firewall_settings.as_ref(),
-        config_ipv6_enabled(&full_cfg),
-    )
+    crate::captive_portal::apply_current_ruleset_nft(&state.config_store)
         .await
         .map_err(|e| NatError::EngineError(e.to_string()))?;
 
@@ -417,18 +375,7 @@ pub async fn update_rule(
 
     info!(%id, rule_type = ?rule.rule_type, "nat: rule updated");
 
-    let full_cfg = state
-        .config_store
-        .load()
-        .map_err(NatError::StorageError)?;
-    let fw_rules = full_cfg.firewall_rules.clone();
-    apply_rules(
-        &fw_rules,
-        full_cfg.nat.as_ref(),
-        &full_cfg.firewall_aliases,
-        full_cfg.firewall_settings.as_ref(),
-        config_ipv6_enabled(&full_cfg),
-    )
+    crate::captive_portal::apply_current_ruleset_nft(&state.config_store)
         .await
         .map_err(|e| NatError::EngineError(e.to_string()))?;
 
@@ -465,13 +412,14 @@ mod tests {
     use crate::state::AppState;
 
     fn test_router() -> Router {
-        let tmp = tempfile::TempDir::new().unwrap().into_path();
+        let tmp = std::env::temp_dir().join(format!("dayshield-nat-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
         let (state, _rx) = AppState::with_config_dir(tmp);
         let state = std::sync::Arc::new(state);
         Router::new()
             .route("/nat/config", get(get_config).put(put_config))
             .route("/nat/rules", get(list_rules).post(create_rule))
-            .route("/nat/rules/:id", delete(delete_rule))
+            .route("/nat/rules/:id", delete(delete_rule).put(update_rule))
             .with_state(state)
     }
 
@@ -564,6 +512,37 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn update_rule_returns_404_when_not_found() {
+        let app = test_router();
+        let id = Uuid::new_v4();
+        let payload = serde_json::json!({
+            "enabled": true,
+            "rule_type": "dnat",
+            "interface": "eth0",
+            "protocol": "tcp",
+            "destination_port": 443,
+            "translation": { "address": "10.0.0.2", "port": 443 },
+            "address_family": "ipv4",
+            "log": false,
+            "auto_firewall_rule": false
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/nat/rules/{}", id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 

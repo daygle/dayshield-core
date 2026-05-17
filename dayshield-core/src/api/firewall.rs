@@ -33,9 +33,9 @@ use crate::{
     config::models::{
         ensure_ipv6_allowed, is_valid_cidr, is_valid_interface_name, is_valid_port, Action,
         FirewallAddressFamily, FirewallDirection, FirewallRule, FirewallSchedule,
-        FirewallSettings, FirewallStateLimits, Protocol, SystemConfig,
+        FirewallSettings, FirewallStateLimits, Protocol,
     },
-    engine::nftables::{apply_rules, get_rule_stats, NftError},
+    engine::nftables::{get_rule_stats, NftError},
     state::AppState,
 };
 
@@ -138,22 +138,7 @@ pub async fn update_settings(
         .save_firewall_settings(settings.clone())
         .map_err(NftError::StorageError)?;
 
-    let full_cfg = state
-        .config_store
-        .load()
-        .map_err(NftError::StorageError)?;
-
-    {
-        let rules = state.firewall_rules.read().await;
-        apply_rules(
-            &rules,
-            full_cfg.nat.as_ref(),
-            &full_cfg.firewall_aliases,
-            full_cfg.firewall_settings.as_ref(),
-            config_ipv6_enabled(&full_cfg),
-        )
-        .await?;
-    }
+    crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await?;
 
     Ok(Json(settings))
 }
@@ -185,14 +170,6 @@ pub struct CreateRuleRequest {
 fn default_true() -> bool { true }
 
 fn default_direction() -> FirewallDirection { FirewallDirection::Forward }
-
-fn config_ipv6_enabled(config: &SystemConfig) -> bool {
-    config
-        .system_settings
-        .as_ref()
-        .map(|settings| settings.ipv6_enabled)
-        .unwrap_or(false)
-}
 
 fn validate_rule_request(req: &CreateRuleRequest, ipv6_enabled: bool) -> Result<(), NftError> {
     if matches!(req.ip_family, FirewallAddressFamily::Ipv6) && !ipv6_enabled {
@@ -435,23 +412,7 @@ pub async fn create_rule(
 
     // --- Apply -------------------------------------------------------------
 
-    // Load current NAT rules and aliases so the full ruleset can be regenerated.
-    let full_cfg = state
-        .config_store
-        .load()
-        .map_err(NftError::StorageError)?;
-
-    {
-        let rules = state.firewall_rules.read().await;
-        apply_rules(
-            &rules,
-            full_cfg.nat.as_ref(),
-            &full_cfg.firewall_aliases,
-            full_cfg.firewall_settings.as_ref(),
-            config_ipv6_enabled(&full_cfg),
-        )
-        .await?;
-    }
+    crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await?;
 
     info!(id = %rule.id, "firewall: nftables engine apply complete");
 
@@ -569,22 +530,7 @@ pub async fn update_rule(
 
     // --- Apply -------------------------------------------------------------
 
-    let full_cfg = state
-        .config_store
-        .load()
-        .map_err(NftError::StorageError)?;
-
-    {
-        let rules = state.firewall_rules.read().await;
-        apply_rules(
-            &rules,
-            full_cfg.nat.as_ref(),
-            &full_cfg.firewall_aliases,
-            full_cfg.firewall_settings.as_ref(),
-            config_ipv6_enabled(&full_cfg),
-        )
-        .await?;
-    }
+    crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await?;
 
     info!(id = %id, "firewall: nftables engine apply complete after update");
 
@@ -625,22 +571,7 @@ pub async fn clone_rule(
 
     info!(source_id = %id, cloned_id = %cloned.id, "firewall: rule cloned");
 
-    let full_cfg = state
-        .config_store
-        .load()
-        .map_err(NftError::StorageError)?;
-
-    {
-        let rules = state.firewall_rules.read().await;
-        apply_rules(
-            &rules,
-            full_cfg.nat.as_ref(),
-            &full_cfg.firewall_aliases,
-            full_cfg.firewall_settings.as_ref(),
-            config_ipv6_enabled(&full_cfg),
-        )
-        .await?;
-    }
+    crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await?;
 
     info!(id = %cloned.id, "firewall: nftables engine apply complete after clone");
 
@@ -811,22 +742,7 @@ pub async fn create_interface_rule(
 
     // --- Apply -------------------------------------------------------------
 
-    let full_cfg = state
-        .config_store
-        .load()
-        .map_err(NftError::StorageError)?;
-
-    {
-        let rules = state.firewall_rules.read().await;
-        apply_rules(
-            &rules,
-            full_cfg.nat.as_ref(),
-            &full_cfg.firewall_aliases,
-            full_cfg.firewall_settings.as_ref(),
-            config_ipv6_enabled(&full_cfg),
-        )
-        .await?;
-    }
+    crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await?;
 
     info!(
         id = %rule.id,
@@ -870,22 +786,7 @@ pub async fn delete_interface_rule(
         "firewall: rule deleted"
     );
 
-    let full_cfg = state
-        .config_store
-        .load()
-        .map_err(NftError::StorageError)?;
-
-    {
-        let rules = state.firewall_rules.read().await;
-        apply_rules(
-            &rules,
-            full_cfg.nat.as_ref(),
-            &full_cfg.firewall_aliases,
-            full_cfg.firewall_settings.as_ref(),
-            config_ipv6_enabled(&full_cfg),
-        )
-        .await?;
-    }
+    crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await?;
 
     info!(
         id = %rule_id,
@@ -920,22 +821,7 @@ pub async fn delete_rule(
 
     info!(id = %id, "firewall: rule deleted");
 
-    let full_cfg = state
-        .config_store
-        .load()
-        .map_err(NftError::StorageError)?;
-
-    {
-        let rules = state.firewall_rules.read().await;
-        apply_rules(
-            &rules,
-            full_cfg.nat.as_ref(),
-            &full_cfg.firewall_aliases,
-            full_cfg.firewall_settings.as_ref(),
-            config_ipv6_enabled(&full_cfg),
-        )
-        .await?;
-    }
+    crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await?;
 
     info!(id = %id, "firewall: nftables engine apply complete after delete");
 

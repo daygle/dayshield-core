@@ -23,6 +23,7 @@
 //! - `GET  /auth/status`
 //! - `GET  /system/status`
 //! - `GET  /installer/*`
+//! - `/portal*`
 
 use std::path::Path;
 use std::sync::Arc;
@@ -55,6 +56,7 @@ const PUBLIC_PATHS: &[&str] = &[
     "/auth/status",
     "/system/status",
     "/installer/",
+    "/portal",
 ];
 
 /// Returns `true` if `path` is on the public allow-list.

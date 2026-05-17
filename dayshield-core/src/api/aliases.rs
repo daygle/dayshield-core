@@ -19,7 +19,6 @@ use crate::{
     config::models::{
         validate_alias_name, validate_alias_values, AliasType, FirewallAlias,
     },
-    engine::nftables::{apply_rules, NftError},
     state::AppState,
 };
 
@@ -289,24 +288,8 @@ pub async fn delete_alias(
 }
 
 async fn apply_current_rules(state: &Arc<AppState>) -> Result<(), AliasError> {
-    let full_cfg = state
-        .config_store
-        .load()
-        .map_err(AliasError::StorageError)?;
-    let fw_rules = full_cfg.firewall_rules.clone();
-
-    apply_rules(
-        &fw_rules,
-        full_cfg.nat.as_ref(),
-        &full_cfg.firewall_aliases,
-        full_cfg.firewall_settings.as_ref(),
-        full_cfg
-            .system_settings
-            .as_ref()
-            .map(|settings| settings.ipv6_enabled)
-            .unwrap_or(false),
-    )
-    .await
+    crate::captive_portal::apply_current_ruleset_nft(&state.config_store)
+        .await
         .map_err(|e| AliasError::EngineError(e.to_string()))?;
 
     Ok(())

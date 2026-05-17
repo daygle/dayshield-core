@@ -33,6 +33,9 @@ pub enum Subsystem {
     CrowdSec,
     /// ACME / TLS certificate configuration.
     Acme,
+    /// Captive portal configuration.
+    #[serde(rename = "captive_portal")]
+    CaptivePortal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +74,7 @@ impl Subsystem {
             Subsystem::Suricata,
             Subsystem::CrowdSec,
             Subsystem::Acme,
+            Subsystem::CaptivePortal,
         ]
     }
 
@@ -85,6 +89,7 @@ impl Subsystem {
             Subsystem::Suricata => "config/suricata.json",
             Subsystem::CrowdSec => "config/crowdsec.json",
             Subsystem::Acme => "config/acme.json",
+            Subsystem::CaptivePortal => "config/captive_portal.json",
         }
     }
 }

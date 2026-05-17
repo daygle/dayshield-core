@@ -135,6 +135,17 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `GET  /cloudflared/status`                            - get Cloudflared service status
 /// - `POST /cloudflared/restart`                           - restart the Cloudflared service
 /// - `GET  /cloudflared/logs`                              - get Cloudflared logs
+/// - `GET  /captive-portal/config`                         - get captive portal configuration
+/// - `PUT  /captive-portal/config`                         - update captive portal configuration
+/// - `GET  /captive-portal/status`                         - get captive portal runtime status
+/// - `GET  /captive-portal/sessions`                       - list captive portal sessions
+/// - `POST /captive-portal/sessions`                       - authorise a client session
+/// - `DELETE /captive-portal/sessions/{id}`                - revoke a captive portal session
+/// - `GET  /portal`                                        - public captive portal page
+/// - `GET  /portal/config`                                 - public captive portal display config
+/// - `GET  /portal/status`                                 - public captive portal session status
+/// - `POST /portal/authorize`                              - public captive portal authorisation
+/// - `POST /portal/logout`                                 - public captive portal logout
 /// - `GET  /nat/config`                                    - get NAT configuration
 /// - `PUT  /nat/config`                                    - update NAT configuration
 /// - `GET  /nat/rules`                                     - list NAT rules
@@ -356,6 +367,21 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/cloudflared/status", get(cloudflared::get_status))
         .route("/cloudflared/restart", post(cloudflared::restart_service))
         .route("/cloudflared/logs", get(cloudflared::get_logs))
+        // Captive Portal
+        .route("/captive-portal/config", get(crate::captive_portal::get_admin_config))
+        .route("/captive-portal/config", put(crate::captive_portal::update_admin_config))
+        .route("/captive-portal/status", get(crate::captive_portal::get_admin_status))
+        .route("/captive-portal/sessions", get(crate::captive_portal::list_admin_sessions))
+        .route("/captive-portal/sessions", post(crate::captive_portal::create_admin_session))
+        .route(
+            "/captive-portal/sessions/{id}",
+            delete(crate::captive_portal::revoke_admin_session),
+        )
+        .route("/portal", get(crate::captive_portal::portal_page))
+        .route("/portal/config", get(crate::captive_portal::public_config))
+        .route("/portal/status", get(crate::captive_portal::public_status))
+        .route("/portal/authorize", post(crate::captive_portal::public_authorize))
+        .route("/portal/logout", post(crate::captive_portal::public_logout))
         // AI threat events / blocking
         .route("/api/ai/threats", get(ai::list_threats))
         .route("/api/ai/threats/{id}", get(ai::get_threat))

@@ -260,6 +260,16 @@ fn restore_subsystem(store: &ConfigStore, sub: &Subsystem, bytes: &[u8]) -> Resu
                     .context("failed to save ACME config")?;
             }
         }
+        Subsystem::CaptivePortal => {
+            let captive_portal: Option<crate::config::models::CaptivePortalConfig> =
+                serde_json::from_slice(bytes)
+                    .context("failed to parse captive_portal.json")?;
+            if let Some(cfg) = captive_portal {
+                store
+                    .save_captive_portal_config(cfg)
+                    .context("failed to save Captive Portal config")?;
+            }
+        }
     }
     Ok(())
 }

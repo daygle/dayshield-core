@@ -27,7 +27,6 @@ use crate::{
         dns::apply_config_with_ipv6 as apply_dns_config,
         interfaces::refresh_router_advertisements,
         ipv6::apply_ipv6_setting,
-        nftables::apply_rules,
     },
     state::AppState,
     update::{self, UpdateComponent, UpdateSettings},
@@ -130,15 +129,9 @@ pub async fn update_config(
             .load()
             .map_err(SystemApiError::StorageError)?;
 
-        apply_rules(
-            &full_cfg.firewall_rules,
-            full_cfg.nat.as_ref(),
-            &full_cfg.firewall_aliases,
-            full_cfg.firewall_settings.as_ref(),
-            settings.ipv6_enabled,
-        )
-        .await
-        .map_err(|e| SystemApiError::CommandError(format!("failed to reapply firewall rules: {e}")))?;
+        crate::captive_portal::apply_current_ruleset_nft(&state.config_store)
+            .await
+            .map_err(|e| SystemApiError::CommandError(format!("failed to reapply firewall rules: {e}")))?;
 
         if let Some(dns) = full_cfg.dns.as_ref() {
             apply_dns_config(dns, full_cfg.dot.as_ref(), settings.ipv6_enabled)

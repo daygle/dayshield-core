@@ -22,6 +22,7 @@ mod ai_engine;
 mod ai_model;
 mod auth;
 mod backup;
+mod captive_portal;
 mod config;
 mod engine;
 mod logs;
@@ -126,6 +127,10 @@ async fn main() -> anyhow::Result<()> {
     // Start AI engine background maintenance.
     ai_engine::start_background_tasks(Arc::clone(&app_state)).await;
 
+    // Start captive portal listener and session expiry maintenance.
+    captive_portal::start_portal_server(Arc::clone(&app_state));
+    captive_portal::start_session_reaper(Arc::clone(&app_state));
+
     // Start the background notification worker.
     notify::worker::start_notify_worker(Arc::clone(&app_state), notify_rx).await;
 
@@ -137,7 +142,11 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(&addr).await?;
     info!("Listening on http://{}", addr);
 
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

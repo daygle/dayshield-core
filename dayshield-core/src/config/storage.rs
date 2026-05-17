@@ -29,7 +29,7 @@ use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
 use super::models::{
-    AcmeConfig, AdminSecuritySettings, AiEngineConfig, CloudflaredConfig, CrowdSecConfig, Dhcp6Config, DhcpConfig, DnsConfig, DnsDomainOverride,
+    AcmeConfig, AdminSecuritySettings, AiEngineConfig, CaptivePortalConfig, CloudflaredConfig, CrowdSecConfig, Dhcp6Config, DhcpConfig, DnsConfig, DnsDomainOverride,
     DynamicDnsConfig,
     DnsHostOverride, DotConfig, FirewallAlias, FirewallRule, FirewallSettings, Gateway, Interface, NatConfig,
     NotifyConfig, NtpConfig, SuricataConfig, SystemConfig, WireGuardInterface,
@@ -1154,6 +1154,28 @@ impl ConfigStore {
             }
         }
 
+        // Captive portal config validation.
+        if let Some(captive_portal) = &config.captive_portal {
+            use crate::config::models::validate_captive_portal_config_with_ipv6;
+            if let Err(msg) =
+                validate_captive_portal_config_with_ipv6(captive_portal, ipv6_enabled)
+            {
+                anyhow::bail!("Captive portal config is invalid: {msg}");
+            }
+            if captive_portal.enabled {
+                let known: std::collections::HashSet<&str> =
+                    config.interfaces.iter().map(|i| i.name.as_str()).collect();
+                for iface in &captive_portal.interfaces {
+                    if !known.is_empty() && !known.contains(iface.as_str()) {
+                        anyhow::bail!(
+                            "Captive portal interface {:?} is not defined in the interface config",
+                            iface
+                        );
+                    }
+                }
+            }
+        }
+
         // AI engine config validation.
         if let Some(ai_engine) = &config.ai_engine {
             use crate::config::models::validate_ai_engine_config;
@@ -1463,6 +1485,18 @@ impl ConfigStore {
     pub fn save_cloudflared_config(&self, cloudflared: CloudflaredConfig) -> Result<()> {
         let mut config = self.load()?;
         config.cloudflared = Some(cloudflared);
+        self.save_with_rollback(&config)
+    }
+
+    /// Return the Captive Portal configuration from the persisted config.
+    pub fn load_captive_portal_config(&self) -> Result<Option<CaptivePortalConfig>> {
+        Ok(self.load()?.captive_portal)
+    }
+
+    /// Atomically replace the Captive Portal configuration in the persisted config.
+    pub fn save_captive_portal_config(&self, captive_portal: CaptivePortalConfig) -> Result<()> {
+        let mut config = self.load()?;
+        config.captive_portal = Some(captive_portal);
         self.save_with_rollback(&config)
     }
 

@@ -9,7 +9,7 @@
 //! | [`apply_rules`]       | Write ruleset to a temp file and run `nft -f`.      |
 //! | [`flush_rules`]       | Flush the entire nftables ruleset.                  |
 
-use std::collections::HashMap;
+use std::{collections::HashMap, net::IpAddr};
 
 use chrono::{Datelike, Local, NaiveDate, NaiveTime, Timelike};
 use serde::Serialize;
@@ -19,8 +19,8 @@ use uuid::Uuid;
 
 use crate::config::models::{
     Action, AddressFamily, AliasType, FirewallAddressFamily, FirewallAlias, FirewallChainPolicy,
-    FirewallDirection, FirewallRule, FirewallSchedule, FirewallSettings, LogPosition, NatConfig,
-    NatProtocol, NatRuleType, OutboundMode, Protocol,
+    CaptivePortalConfig, CaptivePortalSession, FirewallDirection, FirewallRule, FirewallSchedule,
+    FirewallSettings, LogPosition, NatConfig, NatProtocol, NatRuleType, OutboundMode, Protocol,
 };
 
 const DEFAULT_BLOCK_LOG_RATE_PER_SECOND: u32 = 10;
@@ -140,6 +140,29 @@ pub fn generate_ruleset_with_ipv6(
     resolved_url_tables: &HashMap<String, Vec<String>>,
     ipv6_enabled: bool,
 ) -> String {
+    generate_ruleset_with_captive(
+        rules,
+        nat_config,
+        aliases,
+        firewall_settings,
+        resolved_url_tables,
+        ipv6_enabled,
+        None,
+        &[],
+    )
+}
+
+/// Generate a complete nftables ruleset with optional captive portal gates.
+pub fn generate_ruleset_with_captive(
+    rules: &[FirewallRule],
+    nat_config: Option<&NatConfig>,
+    aliases: &[FirewallAlias],
+    firewall_settings: Option<&FirewallSettings>,
+    resolved_url_tables: &HashMap<String, Vec<String>>,
+    ipv6_enabled: bool,
+    captive_portal: Option<&CaptivePortalConfig>,
+    captive_sessions: &[CaptivePortalSession],
+) -> String {
     let settings = firewall_settings.cloned().unwrap_or_default();
     // Only emit rules that are enabled and whose schedule (if any) is currently active.
     let mut sorted: Vec<&FirewallRule> = rules
@@ -187,6 +210,14 @@ pub fn generate_ruleset_with_ipv6(
             out.push_str(&body);
             out.push_str("    }\n\n");
         }
+    }
+
+    if let Some(portal) = active_captive_portal(captive_portal) {
+        out.push_str(&generate_captive_filter_sets(
+            portal,
+            captive_sessions,
+            ipv6_enabled,
+        ));
     }
 
     // input chain
@@ -266,6 +297,9 @@ pub fn generate_ruleset_with_ipv6(
     if ipv6_enabled {
         out.push_str("        icmpv6 type { echo-request, destination-unreachable, time-exceeded, nd-neighbor-solicit, nd-neighbor-advert, mld-listener-query } accept\n");
     }
+    if let Some(portal) = active_captive_portal(captive_portal) {
+        out.push_str(&generate_captive_input_rules(portal));
+    }
     for rule in &sorted {
         if rule_targets_chain(rule, FilterChain::Input) {
             out.push_str(&format!(
@@ -294,6 +328,13 @@ pub fn generate_ruleset_with_ipv6(
     out.push_str("        ct state established,related accept\n");
     if settings.drop_invalid_state {
         out.push_str("        ct state invalid drop\n");
+    }
+    if let Some(portal) = active_captive_portal(captive_portal) {
+        out.push_str(&generate_captive_forward_rules(
+            portal,
+            captive_sessions,
+            ipv6_enabled,
+        ));
     }
     // Auto-companion accept rules for DNAT (port-forward) entries.
     // Without these, forwarded packets would be dropped by the policy above
@@ -361,6 +402,13 @@ pub fn generate_ruleset_with_ipv6(
     if let Some(nat) = nat_config {
         out.push_str(&generate_nat_table(nat, &settings.log_position, ipv6_enabled));
     }
+    if let Some(portal) = active_captive_portal(captive_portal) {
+        out.push_str(&generate_captive_nat_tables(
+            portal,
+            captive_sessions,
+            ipv6_enabled,
+        ));
+    }
 
     info!(
         fw_rules = rules.len(),
@@ -391,16 +439,40 @@ pub async fn apply_rules(
     firewall_settings: Option<&FirewallSettings>,
     ipv6_enabled: bool,
 ) -> Result<(), NftError> {
+    apply_rules_with_captive(
+        rules,
+        nat_config,
+        aliases,
+        firewall_settings,
+        ipv6_enabled,
+        None,
+        &[],
+    )
+    .await
+}
+
+/// Apply a complete nftables ruleset with optional captive portal enforcement.
+pub async fn apply_rules_with_captive(
+    rules: &[FirewallRule],
+    nat_config: Option<&NatConfig>,
+    aliases: &[FirewallAlias],
+    firewall_settings: Option<&FirewallSettings>,
+    ipv6_enabled: bool,
+    captive_portal: Option<&CaptivePortalConfig>,
+    captive_sessions: &[CaptivePortalSession],
+) -> Result<(), NftError> {
     // Resolve URL-table aliases (fetch + cache).
     let resolved_url_tables = resolve_url_tables(aliases).await;
 
-    let ruleset = generate_ruleset_with_ipv6(
+    let ruleset = generate_ruleset_with_captive(
         rules,
         nat_config,
         aliases,
         firewall_settings,
         &resolved_url_tables,
         ipv6_enabled,
+        captive_portal,
+        captive_sessions,
     );
 
     // Unique temp file name based on milliseconds since UNIX epoch.
@@ -634,6 +706,230 @@ fn alias_set_body(
     body.push_str(&format!("        elements = {{ {elements} }}\n"));
 
     Some(body)
+}
+
+fn active_captive_portal(config: Option<&CaptivePortalConfig>) -> Option<&CaptivePortalConfig> {
+    config.filter(|portal| portal.enabled && !portal.interfaces.is_empty())
+}
+
+fn generate_captive_filter_sets(
+    portal: &CaptivePortalConfig,
+    sessions: &[CaptivePortalSession],
+    ipv6_enabled: bool,
+) -> String {
+    let mut out = String::new();
+    let v4_clients = captive_session_ips(sessions, false);
+    if !v4_clients.is_empty() {
+        out.push_str("    set captive_portal_v4_clients {\n");
+        out.push_str("        type ipv4_addr\n");
+        out.push_str(&format!(
+            "        elements = {{ {} }}\n",
+            v4_clients.join(", ")
+        ));
+        out.push_str("    }\n\n");
+    }
+
+    let v4_walled = captive_destinations(portal, false);
+    if !v4_walled.is_empty() {
+        out.push_str("    set captive_portal_v4_walled_garden {\n");
+        out.push_str("        type ipv4_addr\n");
+        out.push_str("        flags interval\n");
+        out.push_str(&format!("        elements = {{ {} }}\n", v4_walled.join(", ")));
+        out.push_str("    }\n\n");
+    }
+
+    if ipv6_enabled {
+        let v6_clients = captive_session_ips(sessions, true);
+        if !v6_clients.is_empty() {
+            out.push_str("    set captive_portal_v6_clients {\n");
+            out.push_str("        type ipv6_addr\n");
+            out.push_str(&format!(
+                "        elements = {{ {} }}\n",
+                v6_clients.join(", ")
+            ));
+            out.push_str("    }\n\n");
+        }
+
+        let v6_walled = captive_destinations(portal, true);
+        if !v6_walled.is_empty() {
+            out.push_str("    set captive_portal_v6_walled_garden {\n");
+            out.push_str("        type ipv6_addr\n");
+            out.push_str("        flags interval\n");
+            out.push_str(&format!(
+                "        elements = {{ {} }}\n",
+                v6_walled.join(", ")
+            ));
+            out.push_str("    }\n\n");
+        }
+    }
+
+    if !portal.bypass_macs.is_empty() {
+        out.push_str("    set captive_portal_bypass_macs {\n");
+        out.push_str("        type ether_addr\n");
+        out.push_str(&format!(
+            "        elements = {{ {} }}\n",
+            portal.bypass_macs.join(", ")
+        ));
+        out.push_str("    }\n\n");
+    }
+
+    out
+}
+
+fn generate_captive_input_rules(portal: &CaptivePortalConfig) -> String {
+    let interfaces = nft_string_set(&portal.interfaces);
+    let mut out = String::new();
+    out.push_str("        # Captive portal local services\n");
+    out.push_str(&format!(
+        "        iifname {interfaces} tcp dport {} accept\n",
+        portal.listen_port
+    ));
+    out.push_str(&format!(
+        "        iifname {interfaces} udp dport {{ 53, 67, 68 }} accept\n"
+    ));
+    out.push_str(&format!(
+        "        iifname {interfaces} tcp dport 53 accept\n"
+    ));
+    out
+}
+
+fn generate_captive_forward_rules(
+    portal: &CaptivePortalConfig,
+    sessions: &[CaptivePortalSession],
+    ipv6_enabled: bool,
+) -> String {
+    let interfaces = nft_string_set(&portal.interfaces);
+    let mut out = String::new();
+    out.push_str("        # Captive portal client gate\n");
+    if !portal.bypass_macs.is_empty() {
+        out.push_str(&format!(
+            "        iifname {interfaces} ether saddr @captive_portal_bypass_macs accept\n"
+        ));
+    }
+    if !captive_session_ips(sessions, false).is_empty() {
+        out.push_str(&format!(
+            "        iifname {interfaces} ip saddr @captive_portal_v4_clients accept\n"
+        ));
+    }
+    if !captive_destinations(portal, false).is_empty() {
+        out.push_str(&format!(
+            "        iifname {interfaces} ip daddr @captive_portal_v4_walled_garden accept\n"
+        ));
+    }
+    if ipv6_enabled {
+        if !captive_session_ips(sessions, true).is_empty() {
+            out.push_str(&format!(
+                "        iifname {interfaces} ip6 saddr @captive_portal_v6_clients accept\n"
+            ));
+        }
+        if !captive_destinations(portal, true).is_empty() {
+            out.push_str(&format!(
+                "        iifname {interfaces} ip6 daddr @captive_portal_v6_walled_garden accept\n"
+            ));
+        }
+    }
+    out.push_str(&format!("        iifname {interfaces} drop\n"));
+    out
+}
+
+fn generate_captive_nat_tables(
+    portal: &CaptivePortalConfig,
+    sessions: &[CaptivePortalSession],
+    ipv6_enabled: bool,
+) -> String {
+    if !portal.redirect_http {
+        return String::new();
+    }
+
+    let mut out = generate_captive_nat_table_for_family(portal, sessions, false);
+    if ipv6_enabled {
+        out.push_str(&generate_captive_nat_table_for_family(portal, sessions, true));
+    }
+    out
+}
+
+fn generate_captive_nat_table_for_family(
+    portal: &CaptivePortalConfig,
+    sessions: &[CaptivePortalSession],
+    ipv6: bool,
+) -> String {
+    let interfaces = nft_string_set(&portal.interfaces);
+    let clients = captive_session_ips(sessions, ipv6);
+    let destinations = captive_destinations(portal, ipv6);
+    let family = if ipv6 { "ip6" } else { "ip" };
+    let ip_key = if ipv6 { "ip6" } else { "ip" };
+    let mut out = String::new();
+
+    out.push_str(&format!("\ntable {family} captive_portal {{\n"));
+    out.push_str("    chain prerouting {\n");
+    out.push_str("        type nat hook prerouting priority -110; policy accept;\n");
+    if !portal.bypass_macs.is_empty() {
+        out.push_str(&format!(
+            "        iifname {interfaces} ether saddr {{ {} }} return\n",
+            portal.bypass_macs.join(", ")
+        ));
+    }
+    if !clients.is_empty() {
+        out.push_str(&format!(
+            "        iifname {interfaces} {ip_key} saddr {{ {} }} return\n",
+            clients.join(", ")
+        ));
+    }
+    if !destinations.is_empty() {
+        out.push_str(&format!(
+            "        iifname {interfaces} {ip_key} daddr {{ {} }} return\n",
+            destinations.join(", ")
+        ));
+    }
+    out.push_str(&format!(
+        "        iifname {interfaces} tcp dport 80 redirect to :{}\n",
+        portal.listen_port
+    ));
+    out.push_str("    }\n");
+    out.push_str("}\n");
+
+    out
+}
+
+fn captive_session_ips(sessions: &[CaptivePortalSession], ipv6: bool) -> Vec<String> {
+    let mut ips = sessions
+        .iter()
+        .filter_map(|session| match session.client_ip.parse::<IpAddr>().ok()? {
+            IpAddr::V4(addr) if !ipv6 => Some(addr.to_string()),
+            IpAddr::V6(addr) if ipv6 => Some(addr.to_string()),
+            _ => None,
+        })
+        .collect::<Vec<String>>();
+    ips.sort();
+    ips.dedup();
+    ips
+}
+
+fn captive_destinations(portal: &CaptivePortalConfig, ipv6: bool) -> Vec<String> {
+    let mut destinations = portal
+        .walled_garden_ips
+        .iter()
+        .filter(|value| value.contains(':') == ipv6)
+        .cloned()
+        .collect::<Vec<String>>();
+    destinations.sort();
+    destinations.dedup();
+    destinations
+}
+
+fn nft_string_set(values: &[String]) -> String {
+    if values.len() == 1 {
+        format!("\"{}\"", values[0])
+    } else {
+        format!(
+            "{{ {} }}",
+            values
+                .iter()
+                .map(|value| format!("\"{value}\""))
+                .collect::<Vec<String>>()
+                .join(", ")
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------

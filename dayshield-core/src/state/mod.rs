@@ -30,6 +30,7 @@ pub const SVC_VPN: &str = "vpn";
 pub const SVC_CROWDSEC: &str = "crowdsec";
 pub const SVC_ACME: &str = "acme";
 pub const SVC_CLOUDFLARED: &str = "cloudflared";
+pub const SVC_CAPTIVE_PORTAL: &str = "captive_portal";
 
 /// Shared application state.
 ///
@@ -80,6 +81,7 @@ impl AppState {
             SVC_CROWDSEC,
             SVC_ACME,
             SVC_CLOUDFLARED,
+            SVC_CAPTIVE_PORTAL,
         ] {
             services.insert(name.to_string(), false);
         }

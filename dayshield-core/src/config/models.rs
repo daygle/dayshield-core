@@ -3,6 +3,7 @@
 //! All structs are serialisable / deserialisable with serde so they can be
 //! written to JSON files on disk and exchanged over the REST API.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -2360,6 +2361,254 @@ pub fn validate_dynamic_dns_config_with_ipv6(
 }
 
 // ---------------------------------------------------------------------------
+// Captive Portal
+// ---------------------------------------------------------------------------
+
+fn default_captive_portal_listen_address() -> String {
+    "0.0.0.0".to_string()
+}
+
+fn default_captive_portal_listen_port() -> u16 {
+    8080
+}
+
+fn default_captive_portal_session_ttl_seconds() -> u64 {
+    86_400
+}
+
+fn default_captive_portal_title() -> String {
+    "DayShield Guest Access".to_string()
+}
+
+fn default_captive_portal_message() -> String {
+    "Please review the access terms before connecting to this network.".to_string()
+}
+
+/// Authentication policy for the captive portal splash page.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptivePortalAuthMode {
+    /// A client can authorise itself by accepting the displayed terms.
+    #[default]
+    ClickThrough,
+    /// A client must present one of the configured voucher codes.
+    Voucher,
+}
+
+/// A voucher code that can authorise one or more captive portal clients.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptivePortalVoucher {
+    #[serde(default = "Uuid::new_v4")]
+    pub id: Uuid,
+    pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_uses: Option<u32>,
+    #[serde(default)]
+    pub uses: u32,
+}
+
+/// Persisted configuration for the LAN captive portal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptivePortalConfig {
+    pub enabled: bool,
+    /// Downstream interfaces whose forwarded traffic is gated by the portal.
+    #[serde(default)]
+    pub interfaces: Vec<String>,
+    #[serde(default)]
+    pub auth_mode: CaptivePortalAuthMode,
+    #[serde(default = "default_captive_portal_listen_address")]
+    pub listen_address: String,
+    #[serde(default = "default_captive_portal_listen_port")]
+    pub listen_port: u16,
+    /// Redirect unauthorised HTTP traffic to the portal listener.
+    #[serde(default = "default_true")]
+    pub redirect_http: bool,
+    #[serde(default = "default_captive_portal_session_ttl_seconds")]
+    pub session_ttl_seconds: u64,
+    /// Idle timeout in seconds. Set to 0 to disable idle expiry.
+    #[serde(default)]
+    pub idle_timeout_seconds: u64,
+    #[serde(default = "default_captive_portal_title")]
+    pub portal_title: String,
+    #[serde(default = "default_captive_portal_message")]
+    pub portal_message: String,
+    #[serde(default)]
+    pub terms_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success_redirect_url: Option<String>,
+    /// Destinations that unauthorised clients may still reach.
+    #[serde(default)]
+    pub walled_garden_ips: Vec<String>,
+    /// MAC addresses that bypass the portal without creating a session.
+    #[serde(default)]
+    pub bypass_macs: Vec<String>,
+    #[serde(default)]
+    pub vouchers: Vec<CaptivePortalVoucher>,
+}
+
+impl Default for CaptivePortalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interfaces: vec![],
+            auth_mode: CaptivePortalAuthMode::ClickThrough,
+            listen_address: default_captive_portal_listen_address(),
+            listen_port: default_captive_portal_listen_port(),
+            redirect_http: true,
+            session_ttl_seconds: default_captive_portal_session_ttl_seconds(),
+            idle_timeout_seconds: 0,
+            portal_title: default_captive_portal_title(),
+            portal_message: default_captive_portal_message(),
+            terms_required: false,
+            success_redirect_url: None,
+            walled_garden_ips: vec![],
+            bypass_macs: vec![],
+            vouchers: vec![],
+        }
+    }
+}
+
+/// Runtime record for an authorised captive portal client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptivePortalSession {
+    pub id: Uuid,
+    pub client_ip: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_mac: Option<String>,
+    pub authorized_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voucher_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
+}
+
+pub fn validate_captive_portal_config(config: &CaptivePortalConfig) -> Result<(), String> {
+    validate_captive_portal_config_with_ipv6(config, false)
+}
+
+pub fn validate_captive_portal_config_with_ipv6(
+    config: &CaptivePortalConfig,
+    ipv6_enabled: bool,
+) -> Result<(), String> {
+    if !is_valid_ip(&config.listen_address) {
+        return Err(format!(
+            "captive portal listen_address {:?} is not a valid IP address",
+            config.listen_address
+        ));
+    }
+
+    if !is_valid_port(config.listen_port) {
+        return Err("captive portal listen_port must be between 1 and 65535".into());
+    }
+
+    if config.session_ttl_seconds < 60 {
+        return Err("captive portal session_ttl_seconds must be at least 60".into());
+    }
+
+    if config.idle_timeout_seconds > 0 && config.idle_timeout_seconds < 60 {
+        return Err("captive portal idle_timeout_seconds must be 0 or at least 60".into());
+    }
+
+    if config.enabled {
+        if config.interfaces.is_empty() {
+            return Err("captive portal requires at least one interface when enabled".into());
+        }
+        if config.portal_title.trim().is_empty() {
+            return Err("captive portal portal_title must not be empty when enabled".into());
+        }
+        if matches!(config.auth_mode, CaptivePortalAuthMode::Voucher)
+            && !config.vouchers.iter().any(|voucher| voucher.enabled)
+        {
+            return Err("captive portal voucher mode requires at least one enabled voucher".into());
+        }
+    }
+
+    for iface in &config.interfaces {
+        if !is_valid_interface_name(iface) {
+            return Err(format!(
+                "captive portal interface {:?} is not a valid interface name",
+                iface
+            ));
+        }
+    }
+
+    if let Some(url) = &config.success_redirect_url {
+        if !url.trim().is_empty() && !validate_url(url) {
+            return Err(format!(
+                "captive portal success_redirect_url {:?} is not a valid HTTP/HTTPS URL",
+                url
+            ));
+        }
+    }
+
+    for destination in &config.walled_garden_ips {
+        if !(is_valid_ip(destination) || is_valid_cidr(destination)) {
+            return Err(format!(
+                "captive portal walled garden destination {:?} is not a valid IP or CIDR",
+                destination
+            ));
+        }
+        ensure_ipv6_allowed(destination, ipv6_enabled, "Captive portal walled garden")?;
+    }
+
+    for mac in &config.bypass_macs {
+        if !is_valid_mac(mac) {
+            return Err(format!(
+                "captive portal bypass MAC {:?} is not a valid MAC address",
+                mac
+            ));
+        }
+    }
+
+    let mut seen_codes = std::collections::HashSet::new();
+    for voucher in &config.vouchers {
+        let code = voucher.code.trim();
+        if code.len() < 4 || code.len() > 128 {
+            return Err(format!(
+                "captive portal voucher {} code must be 4-128 characters",
+                voucher.id
+            ));
+        }
+        if code.chars().any(char::is_whitespace) {
+            return Err(format!(
+                "captive portal voucher {} code must not contain whitespace",
+                voucher.id
+            ));
+        }
+        if !seen_codes.insert(code.to_string()) {
+            return Err(format!("duplicate captive portal voucher code {:?}", code));
+        }
+        if let Some(max_uses) = voucher.max_uses {
+            if max_uses == 0 {
+                return Err(format!(
+                    "captive portal voucher {} max_uses must be greater than 0",
+                    voucher.id
+                ));
+            }
+            if voucher.uses > max_uses {
+                return Err(format!(
+                    "captive portal voucher {} uses exceeds max_uses",
+                    voucher.id
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Cloudflared
 // ---------------------------------------------------------------------------
 
@@ -2587,6 +2836,9 @@ pub struct SystemConfig {
     /// Cloudflare Tunnel configuration.
     #[serde(default)]
     pub cloudflared: Option<CloudflaredConfig>,
+    /// Captive portal configuration for guest/client network access.
+    #[serde(default)]
+    pub captive_portal: Option<CaptivePortalConfig>,
     /// AI threat-engine policy and automatic blocking settings.
     #[serde(default)]
     pub ai_engine: Option<AiEngineConfig>,

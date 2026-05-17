@@ -413,6 +413,8 @@ mod tests {
     fn base_config() -> SuricataConfig {
         SuricataConfig {
             enabled: true,
+            interfaces: vec![],
+            mode: "ids".to_string(),
             home_nets: vec!["192.168.1.0/24".into()],
             external_nets: vec![],
             rule_sources: vec![],
@@ -471,6 +473,15 @@ mod tests {
         let out = generate_config(&cfg);
         assert!(out.contains("stats:"));
         assert!(out.contains("filename: /var/log/suricata/stats.log"));
+        assert!(out.contains("interval: 8"));
+    }
+
+    #[test]
+    fn generate_config_stats_log_custom_interval() {
+        let mut cfg = base_config();
+        cfg.stats_interval_seconds = 30;
+        let out = generate_config(&cfg);
+        assert!(out.contains("interval: 30"));
     }
 
     #[test]
@@ -525,6 +536,22 @@ mod tests {
         cfg.home_nets = vec!["192.168.1.0/24".into(), "10.0.0.0/8".into()];
         let out = generate_config(&cfg);
         assert!(out.contains("HOME_NET: \"[192.168.1.0/24,10.0.0.0/8]\""));
+    }
+
+    #[test]
+    fn generate_config_default_input_interface_when_none_configured() {
+        let cfg = base_config();
+        let out = generate_config(&cfg);
+        assert!(out.contains("inputs:\n  - interface: eth0"));
+    }
+
+    #[test]
+    fn generate_config_includes_all_configured_interfaces() {
+        let mut cfg = base_config();
+        cfg.interfaces = vec!["lan0".into(), "wan0".into()];
+        let out = generate_config(&cfg);
+        assert!(out.contains("  - interface: lan0"));
+        assert!(out.contains("  - interface: wan0"));
     }
 
     #[test]

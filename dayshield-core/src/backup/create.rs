@@ -14,6 +14,7 @@
 //! config/dns.json
 //! config/firewall.json
 //! config/interfaces.json
+//! config/captive_portal.json
 //! config/suricata.json
 //! config/wireguard.json
 //! ```
@@ -232,6 +233,7 @@ fn serialise_subsystem(
         Subsystem::Suricata => serde_json::to_vec_pretty(&cfg.suricata),
         Subsystem::CrowdSec => serde_json::to_vec_pretty(&cfg.crowdsec),
         Subsystem::Acme => serde_json::to_vec_pretty(&cfg.acme),
+        Subsystem::CaptivePortal => serde_json::to_vec_pretty(&cfg.captive_portal),
     }
     .with_context(|| format!("failed to serialise {path}"))?;
     Ok((path, bytes))

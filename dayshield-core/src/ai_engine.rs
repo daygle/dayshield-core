@@ -21,7 +21,7 @@ use crate::{
     config::models::{
         Action, AiEngineConfig, FirewallDirection, FirewallRule, NotifyCategory,
     },
-    engine::nftables::apply_rules,
+    engine::nftables::apply_rules_with_captive,
     notify::model::NotifyEvent,
     state::AppState,
 };
@@ -830,7 +830,15 @@ impl AiRuntime {
             });
         }
 
-        apply_rules(
+        let captive_sessions = if let Some(portal) = config.captive_portal.as_ref() {
+            let sessions = crate::captive_portal::load_sessions(&state.config_store)
+                .unwrap_or_default();
+            crate::captive_portal::active_sessions(portal, &sessions)
+        } else {
+            vec![]
+        };
+
+        apply_rules_with_captive(
             &rules,
             config.nat.as_ref(),
             &config.firewall_aliases,
@@ -840,6 +848,8 @@ impl AiRuntime {
                 .as_ref()
                 .map(|settings| settings.ipv6_enabled)
                 .unwrap_or(false),
+            config.captive_portal.as_ref(),
+            &captive_sessions,
         )
         .await
         .context("failed to apply AI-enforced temporary block rules")?;
@@ -990,20 +1000,31 @@ pub fn default_ai_store_path(config_dir: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    fn test_policy(block_duration_seconds: u64) -> AiEngineConfig {
+        let mut cfg = AiEngineConfig::default();
+        cfg.enabled = true;
+        cfg.automatic_blocking = true;
+        cfg.risk_score_block_threshold = 0.8;
+        cfg.escalation_window_seconds = 300;
+        cfg.block_duration_seconds = block_duration_seconds;
+        cfg
+    }
+
     #[test]
     fn escalation_is_deterministic() {
-        let policy = AiEngineConfig {
-            enabled: true,
-            automatic_blocking: true,
-            risk_score_block_threshold: 0.8,
-            escalation_window_seconds: 300,
-            block_duration_seconds: 60,
-            training_enabled: true,
-            model_learning_rate: 0.25,
-        };
+        let policy = test_policy(60);
 
         assert_eq!(compute_escalated_block(1, &policy), (Some(60), false, false));
         assert_eq!(compute_escalated_block(3, &policy), (Some(360), true, false));
+        assert_eq!(compute_escalated_block(5, &policy), (None, true, true));
+    }
+
+    #[test]
+    fn escalation_with_zero_base_duration_is_permanent_when_triggered() {
+        let policy = test_policy(0);
+
+        assert_eq!(compute_escalated_block(1, &policy), (None, false, false));
+        assert_eq!(compute_escalated_block(3, &policy), (None, true, false));
         assert_eq!(compute_escalated_block(5, &policy), (None, true, true));
     }
 
@@ -1042,5 +1063,96 @@ mod tests {
         let recent = store.list_recent(10).unwrap();
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].id, event.id);
+    }
+
+    #[test]
+    fn count_recent_high_risk_events_respects_threshold_and_window() {
+        let store = ThreatEventStore::temporary().unwrap();
+        let base_ts = 1_700_000_000;
+
+        let low_risk = ThreatEvent {
+            id: Uuid::new_v4().to_string(),
+            timestamp: base_ts,
+            src_ip: "10.0.0.2".to_string(),
+            dst_ip: "8.8.8.8".to_string(),
+            src_port: Some(12345),
+            dst_port: Some(53),
+            protocol: "udp".to_string(),
+            event_source: "test".to_string(),
+            action: Some("DROP".to_string()),
+            signature: None,
+            alert_severity: None,
+            risk_score: 0.5,
+            reasons: vec!["low risk".to_string()],
+            blocked: false,
+            block_expires_at: None,
+            escalated: false,
+            quarantine: false,
+            manually_unblocked: false,
+            label: None,
+            feedback: None,
+            feedback_at: None,
+        };
+        store.insert_event(&low_risk).unwrap();
+
+        let high_risk_recent = ThreatEvent {
+            id: Uuid::new_v4().to_string(),
+            timestamp: base_ts + 10,
+            src_ip: "10.0.0.2".to_string(),
+            dst_ip: "8.8.4.4".to_string(),
+            src_port: Some(12346),
+            dst_port: Some(443),
+            protocol: "tcp".to_string(),
+            event_source: "test".to_string(),
+            action: Some("DROP".to_string()),
+            signature: None,
+            alert_severity: None,
+            risk_score: 0.95,
+            reasons: vec!["high risk".to_string()],
+            blocked: true,
+            block_expires_at: Some(base_ts + 70),
+            escalated: false,
+            quarantine: false,
+            manually_unblocked: false,
+            label: None,
+            feedback: None,
+            feedback_at: None,
+        };
+        store.insert_event(&high_risk_recent).unwrap();
+
+        let high_risk_other_ip = ThreatEvent {
+            id: Uuid::new_v4().to_string(),
+            timestamp: base_ts + 20,
+            src_ip: "10.0.0.3".to_string(),
+            dst_ip: "1.1.1.1".to_string(),
+            src_port: Some(12347),
+            dst_port: Some(80),
+            protocol: "tcp".to_string(),
+            event_source: "test".to_string(),
+            action: Some("DROP".to_string()),
+            signature: None,
+            alert_severity: None,
+            risk_score: 0.99,
+            reasons: vec!["other ip".to_string()],
+            blocked: true,
+            block_expires_at: Some(base_ts + 80),
+            escalated: false,
+            quarantine: false,
+            manually_unblocked: false,
+            label: None,
+            feedback: None,
+            feedback_at: None,
+        };
+        store.insert_event(&high_risk_other_ip).unwrap();
+
+        let all_recent_for_src = store
+            .count_recent_high_risk_events("10.0.0.2", base_ts, 0.8)
+            .unwrap();
+        assert_eq!(all_recent_for_src, 1);
+
+        let none_in_future_window = store
+            .count_recent_high_risk_events("10.0.0.2", base_ts + 11, 0.8)
+            .unwrap();
+        assert_eq!(none_in_future_window, 0);
     }
 }

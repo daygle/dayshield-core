@@ -121,15 +121,21 @@ mod tests {
             timestamp: "2024-01-15T12:00:00+00:00".into(),
             src_ip: "10.0.0.1".into(),
             dest_ip: "10.0.0.2".into(),
+            src_port: Some(12345),
+            dest_port: Some(443),
             proto: "TCP".into(),
             signature: "ET SCAN".into(),
             severity: 2,
+            category: Some("Attempted Information Leak".into()),
         };
         let json = serde_json::to_string(&event).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "suricata_alert");
         assert_eq!(v["src_ip"], "10.0.0.1");
+        assert_eq!(v["src_port"], 12345);
+        assert_eq!(v["dest_port"], 443);
         assert_eq!(v["severity"], 2);
+        assert_eq!(v["category"], "Attempted Information Leak");
     }
 
     #[test]
@@ -141,6 +147,7 @@ mod tests {
             dest_ip: "10.0.0.1".into(),
             sport: 54321,
             dport: 80,
+            proto: "TCP".into(),
             iface: "eth0".into(),
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -148,6 +155,7 @@ mod tests {
         assert_eq!(v["type"], "firewall_event");
         assert_eq!(v["action"], "DROP");
         assert_eq!(v["sport"], 54321);
+        assert_eq!(v["proto"], "TCP");
     }
 
     #[test]
@@ -165,11 +173,14 @@ mod tests {
 
     #[test]
     fn test_parse_and_serialise_suricata_alert() {
-        let line = r#"{"timestamp":"2024-01-15T12:00:00.000000+0000","event_type":"alert","src_ip":"10.0.0.1","dest_ip":"10.0.0.2","proto":"TCP","alert":{"signature":"ET SCAN Nmap","severity":1}}"#;
+        let line = r#"{"timestamp":"2024-01-15T12:00:00.000000+0000","event_type":"alert","src_ip":"10.0.0.1","dest_ip":"10.0.0.2","src_port":51515,"dest_port":22,"proto":"TCP","alert":{"signature":"ET SCAN Nmap","severity":1,"category":"Attempted Information Leak"}}"#;
         let event = parse_eve_line(line).unwrap();
         let json = serde_json::to_string(&event).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "suricata_alert");
         assert_eq!(v["severity"], 1);
+        assert_eq!(v["src_port"], 51515);
+        assert_eq!(v["dest_port"], 22);
+        assert_eq!(v["category"], "Attempted Information Leak");
     }
 }

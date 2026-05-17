@@ -254,16 +254,29 @@ pub async fn apply_updates(
 ) -> Result<impl IntoResponse, SystemApiError> {
     let component = req.component;
     if matches!(component, UpdateComponent::Rootfs) {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "operation": "apply",
-                "success": false,
-                "message": "rootfs updates are not supported on a running appliance; rebuild and publish appliance artifacts instead",
-                "details": [],
-                "status": update::get_status(&state).await
-            })),
-        ));
+        let status = update::get_status(&state).await;
+        if !status
+            .rootfs_slot_status
+            .as_ref()
+            .map(|slot| slot.supported)
+            .unwrap_or(false)
+        {
+            let reason = status
+                .rootfs_slot_status
+                .as_ref()
+                .and_then(|slot| slot.reason.clone())
+                .unwrap_or_else(|| "A/B rootfs layout is not available".to_string());
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "operation": "apply",
+                    "success": false,
+                    "message": reason,
+                    "details": [],
+                    "status": status
+                })),
+            ));
+        }
     }
     let force_partial = req.force_partial_apply;
     let state_clone = Arc::clone(&state);
@@ -305,18 +318,6 @@ pub async fn rollback_updates(
     Json(req): Json<UpdateActionRequest>,
 ) -> Result<impl IntoResponse, SystemApiError> {
     let component = req.component;
-    if matches!(component, UpdateComponent::Rootfs) {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "operation": "rollback",
-                "success": false,
-                "message": "rootfs rollback is not supported on a running appliance; rebuild and publish appliance artifacts instead",
-                "details": [],
-                "status": update::get_status(&state).await
-            })),
-        ));
-    }
     let force_partial = req.force_partial_apply;
     let state_clone = Arc::clone(&state);
 
@@ -359,7 +360,7 @@ pub async fn validate_updates(
             Json(serde_json::json!({
                 "operation": "validate",
                 "success": false,
-                "message": "rootfs validation is not supported on a running appliance; rebuild and publish appliance artifacts instead",
+                "message": "rootfs validation is reported through the A/B slot status",
                 "details": [],
                 "status": update::get_status(&state).await
             })),

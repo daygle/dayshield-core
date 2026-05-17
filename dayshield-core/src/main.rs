@@ -123,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Start the periodic software update checker.
     update::start_update_checker(Arc::clone(&app_state)).await;
+    update::start_rootfs_boot_finalizer(Arc::clone(&app_state));
 
     // Start AI engine background maintenance.
     ai_engine::start_background_tasks(Arc::clone(&app_state)).await;

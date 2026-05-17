@@ -12,7 +12,7 @@ use axum::{
     extract::{ConnectInfo, Path as AxumPath, State},
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
-    routing::{delete, get, post, put},
+    routing::{get, post},
     Json, Router,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -841,11 +841,7 @@ fn chrono_seconds(seconds: u64) -> ChronoDuration {
 
 fn truncate_user_agent(value: &str) -> String {
     const MAX_LEN: usize = 240;
-    if value.len() <= MAX_LEN {
-        value.to_string()
-    } else {
-        value[..MAX_LEN].to_string()
-    }
+    value.chars().take(MAX_LEN).collect()
 }
 
 fn render_portal_html(config: &CaptivePortalConfig) -> String {
@@ -856,7 +852,11 @@ fn render_portal_html(config: &CaptivePortalConfig) -> String {
     } else {
         "none"
     };
+    let terms_style = if config.terms_required { "block" } else { "none" };
     let terms_checked = if config.terms_required { "" } else { "checked" };
+    let form_style = if config.enabled { "block" } else { "none" };
+    let submit_disabled = if config.enabled { "" } else { "disabled" };
+    let enabled_json = if config.enabled { "true" } else { "false" };
     let disabled = if config.enabled {
         String::new()
     } else {
@@ -880,6 +880,7 @@ fn render_portal_html(config: &CaptivePortalConfig) -> String {
     input[type="text"] {{ width: 100%; box-sizing: border-box; margin-top: 6px; padding: 11px 12px; border-radius: 6px; border: 1px solid #7b8b99; background: #fff; color: #111; }}
     button {{ width: 100%; padding: 12px 14px; border: 0; border-radius: 6px; background: #18a999; color: #001b18; font-weight: 700; cursor: pointer; }}
     button:disabled {{ opacity: .55; cursor: progress; }}
+    #logout {{ display: none; margin-top: 12px; background: #d7e2ea; color: #101820; }}
     .notice {{ color: #ffd166; }}
     #status {{ min-height: 1.4em; margin-top: 14px; }}
   </style>
@@ -889,22 +890,56 @@ fn render_portal_html(config: &CaptivePortalConfig) -> String {
     <h1>{title}</h1>
     <p>{message}</p>
     {disabled}
-    <form id="portal-form">
+    <form id="portal-form" style="display: {form_style};">
       <label id="voucher-wrap" style="display: {voucher_style};">Voucher code
         <input id="voucher" name="voucherCode" type="text" autocomplete="one-time-code">
       </label>
-      <label>
+      <label id="terms-wrap" style="display: {terms_style};">
         <input id="terms" name="acceptTerms" type="checkbox" {terms_checked}>
         I accept the network access terms.
       </label>
-      <button id="submit" type="submit">Connect</button>
+      <button id="submit" type="submit" {submit_disabled}>Connect</button>
     </form>
+    <button id="logout" type="button">Disconnect</button>
     <p id="status"></p>
   </main>
   <script>
+    const portalEnabled = {enabled_json};
     const form = document.getElementById('portal-form');
     const statusEl = document.getElementById('status');
     const submit = document.getElementById('submit');
+    const logout = document.getElementById('logout');
+    const voucher = document.getElementById('voucher');
+    const terms = document.getElementById('terms');
+
+    function setConnected(session) {{
+      form.style.display = 'none';
+      logout.style.display = 'block';
+      const expires = session && session.expiresAt ? new Date(session.expiresAt) : null;
+      statusEl.textContent = expires && !Number.isNaN(expires.getTime())
+        ? 'Connected until ' + expires.toLocaleString() + '.'
+        : 'Connected.';
+    }}
+
+    function setDisconnected(message) {{
+      form.style.display = portalEnabled ? 'block' : 'none';
+      logout.style.display = 'none';
+      statusEl.textContent = message || '';
+    }}
+
+    async function refreshStatus() {{
+      if (!portalEnabled) return;
+      try {{
+        const res = await fetch('/portal/status');
+        const body = await res.json().catch(() => ({{}}));
+        if (res.ok && body.authorized) {{
+          setConnected(body.session);
+        }}
+      }} catch (_) {{
+        // Status is advisory; form submission remains the source of truth.
+      }}
+    }}
+
     form.addEventListener('submit', async (event) => {{
       event.preventDefault();
       submit.disabled = true;
@@ -914,13 +949,13 @@ fn render_portal_html(config: &CaptivePortalConfig) -> String {
           method: 'POST',
           headers: {{ 'content-type': 'application/json' }},
           body: JSON.stringify({{
-            voucherCode: document.getElementById('voucher').value,
-            acceptTerms: document.getElementById('terms').checked
+            voucherCode: voucher.value,
+            acceptTerms: terms.checked
           }})
         }});
         const body = await res.json().catch(() => ({{}}));
         if (!res.ok) throw new Error(body.error || 'Access was not authorised');
-        statusEl.textContent = 'Connected.';
+        setConnected(body.session);
         if (body.redirectUrl) window.location.assign(body.redirectUrl);
       }} catch (error) {{
         statusEl.textContent = error.message;
@@ -928,6 +963,20 @@ fn render_portal_html(config: &CaptivePortalConfig) -> String {
         submit.disabled = false;
       }}
     }});
+
+    logout.addEventListener('click', async () => {{
+      logout.disabled = true;
+      try {{
+        await fetch('/portal/logout', {{ method: 'POST' }});
+        setDisconnected('Disconnected.');
+      }} catch (error) {{
+        statusEl.textContent = error.message;
+      }} finally {{
+        logout.disabled = false;
+      }}
+    }});
+
+    refreshStatus();
   </script>
 </body>
 </html>"#

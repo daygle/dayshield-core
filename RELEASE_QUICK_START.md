@@ -27,19 +27,20 @@ git push origin v1.0.0
 You should see:
 - `core-v1.0.0.tar.zst` (prebuilt binary)
 - `ui-v1.0.0.tar.zst` (built dist/)
-- `rootfs-v1.0.0.tar.zst` (live-update bundle)
+- `rootfs-v1.0.0.tar.zst` (A/B rootfs slot image)
 - `checksums.txt` (SHA256 hashes)
 
 ## Appliance Update (User/Admin)
 
 ### Via Web Console
 
-1. Go to **System** → **Updates**
-2. Click **Check for Updates** → Shows available versions
-3. Click **Apply Updates** → Downloads + applies atomically
-4. If all OK → Shows success
-5. If any service fails → Auto-rollback to previous version
-6. Reboot if rootfs changed
+1. Go to **System** > **Updates**
+2. Click **Check for Updates** -> Shows runtime updates and rootfs A/B slot readiness
+3. Click **Apply Runtime Updates** -> Downloads and applies core/UI atomically
+4. If all OK -> Shows success
+5. If any service fails -> Auto-rollback to previous version
+6. If rootfs changed, click **Stage Rootfs Update** -> writes the inactive root slot and schedules a one-shot trial boot
+7. Reboot to trial the new rootfs; DayShield confirms it after service health checks or schedules rollback to the previous slot
 
 ### Via API
 
@@ -48,13 +49,19 @@ You should see:
 curl -X POST https://192.168.50.1:8443/system/updates/check \
   -H "Authorization: Bearer $TOKEN"
 
-# Apply (automatic mode selection)
+# Apply runtime artifacts
 curl -X POST https://192.168.50.1:8443/system/updates/apply \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"component":"both","forcePartialApply":false}'
 
-# Result: All 3 components updated atomically or none
+# Stage rootfs into inactive A/B slot
+curl -X POST https://192.168.50.1:8443/system/updates/apply \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"component":"rootfs","forcePartialApply":false}'
+
+# Result: Runtime components are updated atomically or none are changed
 ```
 
 ## Configuration

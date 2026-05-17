@@ -11,7 +11,7 @@ The redesigned update system eliminates the need for build tools (cargo, npm) on
 1. **CI/Build Pipeline** (GitHub Actions)
    - Builds core binary via `cargo build --release`
    - Builds UI dist via `npm run build`
-   - Builds rootfs bundle via shell scripts
+   - Builds rootfs image via shell scripts
    - Creates `.tar.zst` artifacts for each component
    - Generates SHA256 checksums
    - Uploads to GitHub Releases
@@ -27,9 +27,10 @@ The redesigned update system eliminates the need for build tools (cargo, npm) on
    - Fetches latest release via `GET /repos/{owner}/{repo}/releases/latest`
    - Downloads artifacts to `/var/lib/dayshield/update-staging/{transaction-id}/`
    - Verifies SHA256 checksums
-   - Applies atomically (all or nothing)
+   - Applies runtime artifacts atomically (core/UI all or nothing)
+   - Stages rootfs artifacts into the inactive A/B slot when the appliance layout supports it
    - Verifies services health
-   - Records versions in state file
+   - Records runtime versions, rootfs slot state, and confirmed rootfs image baselines
 
 ## Setup
 
@@ -125,46 +126,66 @@ echo "Released v${VERSION}"
    - `ui-v*.tar.zst`
    - `rootfs-v*.tar.zst`
    - `checksums.txt`
-4. Displays available versions to user
+4. Displays runtime updates for core/UI and rootfs A/B slot readiness
 
-### Apply Updates (Atomic Transaction)
+### Apply Runtime Updates (Atomic Transaction)
 
 ```
-User clicks "Apply Updates"
-    ↓
+User clicks "Apply Runtime Updates"
+    |
 Create transaction ID: /var/lib/dayshield/update-staging/{transaction-id}/
-    ↓
+    |
 Download phase:
   - GET {release_url}/core-v1.2.4.tar.zst
   - GET {release_url}/ui-v1.2.4.tar.zst
-  - GET {release_url}/rootfs-v1.2.4.tar.zst
   - GET {release_url}/checksums.txt
-    ↓
+    |
 Verify phase:
   - SHA256 each artifact against checksums.txt
-  - If any fails → abort (no changes)
-    ↓
+  - If any fails -> abort (no changes)
+    |
 Backup phase:
   - Snapshot current /usr/local/sbin/dayshield-core
   - Snapshot current /usr/local/share/dayshield-ui/
-    ↓
+    |
 Deploy phase:
-  - Extract core-v1.2.4.tar.zst → deploy to /usr/local/sbin/dayshield-core
-  - Extract ui-v1.2.4.tar.zst → deploy to /usr/local/share/dayshield-ui/
-  - Extract rootfs-v1.2.4.tar.zst → apply via live-update script
-    ↓
+  - Extract core-v1.2.4.tar.zst -> deploy to /usr/local/sbin/dayshield-core
+  - Extract ui-v1.2.4.tar.zst -> deploy to /usr/local/share/dayshield-ui/
+    |
 Health check phase:
   - Verify systemctl is-active dayshield.service
   - Verify systemctl is-active nftables.service
   - Verify systemctl is-active unbound.service
-  - If any unhealthy → rollback from backups
-    ↓
+  - If any unhealthy -> rollback from backups
+    |
 Finalize:
   - Mark transaction complete
   - Update state: current_version = 1.2.4
-  - Set pending_reboot if rootfs changed
   - Cleanup staging dir
 ```
+
+### Apply Rootfs Updates (A/B Slot Transaction)
+
+New installs use an A/B root layout:
+
+- `DAYSHIELD_BOOT` mounted at `/boot`
+- `DAYSHIELD_ROOT_A` mounted as the active `/`
+- `DAYSHIELD_ROOT_B` kept as the inactive root slot
+
+When `rootfs-vX.Y.Z.tar.zst` is available, the updater:
+
+1. Downloads and verifies the rootfs artifact.
+2. Formats the inactive root slot with its stable slot label.
+3. Extracts the rootfs artifact into the inactive slot.
+4. Copies persistent appliance state into the inactive slot (`/etc/dayshield`, `/var/lib/dayshield`, WireGuard, Cloudflared, host identity, SSH host keys, and network state).
+5. Writes the inactive slot fstab for `/`, `/boot`, and `/boot/efi`.
+6. Copies the inactive slot kernel/initrd into `/boot/dayshield/slot-{a,b}/`.
+7. Regenerates GRUB entries `dayshield-a` and `dayshield-b`.
+8. Runs `grub-reboot` for a one-shot trial boot into the new slot.
+9. On the next boot, DayShield waits for critical service health, then runs `grub-set-default` to confirm the slot.
+10. If health confirmation fails while DayShield is running, it schedules the previous slot and reboots. The rootfs image also includes a small systemd watchdog that reboots to the previous slot if confirmation never happens.
+
+Single-root appliances cannot use in-place rootfs updates. They will continue to show a rebuild/reinstall requirement until migrated to the A/B partition layout.
 
 ## Release Checklist
 
@@ -240,7 +261,7 @@ Appliance will use existing git repos in `/opt/dayshield-*/` instead of download
 - `GET /system/updates/settings` - View update configuration
 - `PUT /system/updates/settings` - Change registry URL / update mode
 - `POST /system/updates/check` - Force check against registry
-- `POST /system/updates/apply` - Download and apply updates atomically
+- `POST /system/updates/apply` - Download and apply runtime updates atomically
 - `POST /system/updates/rollback` - Revert to previous versions (if available)
 
 ## Security Considerations
@@ -256,6 +277,7 @@ Appliance will use existing git repos in `/opt/dayshield-*/` instead of download
 
 1. **GPG Signatures** - Sign artifacts with release key
 2. **Update Scheduling** - Schedule updates during maintenance windows
-3. **Staged Rollout** - Deploy to subset of appliances first
-4. **Differential Updates** - Only download changed components
-5. **Version Pinning** - Lock to specific version instead of latest
+3. **A/B Rootfs Updates** - Add inactive-root deployment with boot-health rollback
+4. **Staged Rollout** - Deploy to subset of appliances first
+5. **Differential Updates** - Only download changed components
+6. **Version Pinning** - Lock to specific version instead of latest

@@ -191,6 +191,7 @@ pub fn update_filter(config: &LoggingConfig) {
 /// Messages are sent as UDP datagrams to the socket; if the socket is not
 /// available the layer degrades silently so that startup continues normally.
 struct SyslogLayer {
+    #[cfg(unix)]
     socket: Option<std::os::unix::net::UnixDatagram>,
     hostname: String,
 }
@@ -201,19 +202,29 @@ impl SyslogLayer {
     /// Opens a connection to `/dev/log`; if that fails the layer is created in
     /// a degraded (no-op) state so the rest of logging still works.
     fn new() -> Self {
-        // We need an unbound datagram socket to send to /dev/log.
-        let socket = std::os::unix::net::UnixDatagram::unbound()
-            .ok()
-            .and_then(|s| {
-                // Try to connect; fall back to None on failure.
-                s.connect("/dev/log").ok().map(|_| s)
-            });
         let host = hostname::get_hostname();
-        Self { socket, hostname: host }
+        #[cfg(unix)]
+        {
+            // We need an unbound datagram socket to send to /dev/log.
+            let socket = std::os::unix::net::UnixDatagram::unbound()
+                .ok()
+                .and_then(|s| {
+                    // Try to connect; fall back to None on failure.
+                    s.connect("/dev/log").ok().map(|_| s)
+                });
+            Self { socket, hostname: host }
+        }
+        #[cfg(not(unix))]
+        {
+            // Syslog via /dev/log is Unix-specific; keep layer as a no-op.
+            Self { hostname: host }
+        }
     }
 
     /// Send a formatted RFC 3164 syslog message.
     fn send(&self, severity: u8, message: &str) {
+        #[cfg(unix)]
+        {
         if let Some(socket) = &self.socket {
             // Facility 1 = user-level messages.
             let facility: u8 = 1;
@@ -221,6 +232,11 @@ impl SyslogLayer {
             let tag = "dayshield-core";
             let msg = format!("<{priority}>{tag}: {message}");
             let _ = socket.send(msg.as_bytes());
+        }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (severity, message);
         }
     }
 }

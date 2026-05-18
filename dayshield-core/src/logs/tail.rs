@@ -35,11 +35,27 @@ struct FileMeta {
 impl FileMeta {
     async fn read(path: &Path) -> Option<Self> {
         use tokio::fs::metadata;
-        use std::os::unix::fs::MetadataExt;
 
-        metadata(path).await.ok().map(|m| FileMeta {
-            ino: m.ino(),
-            size: m.len(),
+        metadata(path).await.ok().map(|m| {
+            #[cfg(unix)]
+            let ino = {
+                use std::os::unix::fs::MetadataExt;
+                m.ino()
+            };
+
+            #[cfg(windows)]
+            let ino = {
+                use std::os::windows::fs::MetadataExt;
+                m.creation_time() ^ m.last_write_time() ^ m.file_size()
+            };
+
+            #[cfg(not(any(unix, windows)))]
+            let ino = 0;
+
+            FileMeta {
+                ino,
+                size: m.len(),
+            }
         })
     }
 }

@@ -83,16 +83,14 @@ cargo test -p -core
 DayShield Firewall release artifacts are produced by
 `.github/workflows/release-artifacts.yml`.
 
-Release flow:
+Release/update model is **manifest-driven (Option B)**:
 
-1. Merge the required `dayshield-core`, `dayshield-ui`, and `dayshield-rootfs`
-    changes.
-2. Create and push a version tag from `dayshield-core`, for example `v1.2.3`.
-3. GitHub Actions builds and publishes:
-    - `core-vX.Y.Z.tar.zst`
-    - `ui-vX.Y.Z.tar.zst`
-    - `rootfs-vX.Y.Z.tar.zst`
-    - `checksums.txt`
+1. `dayshield-core`, `dayshield-ui`, and `dayshield-rootfs` publish artifacts with
+   independent tags/versions.
+2. A central `manifest.json` is generated/updated with per-component metadata
+   (`version`, `downloadUrl`, `checksumSha256`, optional signature/source fields).
+3. Appliances consume that manifest in registry mode and evaluate updates per
+   component.
 
-Installed appliances consume these prebuilt artifacts through the update
-registry. They do not build core or UI on the appliance.
+Compatibility note: the updater still supports a legacy GitHub release fallback,
+but manifest is the primary source of truth.

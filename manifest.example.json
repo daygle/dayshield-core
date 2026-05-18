@@ -1,0 +1,33 @@
+{
+  "generatedAt": "2026-05-18T11:00:00Z",
+  "components": [
+    {
+      "component": "core",
+      "version": "1.4.2",
+      "downloadUrl": "https://github.com/daygle/dayshield-core/releases/download/v1.4.2/core-v1.4.2.tar.zst",
+      "checksumSha256": "REPLACE_WITH_SHA256",
+      "signatureUrl": "https://github.com/daygle/dayshield-core/releases/download/v1.4.2/core-v1.4.2.tar.zst.sig",
+      "sourceRepo": "daygle/dayshield-core",
+      "sourceTag": "v1.4.2",
+      "sourceReleaseUrl": "https://github.com/daygle/dayshield-core/releases/tag/v1.4.2"
+    },
+    {
+      "component": "ui",
+      "version": "2.1.0",
+      "downloadUrl": "https://github.com/daygle/dayshield-ui/releases/download/v2.1.0/ui-v2.1.0.tar.zst",
+      "checksumSha256": "REPLACE_WITH_SHA256",
+      "sourceRepo": "daygle/dayshield-ui",
+      "sourceTag": "v2.1.0",
+      "sourceReleaseUrl": "https://github.com/daygle/dayshield-ui/releases/tag/v2.1.0"
+    },
+    {
+      "component": "rootfs",
+      "version": "2026.05.10",
+      "downloadUrl": "https://github.com/daygle/dayshield-rootfs/releases/download/v2026.05.10/rootfs-v2026.05.10.tar.zst",
+      "checksumSha256": "REPLACE_WITH_SHA256",
+      "sourceRepo": "daygle/dayshield-rootfs",
+      "sourceTag": "v2026.05.10",
+      "sourceReleaseUrl": "https://github.com/daygle/dayshield-rootfs/releases/tag/v2026.05.10"
+    }
+  ]
+}

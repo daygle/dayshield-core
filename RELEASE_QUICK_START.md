@@ -2,44 +2,39 @@
 
 ## TL;DR
 
-**No build tools on appliance anymore!** All components are prebuilt and hosted on GitHub Releases.
+**No build tools on appliance anymore!** Components are prebuilt and resolved by appliances from a central manifest.
 
 ## One-Time Setup
 
 ### 1. Enable GitHub Actions (if not already)
 
-In `.github/workflows/release-artifacts.yml` (already created in this repository):
-- Automatically triggers on tag push
-- Builds core, ui, rootfs
-- Uploads to GitHub Releases
+In `.github/workflows/release-artifacts.yml` (or your equivalent pipelines):
+- Components can be built/published independently
+- Central `manifest.json` is updated with latest artifact pointers per component
 
-### 2. First Release
+### 2. Publish first manifest-backed artifacts
 
 ```bash
-cd dayshield-core
-git tag v1.0.0
-git push origin v1.0.0
-
-# Wait ~5-10 minutes for GitHub Actions to complete
-# Check: https://github.com/daygle/dayshield-core/releases/tag/v1.0.0
+# Publish artifact(s) from component repo(s), then publish manifest.json
+# with core/ui/rootfs entries that include version/url/checksum.
 ```
 
-You should see:
-- `core-v1.0.0.tar.zst` (prebuilt binary)
-- `ui-v1.0.0.tar.zst` (built dist/)
-- `rootfs-v1.0.0.tar.zst` (A/B rootfs slot image)
-- `checksums.txt` (SHA256 hashes)
+You should have a manifest similar to:
+- `core` entry (independent version/tag)
+- `ui` entry (independent version/tag)
+- `rootfs` entry (independent version/tag)
+- top-level `generatedAt`
 
 ## Appliance Update (User/Admin)
 
 ### Via Web Console
 
 1. Go to **System** > **Updates**
-2. Click **Check for Updates** -> Shows runtime updates and rootfs A/B slot readiness
+2. Click **Check for Updates** -> Reads manifest and shows per-component availability
 3. Click **Apply Runtime Updates** -> Downloads and applies core/UI atomically
 4. If all OK -> Shows success
 5. If any service fails -> Auto-rollback to previous version
-6. If rootfs changed, click **Stage Rootfs Update** -> writes the inactive root slot and schedules a one-shot trial boot
+6. If rootfs changed, click **Stage Rootfs Update** -> writes inactive root slot and schedules a one-shot trial boot
 7. Reboot to trial the new rootfs; DayShield confirms it after service health checks or schedules rollback to the previous slot
 
 ### Via API
@@ -66,7 +61,7 @@ curl -X POST https://192.168.50.1:8443/system/updates/apply \
 
 ## Configuration
 
-### Default (GitHub Releases - Recommended)
+### Default (Manifest Registry - Recommended)
 
 Already configured in code. In `updates_settings.json`:
 ```json
@@ -74,12 +69,12 @@ Already configured in code. In `updates_settings.json`:
   "autoCheckEnabled": true,
   "checkIntervalMinutes": 60,
   "updateMode": "registry",
-  "registryUrl": "https://api.github.com/repos/daygle/dayshield-core",
+  "registryUrl": "https://updates.example.com/manifest.json",
   "verifyArtifactSignatures": true
 }
 ```
 
-**Note**: Uses `dayshield-core` repo by default. Change `registryUrl` to use a different repo:
+**Note**: You may still point at a GitHub API repo URL if that repo publishes `manifest.json`:
 ```json
 {
   "registryUrl": "https://api.github.com/repos/daygle/dayshield-core"
@@ -116,10 +111,7 @@ git tag "v1.2.4"
 git push origin "v1.2.4"
 ```
 
-GitHub Actions automatically:
-1. Builds everything
-2. Creates GitHub Release
-3. Appliances auto-discover next time they check
+Pipelines update artifacts and publish a new manifest. Appliances auto-discover on next check.
 
 ## Deployment Options
 
@@ -135,17 +127,12 @@ GitHub Actions automatically:
 
 ### Appliance shows "No updates available"
 
-Check if release exists:
+Check if manifest is reachable:
 ```bash
-curl https://api.github.com/repos/daygle/dayshield-core/releases/latest | jq '.tag_name'
+curl -s https://updates.example.com/manifest.json | jq
 ```
 
-If empty, create a release:
-```bash
-git tag v1.0.1
-git push origin v1.0.1
-# Wait 5-10 minutes
-```
+If missing expected entries, republish artifacts and regenerate manifest.
 
 ### Update failed - can't reach GitHub
 

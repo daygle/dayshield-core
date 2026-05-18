@@ -62,6 +62,18 @@ async fn main() -> anyhow::Result<()> {
         );
         return Ok(());
     }
+    if matches!(
+        args.get(1).map(String::as_str),
+        Some(
+            "update-status"
+                | "update-check"
+                | "update-apply"
+                | "update-rollback"
+                | "update-validate"
+        )
+    ) {
+        return run_update_cli(&args[1..]).await;
+    }
 
     // Initialise structured logging with environment-variable defaults.
     // A second, more precise call below updates the filter once the
@@ -150,6 +162,127 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     Ok(())
+}
+
+async fn run_update_cli(args: &[String]) -> anyhow::Result<()> {
+    let command = args[0].as_str();
+    let component_arg = args
+        .iter()
+        .skip(1)
+        .find(|arg| !arg.starts_with("--"))
+        .map(String::as_str);
+    let component = parse_update_component(component_arg)?;
+    let force_partial = args.iter().any(|arg| arg == "--force-partial");
+
+    let (state_inner, _notify_rx) = AppState::new();
+    let state = Arc::new(state_inner);
+
+    match command {
+        "update-status" => {
+            let status = update::get_status(&state).await;
+            print_update_status(&status);
+        }
+        "update-check" => {
+            let status = update::check_for_updates(&state).await?;
+            print_update_status(&status);
+        }
+        "update-apply" => {
+            let result = update::apply_updates(&state, component, force_partial).await?;
+            print_update_action_result(&result);
+        }
+        "update-rollback" => {
+            let result = update::rollback_updates(&state, component, force_partial).await?;
+            print_update_action_result(&result);
+        }
+        "update-validate" => {
+            let result = update::validate_updates(&state, component, force_partial).await?;
+            print_update_action_result(&result);
+        }
+        _ => unreachable!(),
+    }
+
+    Ok(())
+}
+
+fn parse_update_component(value: Option<&str>) -> anyhow::Result<update::UpdateComponent> {
+    match value.unwrap_or("both") {
+        "core" => Ok(update::UpdateComponent::Core),
+        "ui" => Ok(update::UpdateComponent::Ui),
+        "rootfs" => Ok(update::UpdateComponent::Rootfs),
+        "both" => Ok(update::UpdateComponent::Both),
+        other => anyhow::bail!(
+            "invalid update component '{other}' (expected core, ui, rootfs, or both)"
+        ),
+    }
+}
+
+fn print_update_status(status: &update::UpdatesStatus) {
+    println!("DayShield update status");
+    println!(
+        "Last checked: {}",
+        status.last_checked_at.as_deref().unwrap_or("never")
+    );
+    println!(
+        "Last applied: {}",
+        status.last_applied_at.as_deref().unwrap_or("never")
+    );
+    println!("Pending reboot: {}", yes_no(status.pending_reboot));
+    println!(
+        "Pending appliance rebuild: {}",
+        yes_no(status.pending_appliance_rebuild)
+    );
+    if let Some(reason) = &status.appliance_rebuild_reason {
+        println!("Rebuild reason: {reason}");
+    }
+    println!();
+    println!("Components:");
+    for component in &status.components {
+        println!(
+            "  {:<6} current={} remote={} update={} error={}",
+            component.component,
+            component.current_version.as_deref().unwrap_or("unknown"),
+            component.remote_version.as_deref().unwrap_or("unknown"),
+            yes_no(component.update_available),
+            component.last_error.as_deref().unwrap_or("-"),
+        );
+    }
+    if let Some(slot) = &status.rootfs_slot_status {
+        println!();
+        println!(
+            "Rootfs slots: supported={} active={} inactive={} reason={}",
+            yes_no(slot.supported),
+            slot.active_slot.as_deref().unwrap_or("unknown"),
+            slot.inactive_slot.as_deref().unwrap_or("unknown"),
+            slot.reason.as_deref().unwrap_or("-"),
+        );
+    }
+    if !status.operation_logs.is_empty() {
+        println!();
+        println!("Recent update log:");
+        let start = status.operation_logs.len().saturating_sub(5);
+        for entry in &status.operation_logs[start..] {
+            println!("  {} [{}] {}", entry.timestamp, entry.level, entry.message);
+        }
+    }
+}
+
+fn print_update_action_result(result: &update::UpdatesActionResult) {
+    println!("DayShield update {}", result.operation);
+    println!("Success: {}", yes_no(result.success));
+    println!("Message: {}", result.message);
+    for detail in &result.details {
+        println!("  - {detail}");
+    }
+    println!();
+    print_update_status(&result.status);
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
 }
 
 fn default_bind_addr(ipv6_enabled: bool) -> &'static str {

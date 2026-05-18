@@ -24,8 +24,7 @@ use tracing::{info, warn};
 use crate::{
     config::models::SystemSettings,
     engine::{
-        dns::apply_config_with_ipv6 as apply_dns_config,
-        interfaces::refresh_router_advertisements,
+        dns::apply_config_with_ipv6 as apply_dns_config, interfaces::refresh_router_advertisements,
         ipv6::apply_ipv6_setting,
     },
     state::AppState,
@@ -122,7 +121,9 @@ pub async fn update_config(
     if previous.ipv6_enabled != settings.ipv6_enabled {
         apply_ipv6_setting(settings.ipv6_enabled)
             .await
-            .map_err(|e| SystemApiError::CommandError(format!("failed to apply IPv6 setting: {e:#}")))?;
+            .map_err(|e| {
+                SystemApiError::CommandError(format!("failed to apply IPv6 setting: {e:#}"))
+            })?;
 
         let full_cfg = state
             .config_store
@@ -131,12 +132,16 @@ pub async fn update_config(
 
         crate::captive_portal::apply_current_ruleset_nft(&state.config_store)
             .await
-            .map_err(|e| SystemApiError::CommandError(format!("failed to reapply firewall rules: {e}")))?;
+            .map_err(|e| {
+                SystemApiError::CommandError(format!("failed to reapply firewall rules: {e}"))
+            })?;
 
         if let Some(dns) = full_cfg.dns.as_ref() {
             apply_dns_config(dns, full_cfg.dot.as_ref(), settings.ipv6_enabled)
                 .await
-                .map_err(|e| SystemApiError::CommandError(format!("failed to reapply DNS config: {e:#}")))?;
+                .map_err(|e| {
+                    SystemApiError::CommandError(format!("failed to reapply DNS config: {e:#}"))
+                })?;
         }
 
         refresh_router_advertisements(&full_cfg.interfaces, settings.ipv6_enabled).await;
@@ -165,11 +170,12 @@ pub async fn reboot(
     tokio::process::Command::new("systemctl")
         .arg("reboot")
         .spawn()
-        .map_err(|e| SystemApiError::CommandError(format!("failed to spawn systemctl reboot: {e}")))?
+        .map_err(|e| {
+            SystemApiError::CommandError(format!("failed to spawn systemctl reboot: {e}"))
+        })?
         .wait()
         .await
-        .map_err(|e| SystemApiError::CommandError(format!("systemctl reboot failed: {e}")))?
-        ;
+        .map_err(|e| SystemApiError::CommandError(format!("systemctl reboot failed: {e}")))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -185,11 +191,12 @@ pub async fn shutdown(
     tokio::process::Command::new("systemctl")
         .arg("poweroff")
         .spawn()
-        .map_err(|e| SystemApiError::CommandError(format!("failed to spawn systemctl poweroff: {e}")))?
+        .map_err(|e| {
+            SystemApiError::CommandError(format!("failed to spawn systemctl poweroff: {e}"))
+        })?
         .wait()
         .await
-        .map_err(|e| SystemApiError::CommandError(format!("systemctl poweroff failed: {e}")))?
-        ;
+        .map_err(|e| SystemApiError::CommandError(format!("systemctl poweroff failed: {e}")))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -245,7 +252,7 @@ pub async fn check_updates(
 }
 
 /// Handler: apply updates for selected component(s).
-/// 
+///
 /// Spawns the update process in a background task and returns immediately with
 /// 202 Accepted. The caller should poll `/system/updates/status` to monitor progress.
 pub async fn apply_updates(
@@ -285,7 +292,10 @@ pub async fn apply_updates(
     tokio::spawn(async move {
         match update::apply_updates(&state_clone, component, force_partial).await {
             Ok(result) => {
-                info!("updates: background apply_updates completed successfully: {}", result.message);
+                info!(
+                    "updates: background apply_updates completed successfully: {}",
+                    result.message
+                );
             }
             Err(e) => {
                 warn!("updates: background apply_updates failed: {}", e);
@@ -295,7 +305,7 @@ pub async fn apply_updates(
 
     // Get current status to return immediately
     let current_status = update::get_status(&state).await;
-    
+
     // Return 202 Accepted immediately with current status to prevent timeout
     Ok((
         StatusCode::ACCEPTED,
@@ -305,12 +315,12 @@ pub async fn apply_updates(
             "message": "Update process started. Progress is available in update status logs.",
             "details": [],
             "status": current_status
-        }))
+        })),
     ))
 }
 
 /// Handler: rollback selected component(s) to previous commit.
-/// 
+///
 /// Spawns the rollback process in a background task and returns immediately.
 /// The caller should poll `/system/updates/status` to monitor progress.
 pub async fn rollback_updates(
@@ -325,7 +335,10 @@ pub async fn rollback_updates(
     tokio::spawn(async move {
         match update::rollback_updates(&state_clone, component, force_partial).await {
             Ok(result) => {
-                info!("updates: background rollback_updates completed successfully: {}", result.message);
+                info!(
+                    "updates: background rollback_updates completed successfully: {}",
+                    result.message
+                );
             }
             Err(e) => {
                 warn!("updates: background rollback_updates failed: {}", e);
@@ -335,7 +348,7 @@ pub async fn rollback_updates(
 
     // Get current status to return immediately
     let current_status = update::get_status(&state).await;
-    
+
     // Return 202 Accepted immediately with current status
     Ok((
         StatusCode::ACCEPTED,
@@ -345,7 +358,7 @@ pub async fn rollback_updates(
             "message": "Rollback process started. Progress is available in update status logs.",
             "details": [],
             "status": current_status
-        }))
+        })),
     ))
 }
 

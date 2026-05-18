@@ -38,10 +38,7 @@ use axum::{
 };
 use tracing::debug;
 
-use crate::auth::{
-    model::AuthenticatedUser,
-    session::validate_token,
-};
+use crate::auth::{model::AuthenticatedUser, session::validate_token};
 
 // ---------------------------------------------------------------------------
 // Public path list
@@ -130,11 +127,9 @@ fn extract_token(req: &Request) -> Option<String> {
 ///     .route("/protected", get(handler))
 ///     .layer(middleware::from_fn_with_state(state, auth_middleware));
 /// ```
-pub async fn auth_middleware(
-    req: Request,
-    next: Next,
-) -> Response {
-    auth_middleware_with_key_path(req, next, Path::new(crate::auth::session::DEFAULT_KEY_PATH)).await
+pub async fn auth_middleware(req: Request, next: Next) -> Response {
+    auth_middleware_with_key_path(req, next, Path::new(crate::auth::session::DEFAULT_KEY_PATH))
+        .await
 }
 
 /// Testable variant that accepts an explicit key path.
@@ -187,17 +182,14 @@ pub async fn auth_middleware_with_key_path(
                 }
                 _ => (StatusCode::UNAUTHORIZED, "invalid token"),
             };
-            return (
-                status,
-                Json(serde_json::json!({ "error": msg })),
-            )
-                .into_response();
+            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
         }
     };
 
     // Inject authenticated user into request extensions.
-    req.extensions_mut()
-        .insert(AuthenticatedUser { username: claims.sub });
+    req.extensions_mut().insert(AuthenticatedUser {
+        username: claims.sub,
+    });
 
     next.run(req).await
 }
@@ -231,9 +223,7 @@ mod tests {
             .route("/system/status", get(dummy_handler))
             .layer(middleware::from_fn(move |req, next| {
                 let kp = key_path.clone();
-                async move {
-                    auth_middleware_with_key_path(req, next, &kp).await
-                }
+                async move { auth_middleware_with_key_path(req, next, &kp).await }
             }))
     }
 

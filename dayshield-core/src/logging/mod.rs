@@ -30,9 +30,9 @@
 use std::sync::OnceLock;
 
 use tracing::level_filters::LevelFilter;
-use tracing_subscriber::{fmt, reload, EnvFilter, Registry};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{fmt, reload, EnvFilter, Registry};
 
 /// Log output format.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -86,7 +86,11 @@ fn build_filter(config: &LoggingConfig) -> EnvFilter {
         config.level.clone()
     };
 
-    let base = if base.is_empty() { "info".to_string() } else { base };
+    let base = if base.is_empty() {
+        "info".to_string()
+    } else {
+        base
+    };
 
     // Append per-module overrides.
     if config.module_overrides.is_empty() {
@@ -118,7 +122,11 @@ pub fn init() {
 
     let config = LoggingConfig {
         level: String::new(),
-        format: if format == "json" { LogFormat::Json } else { LogFormat::Text },
+        format: if format == "json" {
+            LogFormat::Json
+        } else {
+            LogFormat::Text
+        },
         module_overrides: Default::default(),
         syslog,
     };
@@ -149,10 +157,7 @@ pub fn init_with_config(config: &LoggingConfig) {
             .with(filter_layer)
             .with(fmt::layer().json().with_target(true));
         if use_syslog {
-            subscriber
-                .with(SyslogLayer::new())
-                .try_init()
-                .ok();
+            subscriber.with(SyslogLayer::new()).try_init().ok();
         } else {
             subscriber.try_init().ok();
         }
@@ -161,10 +166,7 @@ pub fn init_with_config(config: &LoggingConfig) {
             .with(filter_layer)
             .with(fmt::layer().with_target(true));
         if use_syslog {
-            subscriber
-                .with(SyslogLayer::new())
-                .try_init()
-                .ok();
+            subscriber.with(SyslogLayer::new()).try_init().ok();
         } else {
             subscriber.try_init().ok();
         }
@@ -212,7 +214,10 @@ impl SyslogLayer {
                     // Try to connect; fall back to None on failure.
                     s.connect("/dev/log").ok().map(|_| s)
                 });
-            Self { socket, hostname: host }
+            Self {
+                socket,
+                hostname: host,
+            }
         }
         #[cfg(not(unix))]
         {
@@ -225,14 +230,14 @@ impl SyslogLayer {
     fn send(&self, severity: u8, message: &str) {
         #[cfg(unix)]
         {
-        if let Some(socket) = &self.socket {
-            // Facility 1 = user-level messages.
-            let facility: u8 = 1;
-            let priority = facility * 8 + severity;
-            let tag = "dayshield-core";
-            let msg = format!("<{priority}>{tag}: {message}");
-            let _ = socket.send(msg.as_bytes());
-        }
+            if let Some(socket) = &self.socket {
+                // Facility 1 = user-level messages.
+                let facility: u8 = 1;
+                let priority = facility * 8 + severity;
+                let tag = "dayshield-core";
+                let msg = format!("<{priority}>{tag}: {message}");
+                let _ = socket.send(msg.as_bytes());
+            }
         }
         #[cfg(not(unix))]
         {
@@ -297,7 +302,11 @@ mod hostname {
         std::fs::read_to_string("/etc/hostname")
             .map(|s| {
                 let trimmed = s.trim().to_string();
-                if trimmed.is_empty() { "localhost".to_string() } else { trimmed }
+                if trimmed.is_empty() {
+                    "localhost".to_string()
+                } else {
+                    trimmed
+                }
             })
             .unwrap_or_else(|_| "localhost".to_string())
     }

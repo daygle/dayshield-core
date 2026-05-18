@@ -12,9 +12,9 @@ use axum::{extract::State, response::IntoResponse, Json};
 use serde::Serialize;
 use tracing::warn;
 
-use crate::state::AppState;
 use crate::engine::acme::AcmeEngine;
 use crate::engine::interfaces::list_kernel_interfaces;
+use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // GET /dashboard/system
@@ -38,9 +38,7 @@ pub struct DashboardSystemStatus {
     pub temperature: Option<f64>,
 }
 
-pub async fn get_system_status(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn get_system_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Pull the latest snapshot from the metrics buffer (non-blocking read).
     let snapshot = {
         let buf = state.metrics_buffer.read().await;
@@ -97,10 +95,7 @@ async fn read_disk_percent(mount: &str) -> f64 {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 // Use% is at index 4 (e.g. "42%"), or compute from blocks.
                 if parts.len() >= 5 {
-                    return parts[4]
-                        .trim_end_matches('%')
-                        .parse::<f64>()
-                        .unwrap_or(0.0);
+                    return parts[4].trim_end_matches('%').parse::<f64>().unwrap_or(0.0);
                 }
             }
             0.0
@@ -137,9 +132,7 @@ pub struct NetworkStatus {
     pub lan_ifaces: Vec<LanIface>,
 }
 
-pub async fn get_network_status(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn get_network_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Gather configured interfaces.
     let configured = state.interfaces.read().await.clone();
 
@@ -206,11 +199,16 @@ pub async fn get_network_status(
         .map(|i| LanIface {
             name: i.name.clone(),
             description: i.description.clone(),
-            ip: i.addresses.iter().find(|cidr| cidr.contains('.'))
+            ip: i
+                .addresses
+                .iter()
+                .find(|cidr| cidr.contains('.'))
                 .map(|cidr| cidr.split('/').next().unwrap_or(cidr).to_string())
                 .or_else(|| kernel_ip_for(&i.name, false)),
             ipv6: if ipv6_enabled {
-                i.addresses.iter().find(|cidr| cidr.contains(':'))
+                i.addresses
+                    .iter()
+                    .find(|cidr| cidr.contains(':'))
                     .map(|cidr| cidr.split('/').next().unwrap_or(cidr).to_string())
                     .or_else(|| kernel_ip_for(&i.name, true))
             } else {
@@ -238,15 +236,16 @@ async fn gateway_reachable() -> &'static str {
         Ok(content) => {
             // Each line after the header: Iface Destination Gateway ...
             // A destination of 00000000 is the default route.
-            let has_default = content
-                .lines()
-                .skip(1)
-                .any(|line| {
-                    let mut cols = line.split_whitespace();
-                    cols.next(); // iface
-                    cols.next().map(|dest| dest == "00000000").unwrap_or(false)
-                });
-            if has_default { "up" } else { "down" }
+            let has_default = content.lines().skip(1).any(|line| {
+                let mut cols = line.split_whitespace();
+                cols.next(); // iface
+                cols.next().map(|dest| dest == "00000000").unwrap_or(false)
+            });
+            if has_default {
+                "up"
+            } else {
+                "down"
+            }
         }
         Err(_) => "unknown",
     }
@@ -264,9 +263,7 @@ pub struct SecurityStatus {
     pub crowdsec_active_decisions: usize,
 }
 
-pub async fn get_security_status(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn get_security_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let firewall_rule_count = state.firewall_rules.read().await.len();
     let crowdsec_active_decisions = state.crowdsec_decisions.read().await.len();
 
@@ -275,7 +272,8 @@ pub async fn get_security_status(
         let snap = buf.latest();
         (
             snap.map(|s| s.firewall.state_count).unwrap_or(0),
-            snap.map(|s| s.suricata.alerts_last_minute as f64 / 60.0).unwrap_or(0.0),
+            snap.map(|s| s.suricata.alerts_last_minute as f64 / 60.0)
+                .unwrap_or(0.0),
         )
     };
 
@@ -301,14 +299,8 @@ pub struct AcmeStatus {
     pub next_renewal: Option<String>,
 }
 
-pub async fn get_acme_status(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    let acme_cfg = state
-        .config_store
-        .load_acme_config()
-        .ok()
-        .flatten();
+pub async fn get_acme_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let acme_cfg = state.config_store.load_acme_config().ok().flatten();
 
     let (domains, cert_exists, needs_renewal, expires_in_days, next_renewal) = match acme_cfg {
         Some(cfg) if cfg.enabled => {
@@ -316,19 +308,22 @@ pub async fn get_acme_status(
             let primary = domains.first().cloned();
             let engine = AcmeEngine::new(cfg.clone());
 
-            let (cert_exists, needs_renewal, expires_in_days) = if let Some(primary_domain) = &primary {
-                let cert_path = engine.cert_path(primary_domain);
-                let exists = cert_path.exists();
-                let renewal_check = engine.renewal_check().await.unwrap_or(true);
-                let days = if exists {
-                    cert_expiry_days(cert_path.to_str().unwrap_or_default()).await.unwrap_or(0)
+            let (cert_exists, needs_renewal, expires_in_days) =
+                if let Some(primary_domain) = &primary {
+                    let cert_path = engine.cert_path(primary_domain);
+                    let exists = cert_path.exists();
+                    let renewal_check = engine.renewal_check().await.unwrap_or(true);
+                    let days = if exists {
+                        cert_expiry_days(cert_path.to_str().unwrap_or_default())
+                            .await
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    (exists, !exists || renewal_check, days)
                 } else {
-                    0
+                    (false, false, 0)
                 };
-                (exists, !exists || renewal_check, days)
-            } else {
-                (false, false, 0)
-            };
 
             let next = cfg
                 .domains
@@ -339,8 +334,7 @@ pub async fn get_acme_status(
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
                     let next_secs = now + cfg.renew_interval_hours * 3600;
-                    chrono::DateTime::from_timestamp(next_secs as i64, 0)
-                        .map(|dt| dt.to_rfc3339())
+                    chrono::DateTime::from_timestamp(next_secs as i64, 0).map(|dt| dt.to_rfc3339())
                 })
                 .flatten();
 
@@ -375,11 +369,9 @@ async fn cert_expiry_days(path: &str) -> Option<i64> {
     let date_str = text.trim().strip_prefix("notAfter=")?;
 
     // Parse with chrono; openssl uses a non-ISO format.
-    let dt = chrono::DateTime::parse_from_str(
-        &format!("{date_str} +0000"),
-        "%b %e %H:%M:%S %Y %Z %z",
-    )
-    .ok()?;
+    let dt =
+        chrono::DateTime::parse_from_str(&format!("{date_str} +0000"), "%b %e %H:%M:%S %Y %Z %z")
+            .ok()?;
 
     let now = chrono::Utc::now();
     Some(dt.signed_duration_since(now).num_days())

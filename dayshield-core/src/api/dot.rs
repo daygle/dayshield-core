@@ -103,9 +103,7 @@ fn default_dot_lan_only() -> bool {
 /// (disabled) configuration.  The private key is included in the response;
 /// this endpoint is protected by the application-level JWT auth middleware
 /// applied to all registered API routes.
-pub async fn get_config(
-    State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, DotError> {
+pub async fn get_config(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, DotError> {
     let cfg = state
         .config_store
         .load_dot_config()
@@ -169,7 +167,11 @@ pub async fn update_config(
         .save_dot_config(cfg.clone())
         .map_err(DotError::StorageError)?;
 
-    info!(enabled = cfg.enabled, port = cfg.port, "dot: config persisted");
+    info!(
+        enabled = cfg.enabled,
+        port = cfg.port,
+        "dot: config persisted"
+    );
 
     // --- Apply -------------------------------------------------------------
     //

@@ -25,7 +25,10 @@ impl NotifyQueue {
     }
 
     /// Enqueue an event, returning [`Err`] if the queue is full.
-    pub async fn enqueue(&self, event: NotifyEvent) -> Result<(), crate::notify::smtp::NotifyError> {
+    pub async fn enqueue(
+        &self,
+        event: NotifyEvent,
+    ) -> Result<(), crate::notify::smtp::NotifyError> {
         self.tx
             .try_send(event)
             .map_err(|_| crate::notify::smtp::NotifyError::QueueFull)

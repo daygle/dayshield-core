@@ -64,8 +64,10 @@ pub enum LogEvent {
         /// Source port (0 when not available).
         sport: u16,
         /// Destination port (0 when not available).
-        dport: u16,        /// Network protocol token if present (e.g. "TCP", "UDP").
-        proto: String,        /// Network interface name (e.g. `"eth0"`).
+        dport: u16,
+        /// Network protocol token if present (e.g. "TCP", "UDP").
+        proto: String,
+        /// Network interface name (e.g. `"eth0"`).
         iface: String,
     },
 

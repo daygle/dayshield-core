@@ -13,16 +13,19 @@
 
 use std::sync::Arc;
 
-use axum::{extract::{Path, State}, http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::{
     config::models::{
         ensure_ipv6_allowed, is_valid_cidr, is_valid_interface_name, is_valid_mss, is_valid_mtu,
-        is_valid_vlan_id, Ipv6Mode, RouterAdvertisementMode,
-        WanMode,
-        Gateway, Interface,
+        is_valid_vlan_id, Gateway, Interface, Ipv6Mode, RouterAdvertisementMode, WanMode,
     },
     engine::gateway::list_kernel_gateways_with_ipv6,
     engine::interfaces::{
@@ -110,10 +113,10 @@ fn sync_auto_gateways_from_interfaces(
     }
 
     for desired in desired_gateways {
-        if let Some(existing) = gateways
-            .iter_mut()
-            .find(|g| g.interface == desired.interface && g.description.as_deref() == Some(AUTO_GATEWAY_DESCRIPTION))
-        {
+        if let Some(existing) = gateways.iter_mut().find(|g| {
+            g.interface == desired.interface
+                && g.description.as_deref() == Some(AUTO_GATEWAY_DESCRIPTION)
+        }) {
             if existing.gateway_ip != desired.gateway_ip {
                 existing.gateway_ip = desired.gateway_ip.clone();
                 changed = true;
@@ -160,7 +163,7 @@ async fn apply_full_nftables_rules(state: &Arc<AppState>) -> Result<(), Interfac
 pub struct InterfaceResponse {
     pub name: String,
     pub description: Option<String>,
-    pub r#type: String,  // Inferred from config (e.g. "vlan" if vlan tag present, else "ethernet")
+    pub r#type: String, // Inferred from config (e.g. "vlan" if vlan tag present, else "ethernet")
     pub enabled: bool,
     pub dhcp4: bool,
     pub dhcp6: bool,
@@ -179,10 +182,10 @@ pub struct InterfaceResponse {
     pub mss: Option<u16>,
     pub vlan: Option<u16>,
     pub parent_interface: Option<String>,
-    pub wan_mode: Option<String>,      // "dhcp" or "pppoe"
+    pub wan_mode: Option<String>, // "dhcp" or "pppoe"
     pub pppoe_username: Option<String>,
-    pub ipv4_address: Option<String>,  // First address from CIDR (e.g. "192.168.1.1")
-    pub ipv4_prefix: Option<u8>,       // Prefix from first address (e.g. 24)
+    pub ipv4_address: Option<String>, // First address from CIDR (e.g. "192.168.1.1")
+    pub ipv4_prefix: Option<u8>,      // Prefix from first address (e.g. 24)
     pub ipv6_address: Option<String>,
     pub ipv6_prefix: Option<u8>,
     pub gateway: Option<String>,
@@ -225,11 +228,9 @@ impl InterfaceResponse {
             .map(|(addr, prefix)| (Some(addr), Some(prefix)))
             .unwrap_or((None, None));
 
-        let wan_mode = iface.wan_mode.as_ref().map(|m| {
-            match m {
-                crate::config::models::WanMode::Dhcp => "dhcp".to_string(),
-                crate::config::models::WanMode::Pppoe => "pppoe".to_string(),
-            }
+        let wan_mode = iface.wan_mode.as_ref().map(|m| match m {
+            crate::config::models::WanMode::Dhcp => "dhcp".to_string(),
+            crate::config::models::WanMode::Pppoe => "pppoe".to_string(),
         });
 
         let effective_ipv6_mode = iface.effective_ipv6_mode();
@@ -239,13 +240,12 @@ impl InterfaceResponse {
             Ipv6Mode::Slaac => "slaac".to_string(),
             Ipv6Mode::TrackInterface => "track_interface".to_string(),
         });
-        let ra_mode = if matches!(effective_ipv6_mode, Ipv6Mode::TrackInterface)
-            || iface.ra_mode.is_some()
-        {
-            Some(iface.effective_ra_mode().as_str().to_string())
-        } else {
-            None
-        };
+        let ra_mode =
+            if matches!(effective_ipv6_mode, Ipv6Mode::TrackInterface) || iface.ra_mode.is_some() {
+                Some(iface.effective_ra_mode().as_str().to_string())
+            } else {
+                None
+            };
 
         // Infer type from config (vlan if vlan tag present, else ethernet)
         let r#type = if iface.vlan.is_some() {
@@ -347,11 +347,11 @@ pub struct InterfaceRequest {
     pub mss: Option<u16>,
     pub vlan: Option<u16>,
     pub parent_interface: Option<String>,
-    pub wan_mode: Option<String>,      // "dhcp" or "pppoe"
+    pub wan_mode: Option<String>, // "dhcp" or "pppoe"
     pub pppoe_username: Option<String>,
     pub pppoe_password: Option<String>,
-    pub ipv4_address: Option<String>,  // UI sends this as separate field
-    pub ipv4_prefix: Option<u8>,       // UI sends this as separate field
+    pub ipv4_address: Option<String>, // UI sends this as separate field
+    pub ipv4_prefix: Option<u8>,      // UI sends this as separate field
     pub ipv6_address: Option<String>,
     pub ipv6_prefix: Option<u8>,
     pub gateway: Option<String>,
@@ -410,10 +410,7 @@ impl InterfaceRequest {
             Some("static") => Some(Ipv6Mode::Static),
             _ => None,
         };
-        let ra_mode = self
-            .ra_mode
-            .as_deref()
-            .and_then(Self::parse_ra_mode);
+        let ra_mode = self.ra_mode.as_deref().and_then(Self::parse_ra_mode);
 
         let effective_mode = ipv6_mode.clone().unwrap_or_else(|| {
             if self.dhcp6.unwrap_or(false) {
@@ -470,7 +467,10 @@ pub async fn list_interfaces(
         .load_interfaces()
         .map_err(InterfaceError::StorageError)?;
 
-    info!(count = configured.len(), "interfaces: loaded configured interfaces");
+    info!(
+        count = configured.len(),
+        "interfaces: loaded configured interfaces"
+    );
 
     // Sync the in-memory cache with what is on disk.
     {
@@ -487,7 +487,10 @@ pub async fn list_interfaces(
         }
     };
 
-    info!(count = kernel.len(), "interfaces: discovered kernel interfaces");
+    info!(
+        count = kernel.len(),
+        "interfaces: discovered kernel interfaces"
+    );
 
     // Convert to response format (this also redacts pppoe_password).
     let configured_response: Vec<InterfaceResponse> = configured
@@ -520,7 +523,10 @@ pub async fn list_interfaces(
         })
         .collect::<Vec<_>>();
 
-    Ok(Json(ListInterfacesResponse { configured: configured_response, kernel }))
+    Ok(Json(ListInterfacesResponse {
+        configured: configured_response,
+        kernel,
+    }))
 }
 
 /// Handler: create or update a network interface.
@@ -596,7 +602,13 @@ pub async fn create_interface(
     }
 
     if matches!(ipv6_mode, Ipv6Mode::TrackInterface) {
-        if iface.track_source_interface.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        if iface
+            .track_source_interface
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+        {
             return Err(InterfaceError::ApplyFailed(
                 "track_interface mode requires trackSourceInterface".to_string(),
             ));
@@ -712,7 +724,8 @@ pub async fn create_interface(
                 let ifaces = state.interfaces.read().await;
                 ifaces.iter().any(|i| i.name == parent)
             };
-            let parent_exists = parent_exists || state
+            let parent_exists = parent_exists
+                || state
                     .config_store
                     .load_interfaces()
                     .map_err(InterfaceError::StorageError)?
@@ -724,7 +737,9 @@ pub async fn create_interface(
         }
         None => {
             if iface.parent_interface.is_some() {
-                return Err(InterfaceError::ParentInterfaceWithoutVlan(iface.name.clone()));
+                return Err(InterfaceError::ParentInterfaceWithoutVlan(
+                    iface.name.clone(),
+                ));
             }
         }
     }
@@ -784,7 +799,10 @@ pub async fn create_interface(
 
     info!(name = %iface.name, "interfaces: engine apply complete");
 
-    Ok((StatusCode::CREATED, Json(InterfaceResponse::from_interface(&iface))))
+    Ok((
+        StatusCode::CREATED,
+        Json(InterfaceResponse::from_interface(&iface)),
+    ))
 }
 
 // ---------------------------------------------------------------------------

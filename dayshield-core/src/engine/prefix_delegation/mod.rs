@@ -102,8 +102,7 @@ pub fn compute_track_address(
     if available_bits < 8 && (prefix_id as u32) >= (1u32 << available_bits) {
         warn!(
             prefix_id,
-            available_bits,
-            "prefix_delegation: prefix_id does not fit in available bits"
+            available_bits, "prefix_delegation: prefix_id does not fit in available bits"
         );
         return None;
     }

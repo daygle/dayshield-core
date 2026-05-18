@@ -243,13 +243,11 @@ fn serialise_subsystem(
 }
 
 /// Append a single in-memory file to a TAR [`Builder`].
-fn append_entry<W: Write>(
-    builder: &mut tar::Builder<W>,
-    path: &str,
-    data: &[u8],
-) -> Result<()> {
+fn append_entry<W: Write>(builder: &mut tar::Builder<W>, path: &str, data: &[u8]) -> Result<()> {
     let mut header = tar::Header::new_gnu();
-    header.set_path(path).with_context(|| format!("invalid tar path: {path}"))?;
+    header
+        .set_path(path)
+        .with_context(|| format!("invalid tar path: {path}"))?;
     header.set_size(data.len() as u64);
     header.set_mode(0o644);
     header.set_mtime(0); // deterministic mtime
@@ -280,7 +278,15 @@ mod tests {
         let backup_dir = TempDir::new().unwrap();
         let (_cfg_dir, store) = temp_store();
 
-        let (path, _meta) = create_backup(&store, None, false, None, backup_dir.path(), BackupType::Manual).unwrap();
+        let (path, _meta) = create_backup(
+            &store,
+            None,
+            false,
+            None,
+            backup_dir.path(),
+            BackupType::Manual,
+        )
+        .unwrap();
         assert!(path.exists());
         assert!(path.extension().map(|e| e == "tar").unwrap_or(false));
     }
@@ -290,7 +296,14 @@ mod tests {
         let backup_dir = TempDir::new().unwrap();
         let (_cfg_dir, store) = temp_store();
 
-        let result = create_backup(&store, None, true, None, backup_dir.path(), BackupType::Manual);
+        let result = create_backup(
+            &store,
+            None,
+            true,
+            None,
+            backup_dir.path(),
+            BackupType::Manual,
+        );
         assert!(result.is_err());
     }
 
@@ -299,8 +312,15 @@ mod tests {
         let backup_dir = TempDir::new().unwrap();
         let (_cfg_dir, store) = temp_store();
 
-        let (path, _meta) =
-            create_backup(&store, None, true, Some("s3cr3t"), backup_dir.path(), BackupType::Manual).unwrap();
+        let (path, _meta) = create_backup(
+            &store,
+            None,
+            true,
+            Some("s3cr3t"),
+            backup_dir.path(),
+            BackupType::Manual,
+        )
+        .unwrap();
         assert!(path.exists());
         assert!(path.to_str().unwrap().ends_with(".tar.enc"));
     }

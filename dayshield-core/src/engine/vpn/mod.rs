@@ -152,8 +152,7 @@ pub async fn apply_interface(iface: &WireGuardInterface) -> Result<()> {
     }
 
     let conf_str = generate_config(iface);
-    write_config_atomic(&conf_path, &conf_str)
-        .context("failed to write WireGuard config file")?;
+    write_config_atomic(&conf_path, &conf_str).context("failed to write WireGuard config file")?;
 
     info!(path = %conf_path, "vpn: config file written");
 
@@ -249,9 +248,7 @@ pub async fn generate_keypair() -> Result<(String, String)> {
     pubkey_cmd.stdout(Stdio::piped());
     pubkey_cmd.stderr(Stdio::piped());
 
-    let mut child = pubkey_cmd
-        .spawn()
-        .context("failed to spawn wg pubkey")?;
+    let mut child = pubkey_cmd.spawn().context("failed to spawn wg pubkey")?;
 
     if let Some(stdin) = child.stdin.take() {
         use tokio::io::AsyncWriteExt;
@@ -368,8 +365,7 @@ fn write_config_atomic(path: &str, content: &str) -> Result<()> {
     std::fs::write(&tmp, content)
         .with_context(|| format!("failed to write temporary file {tmp}"))?;
 
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("failed to rename {tmp} to {path}"))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("failed to rename {tmp} to {path}"))?;
 
     Ok(())
 }
@@ -386,7 +382,17 @@ mod tests {
     fn dummy_key(n: u8) -> String {
         // Produce a syntactically valid 44-char base64 string.
         // 43 base64 chars + '='
-        let body: String = (0..43).map(|i| if (i + n) % 3 == 0 { 'A' } else if (i + n) % 3 == 1 { 'B' } else { 'C' }).collect();
+        let body: String = (0..43)
+            .map(|i| {
+                if (i + n) % 3 == 0 {
+                    'A'
+                } else if (i + n) % 3 == 1 {
+                    'B'
+                } else {
+                    'C'
+                }
+            })
+            .collect();
         format!("{body}=")
     }
 

@@ -140,8 +140,7 @@ pub async fn apply_config(config: &Dhcp6Config) -> Result<()> {
     std::fs::create_dir_all("/var/log/kea").context("failed to create /var/log/kea")?;
 
     let conf_str = generate_config(config);
-    write_config_atomic(KEA6_CONF_PATH, &conf_str)
-        .context("failed to write kea-dhcp6.conf")?;
+    write_config_atomic(KEA6_CONF_PATH, &conf_str).context("failed to write kea-dhcp6.conf")?;
     #[cfg(unix)]
     std::fs::set_permissions(KEA6_CONF_PATH, std::fs::Permissions::from_mode(0o644))
         .context("failed to chmod kea-dhcp6.conf")?;
@@ -151,8 +150,11 @@ pub async fn apply_config(config: &Dhcp6Config) -> Result<()> {
          (check dayshield.service sandbox: ReadWritePaths should include /etc/kea)",
     )?;
     #[cfg(unix)]
-    std::fs::set_permissions(KEA6_SYSTEM_CONF_PATH, std::fs::Permissions::from_mode(0o644))
-        .context("failed to chmod system kea-dhcp6.conf")?;
+    std::fs::set_permissions(
+        KEA6_SYSTEM_CONF_PATH,
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .context("failed to chmod system kea-dhcp6.conf")?;
 
     info!(
         path = KEA6_CONF_PATH,

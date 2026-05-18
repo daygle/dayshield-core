@@ -71,11 +71,7 @@ async fn run_collector(state: Arc<AppState>) {
         prev_iface = curr_iface;
 
         // --- Firewall metrics ---
-        let firewall = match tokio::time::timeout(
-            Duration::from_secs(5),
-            collect_firewall(),
-        )
-        .await
+        let firewall = match tokio::time::timeout(Duration::from_secs(5), collect_firewall()).await
         {
             Ok(fm) => fm,
             Err(_) => {

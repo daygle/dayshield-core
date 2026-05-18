@@ -219,7 +219,10 @@ async fn execute_job(state: &Arc<AppState>, job: &ScheduleJobType) -> ScheduledJ
             Ok(result) => {
                 let failed = result.entries.iter().filter(|entry| !entry.success).count();
                 if failed == 0 {
-                    (true, format!("updated {} Dynamic DNS entries", result.entries.len()))
+                    (
+                        true,
+                        format!("updated {} Dynamic DNS entries", result.entries.len()),
+                    )
                 } else {
                     (
                         false,
@@ -244,10 +247,7 @@ async fn execute_job(state: &Arc<AppState>, job: &ScheduleJobType) -> ScheduledJ
                 }
                 Ok((updated, failed)) => (
                     false,
-                    format!(
-                        "updated {} ruleset(s) with {} failure(s)",
-                        updated, failed
-                    ),
+                    format!("updated {} ruleset(s) with {} failure(s)", updated, failed),
                 ),
                 Err(err) => (false, err.to_string()),
             }
@@ -307,7 +307,10 @@ fn validate_config(cfg: &SystemSchedulesConfig) -> Result<()> {
     Ok(())
 }
 
-fn build_response(cfg: SystemSchedulesConfig, status: SchedulesStatusStore) -> SystemSchedulesResponse {
+fn build_response(
+    cfg: SystemSchedulesConfig,
+    status: SchedulesStatusStore,
+) -> SystemSchedulesResponse {
     let mut by_job: HashMap<ScheduleJobType, ScheduledJobRuntimeStatus> = HashMap::new();
     for item in status.jobs {
         by_job.insert(item.job.clone(), item);
@@ -361,8 +364,8 @@ fn save_status(state: &AppState, status: &SchedulesStatusStore) -> Result<()> {
             .with_context(|| format!("failed to create status dir {}", parent.display()))?;
     }
 
-    let raw = serde_json::to_string_pretty(status)
-        .context("failed to serialize schedules status")?;
+    let raw =
+        serde_json::to_string_pretty(status).context("failed to serialize schedules status")?;
     let tmp = path.with_extension("tmp");
     write_restricted(&tmp, raw.as_bytes())?;
     std::fs::rename(&tmp, &path)
@@ -372,8 +375,14 @@ fn save_status(state: &AppState, status: &SchedulesStatusStore) -> Result<()> {
 }
 
 fn with_default_jobs(mut cfg: SystemSchedulesConfig) -> SystemSchedulesConfig {
-    let has_ddns = cfg.jobs.iter().any(|job| job.job == ScheduleJobType::DynamicDnsUpdate);
-    let has_acme = cfg.jobs.iter().any(|job| job.job == ScheduleJobType::AcmeRenew);
+    let has_ddns = cfg
+        .jobs
+        .iter()
+        .any(|job| job.job == ScheduleJobType::DynamicDnsUpdate);
+    let has_acme = cfg
+        .jobs
+        .iter()
+        .any(|job| job.job == ScheduleJobType::AcmeRenew);
     let has_rulesets = cfg
         .jobs
         .iter()
@@ -427,8 +436,7 @@ fn write_restricted(path: &Path, data: &[u8]) -> Result<()> {
 
 #[cfg(not(unix))]
 fn write_restricted(path: &Path, data: &[u8]) -> Result<()> {
-    std::fs::write(path, data)
-        .with_context(|| format!("failed to write {}", path.display()))
+    std::fs::write(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn config_path(state: &AppState) -> PathBuf {

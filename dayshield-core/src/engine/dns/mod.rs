@@ -19,12 +19,7 @@ use tokio::process::Command;
 use tracing::{info, warn};
 
 use crate::config::models::{
-    AcmeConfig,
-    AcmeChallengeType,
-    AcmeProvider,
-    DnsConfig,
-    DnsLocalRecord,
-    DotConfig,
+    AcmeChallengeType, AcmeConfig, AcmeProvider, DnsConfig, DnsLocalRecord, DotConfig,
 };
 
 /// Path where Unbound's configuration file is written.
@@ -217,10 +212,7 @@ pub async fn apply_config_with_ipv6(
     info!(path = UNBOUND_CONF_PATH, "dns: unbound.conf written");
 
     // Try a live reload first; fall back to a full service start.
-    let reload = Command::new("unbound-control")
-        .arg("reload")
-        .output()
-        .await;
+    let reload = Command::new("unbound-control").arg("reload").output().await;
 
     match reload {
         Ok(out) if out.status.success() => {
@@ -261,7 +253,11 @@ fn write_dot_tls_files(dot: &DotConfig) -> Result<()> {
             .acme_cert_storage_path
             .as_ref()
             .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Acme certificate storage path is required for ACME-based DoT certs"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Acme certificate storage path is required for ACME-based DoT certs"
+                )
+            })?;
 
         let acme_cfg = AcmeConfig {
             enabled: false,
@@ -300,7 +296,11 @@ fn write_dot_tls_files(dot: &DotConfig) -> Result<()> {
         write_key_restricted(DOT_KEY_PATH, key_pem.as_bytes())?;
     }
 
-    info!(cert = DOT_CERT_PATH, key = DOT_KEY_PATH, "dot: TLS files written");
+    info!(
+        cert = DOT_CERT_PATH,
+        key = DOT_KEY_PATH,
+        "dot: TLS files written"
+    );
     Ok(())
 }
 
@@ -325,15 +325,13 @@ fn write_cert_file(path: &str, data: &[u8]) -> Result<()> {
         f.write_all(data)
             .with_context(|| format!("failed to write temp cert file {tmp}"))?;
     }
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("failed to rename {tmp} to {path}"))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("failed to rename {tmp} to {path}"))?;
     Ok(())
 }
 
 #[cfg(not(unix))]
 fn write_cert_file(path: &str, data: &[u8]) -> Result<()> {
-    std::fs::write(path, data)
-        .with_context(|| format!("failed to write cert file {path}"))?;
+    std::fs::write(path, data).with_context(|| format!("failed to write cert file {path}"))?;
     Ok(())
 }
 
@@ -360,15 +358,13 @@ fn write_key_restricted(path: &str, data: &[u8]) -> Result<()> {
         f.write_all(data)
             .with_context(|| format!("failed to write temp key file {tmp}"))?;
     }
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("failed to rename {tmp} to {path}"))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("failed to rename {tmp} to {path}"))?;
     Ok(())
 }
 
 #[cfg(not(unix))]
 fn write_key_restricted(path: &str, data: &[u8]) -> Result<()> {
-    std::fs::write(path, data)
-        .with_context(|| format!("failed to write key file {path}"))?;
+    std::fs::write(path, data).with_context(|| format!("failed to write key file {path}"))?;
     Ok(())
 }
 
@@ -405,8 +401,7 @@ fn write_config_atomic(path: &str, content: &str) -> Result<()> {
     std::fs::write(&tmp, content)
         .with_context(|| format!("failed to write temporary file {tmp}"))?;
 
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("failed to rename {tmp} to {path}"))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("failed to rename {tmp} to {path}"))?;
 
     Ok(())
 }
@@ -454,8 +449,12 @@ mod tests {
             enabled: true,
             port: 853,
             lan_only: true,
-            cert_pem: Some("-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n".to_string()),
-            key_pem: Some("-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n".to_string()),
+            cert_pem: Some(
+                "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n".to_string(),
+            ),
+            key_pem: Some(
+                "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n".to_string(),
+            ),
             acme_domain: None,
             acme_cert_storage_path: None,
         }
@@ -465,7 +464,10 @@ mod tests {
     fn generate_config_contains_listen_address() {
         let cfg = base_config();
         let out = generate_config(&cfg, None);
-        assert!(out.contains("interface: 127.0.0.1"), "should contain listen address");
+        assert!(
+            out.contains("interface: 127.0.0.1"),
+            "should contain listen address"
+        );
     }
 
     #[test]
@@ -489,7 +491,10 @@ mod tests {
         let mut cfg = base_config();
         cfg.forwarders.clear();
         let out = generate_config(&cfg, None);
-        assert!(!out.contains("forward-zone:"), "full recursion: no forward-zone expected");
+        assert!(
+            !out.contains("forward-zone:"),
+            "full recursion: no forward-zone expected"
+        );
     }
 
     #[test]
@@ -551,7 +556,10 @@ mod tests {
         assert!(out.contains("ssl-port: 853"), "should contain ssl-port");
         assert!(out.contains(DOT_KEY_PATH), "should reference key path");
         assert!(out.contains(DOT_CERT_PATH), "should reference cert path");
-        assert!(out.contains("interface: 0.0.0.0@853"), "should add DoT interface stanza");
+        assert!(
+            out.contains("interface: 0.0.0.0@853"),
+            "should add DoT interface stanza"
+        );
     }
 
     #[test]
@@ -560,14 +568,20 @@ mod tests {
         let mut dot = dot_config();
         dot.enabled = false;
         let out = generate_config(&cfg, Some(&dot));
-        assert!(!out.contains("ssl-port:"), "disabled DoT should not add ssl-port");
+        assert!(
+            !out.contains("ssl-port:"),
+            "disabled DoT should not add ssl-port"
+        );
     }
 
     #[test]
     fn generate_config_dot_none() {
         let cfg = base_config();
         let out = generate_config(&cfg, None);
-        assert!(!out.contains("ssl-port:"), "no DoT config should not add ssl-port");
+        assert!(
+            !out.contains("ssl-port:"),
+            "no DoT config should not add ssl-port"
+        );
     }
 
     #[test]
@@ -590,4 +604,3 @@ mod tests {
         assert!(out.contains("interface: ::0@853"));
     }
 }
-

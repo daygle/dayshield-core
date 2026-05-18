@@ -52,10 +52,7 @@ impl FileMeta {
             #[cfg(not(any(unix, windows)))]
             let ino = 0;
 
-            FileMeta {
-                ino,
-                size: m.len(),
-            }
+            FileMeta { ino, size: m.len() }
         })
     }
 }

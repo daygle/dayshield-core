@@ -70,7 +70,10 @@ impl AppState {
     ///
     /// Returns `(AppState, notify_rx)` where `notify_rx` must be passed to
     /// [`crate::notify::worker::start_notify_worker`].
-    pub fn new() -> (Self, tokio::sync::mpsc::Receiver<crate::notify::model::NotifyEvent>) {
+    pub fn new() -> (
+        Self,
+        tokio::sync::mpsc::Receiver<crate::notify::model::NotifyEvent>,
+    ) {
         let mut services = HashMap::new();
         for name in [
             SVC_NFTABLES,
@@ -116,7 +119,12 @@ impl AppState {
 
     /// Create a new [`AppState`] using a custom config directory (useful for
     /// tests that must not touch `/etc/dayshield`).
-    pub fn with_config_dir(dir: impl AsRef<std::path::Path>) -> (Self, tokio::sync::mpsc::Receiver<crate::notify::model::NotifyEvent>) {
+    pub fn with_config_dir(
+        dir: impl AsRef<std::path::Path>,
+    ) -> (
+        Self,
+        tokio::sync::mpsc::Receiver<crate::notify::model::NotifyEvent>,
+    ) {
         let (mut state, rx) = Self::new();
         state.config_store = ConfigStore::with_dir(dir);
         let config_dir = state
@@ -125,7 +133,10 @@ impl AppState {
             .parent()
             .unwrap_or(std::path::Path::new(DEFAULT_CONFIG_DIR))
             .to_path_buf();
-        let config = state.config_store.load_ai_engine_config().unwrap_or_default();
+        let config = state
+            .config_store
+            .load_ai_engine_config()
+            .unwrap_or_default();
         state.ai_runtime = AiRuntime::new(&config_dir, config);
         state.interfaces = RwLock::new(state.config_store.load_interfaces().unwrap_or_default());
         state.firewall_rules =

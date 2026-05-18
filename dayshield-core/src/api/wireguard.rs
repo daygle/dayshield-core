@@ -18,8 +18,8 @@ use tracing::{info, warn};
 
 use crate::{
     config::models::{
-        ensure_ipv6_allowed, validate_cidr, validate_endpoint, validate_wg_interface_name, validate_wg_key,
-        WireGuardInterface, WireGuardPeer,
+        ensure_ipv6_allowed, validate_cidr, validate_endpoint, validate_wg_interface_name,
+        validate_wg_key, WireGuardInterface, WireGuardPeer,
     },
     engine::vpn::{apply_interface, generate_keypair, remove_interface},
     state::AppState,
@@ -117,7 +117,10 @@ pub async fn list_interfaces(
         .load_wireguard_interfaces()
         .map_err(WireGuardError::StorageError)?;
 
-    info!(count = ifaces.len(), "wireguard: loaded interfaces from storage");
+    info!(
+        count = ifaces.len(),
+        "wireguard: loaded interfaces from storage"
+    );
 
     let redacted: Vec<WireGuardInterface> = ifaces.into_iter().map(redact_interface).collect();
     Ok(Json(redacted))
@@ -315,9 +318,7 @@ pub async fn delete_interface(
 /// parameter identifies which interface the caller intends to use the keys for
 /// (informational only; the generated keys are returned to the client and not
 /// stored automatically).
-pub async fn generate_keys(
-    Path(name): Path<String>,
-) -> Result<impl IntoResponse, WireGuardError> {
+pub async fn generate_keys(Path(name): Path<String>) -> Result<impl IntoResponse, WireGuardError> {
     info!(name = %name, "wireguard: generating keypair");
 
     let (private_key, public_key) = generate_keypair()

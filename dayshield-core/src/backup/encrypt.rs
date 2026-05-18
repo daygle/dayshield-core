@@ -67,9 +67,9 @@ pub fn decrypt(blob: &[u8], passphrase: &str) -> anyhow::Result<Vec<u8>> {
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
     let nonce = Nonce::from_slice(nonce_bytes);
 
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|_| anyhow::anyhow!("AES-GCM decrypt failed: wrong passphrase or corrupted data"))?;
+    let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|_| {
+        anyhow::anyhow!("AES-GCM decrypt failed: wrong passphrase or corrupted data")
+    })?;
 
     Ok(plaintext)
 }

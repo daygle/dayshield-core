@@ -167,10 +167,7 @@ mod tests {
 
     #[test]
     fn all_subsystems_have_unique_paths() {
-        let paths: Vec<_> = Subsystem::all()
-            .iter()
-            .map(|s| s.archive_path())
-            .collect();
+        let paths: Vec<_> = Subsystem::all().iter().map(|s| s.archive_path()).collect();
         let unique: std::collections::HashSet<_> = paths.iter().collect();
         assert_eq!(paths.len(), unique.len());
     }

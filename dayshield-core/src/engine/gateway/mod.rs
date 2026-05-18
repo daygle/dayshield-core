@@ -81,10 +81,7 @@ pub async fn list_kernel_gateways_with_ipv6(ipv6_enabled: bool) -> Vec<KernelGat
 }
 
 async fn list_kernel_gateways_for_family(args: &[&str]) -> Vec<KernelGateway> {
-    let out = Command::new("ip")
-        .args(args)
-        .output()
-        .await;
+    let out = Command::new("ip").args(args).output().await;
 
     let out = match out {
         Ok(o) => o,
@@ -150,7 +147,16 @@ pub async fn apply_gateway_with_ipv6(gw: &Gateway, ipv6_enabled: bool) -> Result
         info!(name = %gw.name, ip = %ip, "gateway: removing disabled gateway route");
         if is_ipv6 {
             let _ = Command::new("ip")
-                .args(["-6", "route", "del", "default", "via", ip, "dev", &gw.interface])
+                .args([
+                    "-6",
+                    "route",
+                    "del",
+                    "default",
+                    "via",
+                    ip,
+                    "dev",
+                    &gw.interface,
+                ])
                 .output()
                 .await;
         } else {
@@ -171,9 +177,26 @@ pub async fn apply_gateway_with_ipv6(gw: &Gateway, ipv6_enabled: bool) -> Result
 
     let mut cmd = Command::new("ip");
     if is_ipv6 {
-        cmd.args(["-6", "route", "replace", "default", "via", ip, "dev", &gw.interface]);
+        cmd.args([
+            "-6",
+            "route",
+            "replace",
+            "default",
+            "via",
+            ip,
+            "dev",
+            &gw.interface,
+        ]);
     } else {
-        cmd.args(["route", "replace", "default", "via", ip, "dev", &gw.interface]);
+        cmd.args([
+            "route",
+            "replace",
+            "default",
+            "via",
+            ip,
+            "dev",
+            &gw.interface,
+        ]);
     }
     let out = cmd
         .output()
@@ -226,10 +249,7 @@ pub async fn probe_all_gateways(gateways: &[Gateway]) -> Vec<(&Gateway, GatewayS
             continue;
         }
 
-        let probe_ip = gw
-            .monitor_ip
-            .as_deref()
-            .or(gw.gateway_ip.as_deref());
+        let probe_ip = gw.monitor_ip.as_deref().or(gw.gateway_ip.as_deref());
 
         let state = match probe_ip {
             Some(ip) => probe_gateway(ip).await,

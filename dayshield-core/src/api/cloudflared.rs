@@ -15,9 +15,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::{
-    config::models::{
-        validate_cloudflared_config, CloudflaredConfig, CloudflaredIngressRule,
-    },
+    config::models::{validate_cloudflared_config, CloudflaredConfig, CloudflaredIngressRule},
     state::AppState,
 };
 
@@ -202,7 +200,9 @@ pub async fn get_logs(
         ])
         .output()
         .await
-        .map_err(|err| CloudflaredApiError::ServiceError(format!("failed to read journal: {err}")))?;
+        .map_err(|err| {
+            CloudflaredApiError::ServiceError(format!("failed to read journal: {err}"))
+        })?;
 
     if !output.status.success() {
         return Err(CloudflaredApiError::ServiceError(
@@ -232,11 +232,13 @@ fn redact_config(cfg: CloudflaredConfig) -> CloudflaredConfigResponse {
 }
 
 async fn apply_cloudflared_config(cfg: &CloudflaredConfig) -> Result<(), CloudflaredApiError> {
-    fs::create_dir_all(CLOUDFLARED_CONFIG_DIR)
-        .map_err(|err| CloudflaredApiError::ServiceError(format!("failed to create config directory: {err}")))?;
+    fs::create_dir_all(CLOUDFLARED_CONFIG_DIR).map_err(|err| {
+        CloudflaredApiError::ServiceError(format!("failed to create config directory: {err}"))
+    })?;
 
-    fs::create_dir_all("/etc/default")
-        .map_err(|err| CloudflaredApiError::ServiceError(format!("failed to create /etc/default: {err}")))?;
+    fs::create_dir_all("/etc/default").map_err(|err| {
+        CloudflaredApiError::ServiceError(format!("failed to create /etc/default: {err}"))
+    })?;
 
     fs::write(CLOUDFLARED_CONFIG_PATH, render_cloudflared_yaml(cfg)).map_err(|err| {
         CloudflaredApiError::ServiceError(format!("failed to write cloudflared config: {err}"))
@@ -275,7 +277,10 @@ fn render_cloudflared_yaml(cfg: &CloudflaredConfig) -> String {
 
 fn render_cloudflared_env(cfg: &CloudflaredConfig) -> String {
     let mut out = String::new();
-    out.push_str(&format!("TUNNEL_TOKEN={}\n", shell_quote(&cfg.tunnel_token)));
+    out.push_str(&format!(
+        "TUNNEL_TOKEN={}\n",
+        shell_quote(&cfg.tunnel_token)
+    ));
     out.push_str(&format!("TUNNEL_NAME={}\n", shell_quote(&cfg.tunnel_name)));
     out
 }
@@ -293,7 +298,9 @@ async fn run_systemctl<const N: usize>(args: [&str; N]) -> Result<String, Cloudf
         .args(args)
         .output()
         .await
-        .map_err(|err| CloudflaredApiError::ServiceError(format!("failed to run systemctl: {err}")))?;
+        .map_err(|err| {
+            CloudflaredApiError::ServiceError(format!("failed to run systemctl: {err}"))
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -381,7 +388,11 @@ async fn read_cloudflared_status(cfg: &CloudflaredConfig) -> CloudflaredStatusRe
     {
         Ok(output) if output.status.success() => {
             let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if text.is_empty() { None } else { Some(text) }
+            if text.is_empty() {
+                None
+            } else {
+                Some(text)
+            }
         }
         _ => None,
     };

@@ -115,7 +115,11 @@ pub fn parse_nft_json_hits(json_text: &str) -> Vec<RuleHitCount> {
             .get("comment")
             .and_then(|c| c.as_str())
             .map(|s| s.to_string());
-        result.push(RuleHitCount { handle, packets, comment });
+        result.push(RuleHitCount {
+            handle,
+            packets,
+            comment,
+        });
     }
 
     result
@@ -127,9 +131,11 @@ pub fn parse_nft_json_hits(json_text: &str) -> Vec<RuleHitCount> {
 
 /// Collect a fresh [`FirewallMetrics`] reading.
 pub async fn collect_firewall() -> FirewallMetrics {
-    let (state_count, rule_hit_counts) =
-        tokio::join!(collect_state_count(), collect_rule_hits());
-    FirewallMetrics { state_count, rule_hit_counts }
+    let (state_count, rule_hit_counts) = tokio::join!(collect_state_count(), collect_rule_hits());
+    FirewallMetrics {
+        state_count,
+        rule_hit_counts,
+    }
 }
 
 // ---------------------------------------------------------------------------

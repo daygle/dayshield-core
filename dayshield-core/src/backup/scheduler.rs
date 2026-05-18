@@ -40,8 +40,7 @@ fn write_restricted_sched(path: &Path, data: &[u8]) -> Result<()> {
 
 #[cfg(not(unix))]
 fn write_restricted_sched(path: &Path, data: &[u8]) -> Result<()> {
-    std::fs::write(path, data)
-        .with_context(|| format!("failed to write {}", path.display()))
+    std::fs::write(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
 
 // ---------------------------------------------------------------------------
@@ -66,8 +65,7 @@ pub fn load_schedule(state: &AppState) -> Result<BackupScheduleConfig> {
     }
     let raw = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    serde_json::from_str(&raw)
-        .with_context(|| format!("failed to parse {}", path.display()))
+    serde_json::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
 }
 
 /// Atomically persist a [`BackupScheduleConfig`] into the config directory
@@ -235,12 +233,11 @@ fn schedule_path(state: &AppState) -> PathBuf {
 
 /// Return `true` if `path` looks like a DayShield backup file.
 fn is_backup_file(path: &Path) -> bool {
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     (name.starts_with("dayshield-") && name.contains("-backup-") && name.ends_with(".tar"))
-        || (name.starts_with("dayshield-") && name.contains("-backup-") && name.ends_with(".tar.enc"))
+        || (name.starts_with("dayshield-")
+            && name.contains("-backup-")
+            && name.ends_with(".tar.enc"))
 }
 
 // ---------------------------------------------------------------------------
@@ -274,11 +271,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         for i in 0..2u32 {
             let ts = 1_700_000_000u64 + u64::from(i);
-            std::fs::write(
-                dir.path().join(format!("dayshield-backup-{ts}.tar")),
-                b"x",
-            )
-            .unwrap();
+            std::fs::write(dir.path().join(format!("dayshield-backup-{ts}.tar")), b"x").unwrap();
         }
         prune_backups(dir.path(), 5).unwrap();
         let remaining: Vec<_> = std::fs::read_dir(dir.path())

@@ -18,9 +18,7 @@ use uuid::Uuid;
 
 use crate::{
     ai_model::AiModel,
-    config::models::{
-        Action, AiEngineConfig, FirewallDirection, FirewallRule, NotifyCategory,
-    },
+    config::models::{Action, AiEngineConfig, FirewallDirection, FirewallRule, NotifyCategory},
     engine::nftables::apply_rules_with_captive,
     notify::model::NotifyEvent,
     state::AppState,
@@ -148,10 +146,7 @@ impl AiRuntime {
     }
 
     pub fn start_background_tasks(&self, state: Arc<AppState>) {
-        if self
-            .maintenance_started
-            .swap(true, Ordering::SeqCst)
-        {
+        if self.maintenance_started.swap(true, Ordering::SeqCst) {
             return;
         }
 
@@ -214,7 +209,9 @@ impl AiRuntime {
                 sport,
                 dport,
                 iface,
-            } => (timestamp, action, src_ip, dest_ip, proto, sport, dport, iface),
+            } => (
+                timestamp, action, src_ip, dest_ip, proto, sport, dport, iface,
+            ),
             _ => return Ok(()),
         };
 
@@ -222,12 +219,17 @@ impl AiRuntime {
             return Ok(());
         }
 
-        let policy = state.config_store.load_ai_engine_config().unwrap_or_default();
+        let policy = state
+            .config_store
+            .load_ai_engine_config()
+            .unwrap_or_default();
         if !policy.enabled {
             return Ok(());
         }
 
-        let history = self.gather_history_features(state, &src_ip, policy.escalation_window_seconds).await?;
+        let history = self
+            .gather_history_features(state, &src_ip, policy.escalation_window_seconds)
+            .await?;
         let (risk_score, reasons) = self
             .model
             .lock()
@@ -259,15 +261,8 @@ impl AiRuntime {
             action: Some(action.clone()),
         };
 
-        self.submit_risk_assessment(
-            state,
-            flow,
-            risk_score,
-            reasons,
-            None,
-            None,
-        )
-        .await?;
+        self.submit_risk_assessment(state, flow, risk_score, reasons, None, None)
+            .await?;
         Ok(())
     }
 
@@ -293,13 +288,11 @@ impl AiRuntime {
         if policy.enabled && risk_score >= policy.risk_score_block_threshold {
             let src_ip = flow.src_ip.parse::<IpAddr>().ok();
             if let Some(ip) = src_ip {
-                let high_risk_events = self
-                    .store
-                    .count_recent_high_risk_events(
-                        &flow.src_ip,
-                        now_unix_secs().saturating_sub(policy.escalation_window_seconds),
-                        policy.risk_score_block_threshold,
-                    )?;
+                let high_risk_events = self.store.count_recent_high_risk_events(
+                    &flow.src_ip,
+                    now_unix_secs().saturating_sub(policy.escalation_window_seconds),
+                    policy.risk_score_block_threshold,
+                )?;
 
                 let (duration, did_escalate, is_quarantine) =
                     compute_escalated_block(high_risk_events + 1, &policy);
@@ -473,7 +466,17 @@ impl AiRuntime {
         state: &Arc<AppState>,
         event: crate::logs::LogEvent,
     ) -> Result<()> {
-        let (timestamp, src_ip, dst_ip, src_port, dst_port, protocol, signature, severity, category) = match event {
+        let (
+            timestamp,
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            protocol,
+            signature,
+            severity,
+            category,
+        ) = match event {
             crate::logs::LogEvent::SuricataAlert {
                 timestamp,
                 src_ip,
@@ -485,14 +488,7 @@ impl AiRuntime {
                 severity,
                 category,
             } => (
-                timestamp,
-                src_ip,
-                dest_ip,
-                src_port,
-                dest_port,
-                proto,
-                signature,
-                severity,
+                timestamp, src_ip, dest_ip, src_port, dest_port, proto, signature, severity,
                 category,
             ),
             _ => return Ok(()),
@@ -502,12 +498,17 @@ impl AiRuntime {
             return Ok(());
         }
 
-        let policy = state.config_store.load_ai_engine_config().unwrap_or_default();
+        let policy = state
+            .config_store
+            .load_ai_engine_config()
+            .unwrap_or_default();
         if !policy.enabled {
             return Ok(());
         }
 
-        let history = self.gather_history_features(state, &src_ip, policy.escalation_window_seconds).await?;
+        let history = self
+            .gather_history_features(state, &src_ip, policy.escalation_window_seconds)
+            .await?;
         let (risk_score, reasons) = self
             .model
             .lock()
@@ -605,10 +606,18 @@ impl AiRuntime {
                 manual_unblock += 1.0;
             }
             if event.event_source == "firewall" {
-                if event.action.as_deref().map_or(false, |a| a.eq_ignore_ascii_case("drop")) {
+                if event
+                    .action
+                    .as_deref()
+                    .map_or(false, |a| a.eq_ignore_ascii_case("drop"))
+                {
                     firewall_drops += 1.0;
                 }
-                if event.action.as_deref().map_or(false, |a| a.eq_ignore_ascii_case("accept")) {
+                if event
+                    .action
+                    .as_deref()
+                    .map_or(false, |a| a.eq_ignore_ascii_case("accept"))
+                {
                     firewall_accepts += 1.0;
                 }
             }
@@ -631,7 +640,12 @@ impl AiRuntime {
             .map(|cfg| {
                 cfg.dns
                     .as_ref()
-                    .map(|dns| dns.interface_blocklists.iter().flat_map(|group| group.blocklists.iter()).count())
+                    .map(|dns| {
+                        dns.interface_blocklists
+                            .iter()
+                            .flat_map(|group| group.blocklists.iter())
+                            .count()
+                    })
                     .unwrap_or(0)
             })
             .unwrap_or(0)
@@ -658,7 +672,9 @@ impl AiRuntime {
 
         for event in events.iter().filter(|event| event.label.is_some()) {
             let label = event.label.unwrap();
-            let history = self.history_features_for_event(state, event, &events).await?;
+            let history = self
+                .history_features_for_event(state, event, &events)
+                .await?;
             let features = AiModel::build_feature_vector(
                 event.signature.as_deref(),
                 event.alert_severity,
@@ -671,7 +687,8 @@ impl AiRuntime {
                 event.action.as_deref(),
                 None,
                 &history,
-            ).0;
+            )
+            .0;
             samples.push((features, label));
         }
 
@@ -718,10 +735,18 @@ impl AiRuntime {
                 manual_unblock += 1.0;
             }
             if event.event_source == "firewall" {
-                if event.action.as_deref().map_or(false, |a| a.eq_ignore_ascii_case("drop")) {
+                if event
+                    .action
+                    .as_deref()
+                    .map_or(false, |a| a.eq_ignore_ascii_case("drop"))
+                {
                     firewall_drops += 1.0;
                 }
-                if event.action.as_deref().map_or(false, |a| a.eq_ignore_ascii_case("accept")) {
+                if event
+                    .action
+                    .as_deref()
+                    .map_or(false, |a| a.eq_ignore_ascii_case("accept"))
+                {
                     firewall_accepts += 1.0;
                 }
             }
@@ -744,7 +769,12 @@ impl AiRuntime {
             .map(|cfg| {
                 cfg.dns
                     .as_ref()
-                    .map(|dns| dns.interface_blocklists.iter().flat_map(|group| group.blocklists.iter()).count())
+                    .map(|dns| {
+                        dns.interface_blocklists
+                            .iter()
+                            .flat_map(|group| group.blocklists.iter())
+                            .count()
+                    })
                     .unwrap_or(0)
             })
             .unwrap_or(0)
@@ -819,8 +849,8 @@ impl AiRuntime {
         }
 
         let captive_sessions = if let Some(portal) = config.captive_portal.as_ref() {
-            let sessions = crate::captive_portal::load_sessions(&state.config_store)
-                .unwrap_or_default();
+            let sessions =
+                crate::captive_portal::load_sessions(&state.config_store).unwrap_or_default();
             crate::captive_portal::active_sessions(portal, &sessions)
         } else {
             vec![]
@@ -848,9 +878,7 @@ impl AiRuntime {
 }
 
 pub async fn start_background_tasks(state: Arc<AppState>) {
-    state
-        .ai_runtime
-        .start_background_tasks(Arc::clone(&state));
+    state.ai_runtime.start_background_tasks(Arc::clone(&state));
 }
 
 pub async fn submit_flow_risk(
@@ -999,8 +1027,14 @@ mod tests {
     fn escalation_is_deterministic() {
         let policy = test_policy(60);
 
-        assert_eq!(compute_escalated_block(1, &policy), (Some(60), false, false));
-        assert_eq!(compute_escalated_block(3, &policy), (Some(360), true, false));
+        assert_eq!(
+            compute_escalated_block(1, &policy),
+            (Some(60), false, false)
+        );
+        assert_eq!(
+            compute_escalated_block(3, &policy),
+            (Some(360), true, false)
+        );
         assert_eq!(compute_escalated_block(5, &policy), (None, true, true));
     }
 

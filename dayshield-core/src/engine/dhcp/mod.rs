@@ -172,8 +172,7 @@ pub async fn apply_config(config: &DhcpConfig) -> Result<()> {
     std::fs::create_dir_all("/var/log/kea").context("failed to create /var/log/kea")?;
 
     let conf_str = generate_config(config);
-    write_config_atomic(KEA_CONF_PATH, &conf_str)
-        .context("failed to write kea-dhcp4.conf")?;
+    write_config_atomic(KEA_CONF_PATH, &conf_str).context("failed to write kea-dhcp4.conf")?;
     #[cfg(unix)]
     std::fs::set_permissions(KEA_CONF_PATH, std::fs::Permissions::from_mode(0o644))
         .context("failed to chmod kea-dhcp4.conf")?;
@@ -224,8 +223,7 @@ fn write_config_atomic(path: &str, content: &str) -> Result<()> {
     std::fs::write(&tmp, content)
         .with_context(|| format!("failed to write temporary file {tmp}"))?;
 
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("failed to rename {tmp} to {path}"))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("failed to rename {tmp} to {path}"))?;
 
     Ok(())
 }
@@ -378,4 +376,3 @@ mod tests {
         assert!(out.contains("86400"));
     }
 }
-

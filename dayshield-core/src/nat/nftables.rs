@@ -99,7 +99,11 @@ mod tests {
         let cfg = NatConfig {
             outbound_mode: OutboundMode::Manual,
             wan_interfaces: vec![],
-            rules: vec![masquerade_rule("eth1", AddressFamily::Ipv6, Some("2001:db8::/64"))],
+            rules: vec![masquerade_rule(
+                "eth1",
+                AddressFamily::Ipv6,
+                Some("2001:db8::/64"),
+            )],
             nat_reflection: false,
         };
         let out = generate_nat_nft_with_ipv6(&cfg, true);
@@ -112,7 +116,12 @@ mod tests {
         let cfg = NatConfig {
             outbound_mode: OutboundMode::Manual,
             wan_interfaces: vec![],
-            rules: vec![dnat_rule("2001:db8::1", "2001:db8::10", Some(443), AddressFamily::Ipv6)],
+            rules: vec![dnat_rule(
+                "2001:db8::1",
+                "2001:db8::10",
+                Some(443),
+                AddressFamily::Ipv6,
+            )],
             nat_reflection: false,
         };
         assert_eq!(generate_nat_nft(&cfg), "");

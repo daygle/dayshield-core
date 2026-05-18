@@ -69,8 +69,8 @@ pub fn restore_backup(
             .with_context(|| format!("failed to read entry: {path_str}"))?;
 
         if path_str == "metadata.json" {
-            let m: BackupMetadata = serde_json::from_slice(&data)
-                .context("failed to parse metadata.json")?;
+            let m: BackupMetadata =
+                serde_json::from_slice(&data).context("failed to parse metadata.json")?;
             metadata = Some(m);
         } else if path_str.starts_with("config/") {
             config_entries.push((path_str, data));
@@ -267,8 +267,7 @@ fn restore_subsystem(store: &ConfigStore, sub: &Subsystem, bytes: &[u8]) -> Resu
         }
         Subsystem::CaptivePortal => {
             let captive_portal: Option<crate::config::models::CaptivePortalConfig> =
-                serde_json::from_slice(bytes)
-                    .context("failed to parse captive_portal.json")?;
+                serde_json::from_slice(bytes).context("failed to parse captive_portal.json")?;
             if let Some(cfg) = captive_portal {
                 store
                     .save_captive_portal_config(cfg)
@@ -301,8 +300,15 @@ mod tests {
     fn roundtrip_plain() {
         let (_cfg, backup_dir, store) = setup();
 
-        let (path, _meta) =
-            create_backup(&store, None, false, None, backup_dir.path(), BackupType::Manual).unwrap();
+        let (path, _meta) = create_backup(
+            &store,
+            None,
+            false,
+            None,
+            backup_dir.path(),
+            BackupType::Manual,
+        )
+        .unwrap();
         let bytes = std::fs::read(&path).unwrap();
 
         let meta = restore_backup(&store, &bytes, None, None).unwrap();
@@ -350,8 +356,15 @@ mod tests {
     fn tampered_archive_fails_sha256() {
         let (_cfg, backup_dir, store) = setup();
 
-        let (path, _meta) =
-            create_backup(&store, None, false, None, backup_dir.path(), BackupType::Manual).unwrap();
+        let (path, _meta) = create_backup(
+            &store,
+            None,
+            false,
+            None,
+            backup_dir.path(),
+            BackupType::Manual,
+        )
+        .unwrap();
         let mut bytes = std::fs::read(&path).unwrap();
 
         // Flip a byte somewhere in the config section (past the first 1024 bytes).
@@ -380,8 +393,7 @@ mod tests {
 
         // Attempt to restore only WireGuard from a DNS-only backup (should
         // complete successfully, just warn that WireGuard isn't present).
-        let meta =
-            restore_backup(&store, &bytes, None, Some(vec![Subsystem::WireGuard])).unwrap();
+        let meta = restore_backup(&store, &bytes, None, Some(vec![Subsystem::WireGuard])).unwrap();
         assert_eq!(meta.subsystems, vec![Subsystem::Dns]);
     }
 }

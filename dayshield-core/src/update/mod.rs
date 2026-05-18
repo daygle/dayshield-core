@@ -1,6 +1,5 @@
 use std::{
-    env,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::Command as StdCommand,
     sync::OnceLock,
@@ -9,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveTime, Timelike, Utc};
-use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderValue, USER_AGENT, HeaderName};
+use reqwest::header::{HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use tokio::{process::Command, sync::Mutex};
 use tracing::{info, warn};
@@ -107,8 +106,7 @@ fn default_bootstrap_missing_rootfs_repo() -> bool {
 }
 
 fn default_registry_url() -> String {
-    env::var("DAYSHIELD_UPDATE_REGISTRY_URL")
-        .unwrap_or_else(|_| DEFAULT_REGISTRY_URL.to_string())
+    env::var("DAYSHIELD_UPDATE_REGISTRY_URL").unwrap_or_else(|_| DEFAULT_REGISTRY_URL.to_string())
 }
 
 fn default_update_mode() -> String {
@@ -360,9 +358,7 @@ fn ensure_registry_updatable_selection(selected_components: &[RepoComponent]) ->
         .iter()
         .any(|c| matches!(c, RepoComponent::Rootfs));
     if rootfs_selected && selected_components.len() > 1 {
-        anyhow::bail!(
-            "rootfs updates must be staged separately from runtime core/ui updates"
-        );
+        anyhow::bail!("rootfs updates must be staged separately from runtime core/ui updates");
     }
 
     Ok(())
@@ -542,7 +538,10 @@ fn registry_manifest_url(registry_url: &str) -> String {
 }
 
 fn github_contents_manifest_url(github_api_url: &str) -> String {
-    format!("{}/contents/manifest.json", github_api_url.trim_end_matches('/'))
+    format!(
+        "{}/contents/manifest.json",
+        github_api_url.trim_end_matches('/')
+    )
 }
 
 fn github_repo_slug(github_api_url: &str) -> Option<String> {
@@ -591,8 +590,7 @@ fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
     }
     let tmp = path.with_extension("tmp");
     let payload = serde_json::to_string_pretty(value)?;
-    std::fs::write(&tmp, payload)
-        .with_context(|| format!("failed to write {}", tmp.display()))?;
+    std::fs::write(&tmp, payload).with_context(|| format!("failed to write {}", tmp.display()))?;
     std::fs::rename(&tmp, path)
         .with_context(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
@@ -608,7 +606,10 @@ where
         .unwrap_or_default()
 }
 
-fn ensure_component_state<'a>(state: &'a mut UpdateStateFile, component: RepoComponent) -> &'a mut ComponentState {
+fn ensure_component_state<'a>(
+    state: &'a mut UpdateStateFile,
+    component: RepoComponent,
+) -> &'a mut ComponentState {
     if let Some(idx) = state
         .components
         .iter()
@@ -624,11 +625,20 @@ fn ensure_component_state<'a>(state: &'a mut UpdateStateFile, component: RepoCom
     &mut state.components[idx]
 }
 
-fn find_component_state<'a>(state: &'a UpdateStateFile, component: RepoComponent) -> Option<&'a ComponentState> {
-    state.components.iter().find(|c| c.component == component.as_str())
+fn find_component_state<'a>(
+    state: &'a UpdateStateFile,
+    component: RepoComponent,
+) -> Option<&'a ComponentState> {
+    state
+        .components
+        .iter()
+        .find(|c| c.component == component.as_str())
 }
 
-fn component_config(settings: &UpdateSettings, component: RepoComponent) -> (String, String, String) {
+fn component_config(
+    settings: &UpdateSettings,
+    component: RepoComponent,
+) -> (String, String, String) {
     match component {
         RepoComponent::Core => (
             settings.core_repo_path.clone(),
@@ -665,7 +675,9 @@ pub struct RootfsSlotStatus {
 }
 
 fn built_appliance_version() -> String {
-    env!("CARGO_PKG_VERSION").trim_start_matches('v').to_string()
+    env!("CARGO_PKG_VERSION")
+        .trim_start_matches('v')
+        .to_string()
 }
 
 fn current_version_baseline(saved: Option<&ComponentState>) -> Option<String> {
@@ -813,7 +825,10 @@ fn detect_rootfs_ab_layout() -> Result<RootfsAbLayout> {
     })
 }
 
-fn rootfs_slot_status(settings: &UpdateSettings, state_file: &UpdateStateFile) -> Option<RootfsSlotStatus> {
+fn rootfs_slot_status(
+    settings: &UpdateSettings,
+    state_file: &UpdateStateFile,
+) -> Option<RootfsSlotStatus> {
     if !settings.enable_rootfs_ab_updates {
         return Some(RootfsSlotStatus {
             supported: false,
@@ -907,11 +922,18 @@ fn snapshot_config_for_rollback(state: &AppState, encrypt: bool) -> Result<PathB
 
 fn restore_config_from_snapshot(state: &AppState, snapshot: &Path) -> Result<()> {
     if !snapshot.exists() || !snapshot.is_file() {
-        anyhow::bail!("config rollback backup archive not found: {}", snapshot.display());
+        anyhow::bail!(
+            "config rollback backup archive not found: {}",
+            snapshot.display()
+        );
     }
 
-    let payload = fs::read(snapshot)
-        .with_context(|| format!("failed to read config rollback backup {}", snapshot.display()))?;
+    let payload = fs::read(snapshot).with_context(|| {
+        format!(
+            "failed to read config rollback backup {}",
+            snapshot.display()
+        )
+    })?;
 
     let passphrase = if snapshot
         .file_name()
@@ -961,11 +983,13 @@ fn snapshot_runtime_for_rollback(component: RepoComponent) -> Result<()> {
 
     if backup.exists() {
         if backup.is_dir() {
-            fs::remove_dir_all(&backup)
-                .with_context(|| format!("failed to clear rollback snapshot {}", backup.display()))?;
+            fs::remove_dir_all(&backup).with_context(|| {
+                format!("failed to clear rollback snapshot {}", backup.display())
+            })?;
         } else {
-            fs::remove_file(&backup)
-                .with_context(|| format!("failed to clear rollback snapshot {}", backup.display()))?;
+            fs::remove_file(&backup).with_context(|| {
+                format!("failed to clear rollback snapshot {}", backup.display())
+            })?;
         }
     }
 
@@ -1063,12 +1087,19 @@ async fn reset_and_optionally_deploy(
         deploy_component_runtime(component, &repo_path).await?;
         save_runtime_marker(component, &head)?;
         entry.deployed_commit = Some(head.clone());
-        details.push(format!("{}: runtime artifacts deployed", component.as_str()));
+        details.push(format!(
+            "{}: runtime artifacts deployed",
+            component.as_str()
+        ));
     }
 
     entry.last_applied_commit = Some(head.clone());
     entry.last_error = None;
-    details.push(format!("{}: moved to {}", component.as_str(), short_sha(&head)));
+    details.push(format!(
+        "{}: moved to {}",
+        component.as_str(),
+        short_sha(&head)
+    ));
     Ok(())
 }
 
@@ -1173,12 +1204,18 @@ async fn ensure_critical_services_healthy() -> Result<()> {
     Ok(())
 }
 
-async fn verify_commit_signature(repo_path: &str, commit: &str, trusted_signers_file: &str) -> Result<()> {
+async fn verify_commit_signature(
+    repo_path: &str,
+    commit: &str,
+    trusted_signers_file: &str,
+) -> Result<()> {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(repo_path);
     if !trusted_signers_file.trim().is_empty() {
-        cmd.arg("-c")
-            .arg(format!("gpg.ssh.allowedSignersFile={}", trusted_signers_file));
+        cmd.arg("-c").arg(format!(
+            "gpg.ssh.allowedSignersFile={}",
+            trusted_signers_file
+        ));
     }
     cmd.arg("verify-commit").arg(commit);
 
@@ -1212,8 +1249,8 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     fs::create_dir_all(dst)
         .with_context(|| format!("failed to create directory {}", dst.display()))?;
 
-    for entry in fs::read_dir(src)
-        .with_context(|| format!("failed to read directory {}", src.display()))?
+    for entry in
+        fs::read_dir(src).with_context(|| format!("failed to read directory {}", src.display()))?
     {
         let entry = entry?;
         let src_path = entry.path();
@@ -1246,8 +1283,16 @@ fn install_file_atomic(src: &Path, target: &Path) -> Result<()> {
         .with_context(|| format!("failed to create directory {}", parent.display()))?;
 
     let suffix = unique_suffix();
-    let staged = parent.join(format!("{}.new.{}", target.file_name().unwrap_or_default().to_string_lossy(), suffix));
-    let backup = parent.join(format!("{}.bak.{}", target.file_name().unwrap_or_default().to_string_lossy(), suffix));
+    let staged = parent.join(format!(
+        "{}.new.{}",
+        target.file_name().unwrap_or_default().to_string_lossy(),
+        suffix
+    ));
+    let backup = parent.join(format!(
+        "{}.bak.{}",
+        target.file_name().unwrap_or_default().to_string_lossy(),
+        suffix
+    ));
 
     fs::copy(src, &staged)
         .with_context(|| format!("failed to stage {} -> {}", src.display(), staged.display()))?;
@@ -1286,8 +1331,16 @@ fn install_dir_atomic(src: &Path, target: &Path) -> Result<()> {
         .with_context(|| format!("failed to create directory {}", parent.display()))?;
 
     let suffix = unique_suffix();
-    let staged = parent.join(format!("{}.new.{}", target.file_name().unwrap_or_default().to_string_lossy(), suffix));
-    let backup = parent.join(format!("{}.bak.{}", target.file_name().unwrap_or_default().to_string_lossy(), suffix));
+    let staged = parent.join(format!(
+        "{}.new.{}",
+        target.file_name().unwrap_or_default().to_string_lossy(),
+        suffix
+    ));
+    let backup = parent.join(format!(
+        "{}.bak.{}",
+        target.file_name().unwrap_or_default().to_string_lossy(),
+        suffix
+    ));
 
     if staged.exists() {
         fs::remove_dir_all(&staged)
@@ -1325,14 +1378,16 @@ async fn deploy_component_runtime(component: RepoComponent, repo_path: &str) -> 
     match component {
         RepoComponent::Core => {
             ensure_command_available("cargo").await?;
-            run_command_in(repo_path, "cargo", &["build", "--release", "-p", "dayshield-core"]).await?;
+            run_command_in(
+                repo_path,
+                "cargo",
+                &["build", "--release", "-p", "dayshield-core"],
+            )
+            .await?;
 
             let built_bin = Path::new(repo_path).join("target/release/dayshield-core");
             if !built_bin.exists() {
-                anyhow::bail!(
-                    "core binary was not produced at {}",
-                    built_bin.display()
-                );
+                anyhow::bail!("core binary was not produced at {}", built_bin.display());
             }
 
             install_file_atomic(&built_bin, Path::new("/usr/local/sbin/dayshield-core"))?;
@@ -1360,7 +1415,9 @@ async fn deploy_component_runtime(component: RepoComponent, repo_path: &str) -> 
 
             install_dir_atomic(&dist_dir, Path::new("/usr/local/share/dayshield-ui"))?;
         }
-        RepoComponent::Rootfs => anyhow::bail!("rootfs runtime deployment is not supported in update flow"),
+        RepoComponent::Rootfs => {
+            anyhow::bail!("rootfs runtime deployment is not supported in update flow")
+        }
     }
 
     Ok(())
@@ -1407,10 +1464,17 @@ async fn remote_branch_head(repo_path: &str, remote_url: &str, branch: &str) -> 
     Ok(sha.to_string())
 }
 
-async fn inspect_repo(repo_path: &str, remote_url: &str, branch: &str) -> Result<(String, String, bool)> {
+async fn inspect_repo(
+    repo_path: &str,
+    remote_url: &str,
+    branch: &str,
+) -> Result<(String, String, bool)> {
     run_git(repo_path, &["rev-parse", "--is-inside-work-tree"]).await?;
     let current = run_git(repo_path, &["rev-parse", "HEAD"]).await?;
-    let dirty = !run_git(repo_path, &["status", "--porcelain"]).await?.trim().is_empty();
+    let dirty = !run_git(repo_path, &["status", "--porcelain"])
+        .await?
+        .trim()
+        .is_empty();
     let effective_remote = remote_url_for_check(repo_path, remote_url).await;
     let remote = remote_branch_head(repo_path, &effective_remote, branch).await?;
 
@@ -1455,7 +1519,9 @@ fn append_operation_log(
     message: impl Into<String>,
     component: Option<&str>,
 ) {
-    append_operation_log_with_versions(state_file, operation, level, message, component, None, None);
+    append_operation_log_with_versions(
+        state_file, operation, level, message, component, None, None,
+    );
 }
 
 fn append_operation_log_with_versions(
@@ -1511,7 +1577,7 @@ pub fn mark_appliance_rebuild_complete(state: &AppState) -> Result<()> {
 // NEW: Artifact Registry Helpers
 // ============================================================================
 
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 /// Verify SHA256 checksum of a file
 fn verify_checksum(file_path: &Path, expected: &str) -> Result<()> {
@@ -1524,7 +1590,7 @@ fn verify_checksum(file_path: &Path, expected: &str) -> Result<()> {
         .iter()
         .map(|b| format!("{:02x}", b))
         .collect::<String>();
-    
+
     if computed != expected {
         anyhow::bail!(
             "checksum mismatch: computed {}, expected {}",
@@ -1536,10 +1602,7 @@ fn verify_checksum(file_path: &Path, expected: &str) -> Result<()> {
 }
 
 /// Download artifact from registry
-async fn download_artifact(
-    url: &str,
-    destination: &Path,
-) -> Result<()> {
+async fn download_artifact(url: &str, destination: &Path) -> Result<()> {
     let client = reqwest::Client::new();
     let response = client
         .get(url)
@@ -1587,7 +1650,10 @@ async fn query_registry(registry_url: &str) -> Result<RegistryManifest> {
     query_registry_manifest_url(&client, &manifest_url).await
 }
 
-async fn query_registry_manifest_url(client: &reqwest::Client, manifest_url: &str) -> Result<RegistryManifest> {
+async fn query_registry_manifest_url(
+    client: &reqwest::Client,
+    manifest_url: &str,
+) -> Result<RegistryManifest> {
     let response = client
         .get(manifest_url)
         .send()
@@ -1677,11 +1743,20 @@ async fn query_github_releases(
 
     let mut request = client
         .get(&releases_url)
-        .header(ACCEPT, HeaderValue::from_static("application/vnd.github+json"))
+        .header(
+            ACCEPT,
+            HeaderValue::from_static("application/vnd.github+json"),
+        )
         .header(USER_AGENT, HeaderValue::from_static(UPDATE_HTTP_USER_AGENT))
-        .header(HeaderName::from_static("x-github-api-version"), HeaderValue::from_static("2022-11-28"));
+        .header(
+            HeaderName::from_static("x-github-api-version"),
+            HeaderValue::from_static("2022-11-28"),
+        );
 
-    if let Ok(token) = env::var("DAYSHIELD_GITHUB_TOKEN").or_else(|_| env::var("GITHUB_TOKEN")).or_else(|_| env::var("GH_TOKEN")) {
+    if let Ok(token) = env::var("DAYSHIELD_GITHUB_TOKEN")
+        .or_else(|_| env::var("GITHUB_TOKEN"))
+        .or_else(|_| env::var("GH_TOKEN"))
+    {
         let token = token.trim();
         if !token.is_empty() {
             let value = HeaderValue::from_str(&format!("Bearer {}", token))
@@ -1722,13 +1797,15 @@ async fn query_github_releases(
 
     for comp_name in &component_names {
         // Find asset matching pattern: {component}-v*.tar.zst
-        let asset_opt = release.assets.iter().find(|a| {
-            a.name.starts_with(comp_name) && a.name.ends_with(".tar.zst")
-        });
+        let asset_opt = release
+            .assets
+            .iter()
+            .find(|a| a.name.starts_with(comp_name) && a.name.ends_with(".tar.zst"));
 
         if let Some(asset) = asset_opt {
             // Extract version from filename: core-v1.2.3.tar.zst -> 1.2.3
-            let version_str = asset.name
+            let version_str = asset
+                .name
                 .strip_prefix(&format!("{}-v", comp_name))
                 .and_then(|s| s.strip_suffix(".tar.zst"))
                 .unwrap_or("unknown");
@@ -1776,7 +1853,7 @@ async fn query_github_releases(
                             if parts.len() >= 2 {
                                 let checksum = parts[0];
                                 let filename = parts[1];
-                                
+
                                 if let Some(comp) = components.iter_mut().find(|c| {
                                     filename.contains(&c.component) && filename.contains(&c.version)
                                 }) {
@@ -1784,12 +1861,12 @@ async fn query_github_releases(
                                 }
                             }
                         }
-                    },
+                    }
                     Err(e) => {
                         warn!(error = %e, "updates: failed to parse checksums.txt response");
                     }
                 }
-            },
+            }
             Err(e) => {
                 warn!(error = %e, "updates: failed to fetch checksums.txt from release");
             }
@@ -1810,47 +1887,51 @@ async fn extract_and_deploy_artifact(
 ) -> Result<()> {
     let artifact_file = std::fs::File::open(artifact_path)
         .with_context(|| format!("failed to open artifact {}", artifact_path.display()))?;
-    
-    let decoder = zstd::stream::Decoder::new(artifact_file)
-        .with_context(|| format!("failed to initialize zstd decoder for {}", artifact_path.display()))?;
-    
+
+    let decoder = zstd::stream::Decoder::new(artifact_file).with_context(|| {
+        format!(
+            "failed to initialize zstd decoder for {}",
+            artifact_path.display()
+        )
+    })?;
+
     let mut archive = tar::Archive::new(decoder);
 
     match component {
         RepoComponent::Core => {
             let tmp_dir = PathBuf::from("/tmp/dayshield-core-deploy");
             fs::create_dir_all(&tmp_dir)?;
-            archive.unpack(&tmp_dir)
+            archive
+                .unpack(&tmp_dir)
                 .with_context(|| format!("failed to extract core artifact"))?;
-            
+
             let binary = tmp_dir.join("dayshield-core");
             if !binary.exists() {
                 anyhow::bail!("core binary not found in artifact");
             }
-            
+
             install_file_atomic(&binary, Path::new("/usr/local/sbin/dayshield-core"))?;
             let _ = fs::remove_dir_all(&tmp_dir);
-        },
+        }
         RepoComponent::Ui => {
             let target = target_dir.unwrap_or(Path::new("/usr/local/share/dayshield-ui"));
             let tmp_dir = PathBuf::from("/tmp/dayshield-ui-deploy");
             fs::create_dir_all(&tmp_dir)?;
-            archive.unpack(&tmp_dir)
+            archive
+                .unpack(&tmp_dir)
                 .with_context(|| format!("failed to extract ui artifact"))?;
-            
+
             let dist_dir = tmp_dir.join("dist");
             if !dist_dir.exists() {
                 anyhow::bail!("dist directory not found in ui artifact");
             }
-            
+
             install_dir_atomic(&dist_dir, target)?;
             let _ = fs::remove_dir_all(&tmp_dir);
-        },
+        }
         RepoComponent::Rootfs => {
-            anyhow::bail!(
-                "rootfs artifacts must be staged through the A/B slot updater"
-            );
-        },
+            anyhow::bail!("rootfs artifacts must be staged through the A/B slot updater");
+        }
     }
 
     Ok(())
@@ -2044,7 +2125,10 @@ async fn install_grub_ab_entries(layout: &RootfsAbLayout, inactive_mount: &Path)
     run_system_command("chmod", &["+x", &inactive_script_arg]).await?;
 
     write_grub_saved_default(Path::new("/etc/default/grub"))?;
-    write_grub_saved_default(&rootfs_target_path(inactive_mount, Path::new("/etc/default/grub")))?;
+    write_grub_saved_default(&rootfs_target_path(
+        inactive_mount,
+        Path::new("/etc/default/grub"),
+    ))?;
 
     if run_system_command("grub-mkconfig", &["-o", "/boot/grub/grub.cfg"])
         .await
@@ -2125,16 +2209,23 @@ async fn stage_rootfs_ab_update(
     let result: Result<()> = async {
         let artifact_file = std::fs::File::open(artifact_path)
             .with_context(|| format!("failed to open artifact {}", artifact_path.display()))?;
-        let decoder = zstd::stream::Decoder::new(artifact_file)
-            .with_context(|| format!("failed to initialize zstd decoder for {}", artifact_path.display()))?;
+        let decoder = zstd::stream::Decoder::new(artifact_file).with_context(|| {
+            format!(
+                "failed to initialize zstd decoder for {}",
+                artifact_path.display()
+            )
+        })?;
         let mut archive = tar::Archive::new(decoder);
-        archive
-            .unpack(&inactive_mount)
-            .with_context(|| format!("failed to extract rootfs into {}", inactive_mount.display()))?;
+        archive.unpack(&inactive_mount).with_context(|| {
+            format!("failed to extract rootfs into {}", inactive_mount.display())
+        })?;
 
         copy_persistent_state_to_inactive(&inactive_mount).await?;
         write_rootfs_fstab(&inactive_mount, &layout, &layout.inactive)?;
-        fs::create_dir_all(rootfs_target_path(&inactive_mount, Path::new("/etc/dayshield")))?;
+        fs::create_dir_all(rootfs_target_path(
+            &inactive_mount,
+            Path::new("/etc/dayshield"),
+        ))?;
         fs::write(
             rootfs_target_path(&inactive_mount, Path::new("/etc/dayshield/rootfs-slot")),
             format!("{}\n", layout.inactive.name),
@@ -2269,24 +2360,9 @@ pub async fn get_status(state: &AppState) -> UpdatesStatus {
     let settings = load_settings(state);
     let state_file = load_state(state);
 
-    let core = build_component_status(
-        &settings,
-        &state_file,
-        RepoComponent::Core,
-    )
-    .await;
-    let ui = build_component_status(
-        &settings,
-        &state_file,
-        RepoComponent::Ui,
-    )
-    .await;
-    let rootfs = build_component_status(
-        &settings,
-        &state_file,
-        RepoComponent::Rootfs,
-    )
-    .await;
+    let core = build_component_status(&settings, &state_file, RepoComponent::Core).await;
+    let ui = build_component_status(&settings, &state_file, RepoComponent::Ui).await;
+    let rootfs = build_component_status(&settings, &state_file, RepoComponent::Rootfs).await;
 
     let components = vec![core, ui, rootfs];
     let available_update_count = components.iter().filter(|c| c.update_available).count();
@@ -2449,9 +2525,9 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
                         if slot_status.as_ref().map(|s| s.supported).unwrap_or(false) {
                             clear_appliance_rebuild_required(&mut state_file);
                         } else {
-                            let reason = slot_status
-                                .and_then(|s| s.reason)
-                                .unwrap_or_else(|| "A/B rootfs slot layout is not available".to_string());
+                            let reason = slot_status.and_then(|s| s.reason).unwrap_or_else(|| {
+                                "A/B rootfs slot layout is not available".to_string()
+                            });
                             state_file.pending_appliance_rebuild = true;
                             state_file.appliance_rebuild_reason = Some(format!(
                                 "Root filesystem image v{} is available, but in-place rootfs updates require an A/B root layout with shared /boot: {}.",
@@ -2472,7 +2548,11 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
                 );
             }
 
-            for component in [RepoComponent::Core, RepoComponent::Ui, RepoComponent::Rootfs] {
+            for component in [
+                RepoComponent::Core,
+                RepoComponent::Ui,
+                RepoComponent::Rootfs,
+            ] {
                 if seen_components.contains(component.as_str()) {
                     continue;
                 }
@@ -2490,10 +2570,10 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
             if !seen_components.contains(RepoComponent::Rootfs.as_str()) {
                 clear_appliance_rebuild_required(&mut state_file);
             }
-            
+
             save_state(state, &state_file)?;
             Ok(())
-        },
+        }
         Err(err) => {
             warn!(error = %err, "updates: failed to query registry");
             Err(err)
@@ -2517,42 +2597,49 @@ async fn apply_updates_registry(
         None,
     );
     save_state(state, &state_file)?;
-    
+
     // Step 1: Query registry for latest versions
     let manifest = query_registry(&settings.registry_url).await?;
-    
+
     // Step 2: Download all artifacts to staging area
     let staging_dir = PathBuf::from(ARTIFACT_STAGING_DIR);
     fs::create_dir_all(&staging_dir)?;
-    
+
     let transaction_id = uuid::Uuid::new_v4().to_string();
     let transaction_staging = staging_dir.join(&transaction_id);
     fs::create_dir_all(&transaction_staging)?;
-    
+
     let mut downloads = Vec::new();
-    
+
     for comp in &components_to_update {
-        let artifact_opt = manifest.components.iter().find(|a| {
-            match comp {
-                RepoComponent::Core => a.component == "core",
-                RepoComponent::Ui => a.component == "ui",
-                RepoComponent::Rootfs => a.component == "rootfs",
-            }
+        let artifact_opt = manifest.components.iter().find(|a| match comp {
+            RepoComponent::Core => a.component == "core",
+            RepoComponent::Ui => a.component == "ui",
+            RepoComponent::Rootfs => a.component == "rootfs",
         });
-        
+
         if let Some(artifact) = artifact_opt {
-            let dest = transaction_staging.join(format!("{}-{}.tar.zst", &artifact.component, &artifact.version));
-            
+            let dest = transaction_staging.join(format!(
+                "{}-{}.tar.zst",
+                &artifact.component, &artifact.version
+            ));
+
             download_artifact(&artifact.download_url, &dest).await?;
             verify_checksum(&dest, &artifact.checksum_sha256)?;
-            
+
             downloads.push((artifact.component.clone(), artifact.version.clone(), dest));
-            details.push(format!("downloaded and verified {}-{}", &artifact.component, &artifact.version));
+            details.push(format!(
+                "downloaded and verified {}-{}",
+                &artifact.component, &artifact.version
+            ));
             append_operation_log(
                 &mut state_file,
                 "apply",
                 "info",
-                format!("Downloaded and verified {}-{}", &artifact.component, &artifact.version),
+                format!(
+                    "Downloaded and verified {}-{}",
+                    &artifact.component, &artifact.version
+                ),
                 Some(&artifact.component),
             );
         } else {
@@ -2590,32 +2677,36 @@ async fn apply_updates_registry(
         });
     }
 
-    let config_snapshot = match snapshot_config_for_rollback(state, settings.encrypt_update_config_backups) {
-        Ok(path) => path,
-        Err(err) => {
-            let msg = format!("failed to create config backup snapshot: {err}");
-            append_operation_log(&mut state_file, "apply", "error", &msg, None);
-            save_state(state, &state_file)?;
-            return Ok(UpdatesActionResult {
-                operation: "apply".to_string(),
-                success: false,
-                message: msg.clone(),
-                details: vec![msg],
-                status: get_status(state).await,
-            });
-        }
-    };
+    let config_snapshot =
+        match snapshot_config_for_rollback(state, settings.encrypt_update_config_backups) {
+            Ok(path) => path,
+            Err(err) => {
+                let msg = format!("failed to create config backup snapshot: {err}");
+                append_operation_log(&mut state_file, "apply", "error", &msg, None);
+                save_state(state, &state_file)?;
+                return Ok(UpdatesActionResult {
+                    operation: "apply".to_string(),
+                    success: false,
+                    message: msg.clone(),
+                    details: vec![msg],
+                    status: get_status(state).await,
+                });
+            }
+        };
 
     state_file.config_rollback_path = Some(config_snapshot.to_string_lossy().to_string());
     append_operation_log(
         &mut state_file,
         "apply",
         "info",
-        format!("Created config backup archive: {}", config_snapshot.display()),
+        format!(
+            "Created config backup archive: {}",
+            config_snapshot.display()
+        ),
         None,
     );
     save_state(state, &state_file)?;
-    
+
     // Step 3: Backup currently deployed runtime artifacts for rollback.
     for comp in &components_to_update {
         if !component_supports_runtime_deploy(*comp) {
@@ -2623,7 +2714,11 @@ async fn apply_updates_registry(
         }
 
         if let Err(err) = snapshot_runtime_for_rollback(*comp) {
-            let msg = format!("failed to create rollback snapshot for {}: {}", comp.as_str(), err);
+            let msg = format!(
+                "failed to create rollback snapshot for {}: {}",
+                comp.as_str(),
+                err
+            );
             append_operation_log(&mut state_file, "apply", "error", &msg, Some(comp.as_str()));
             save_state(state, &state_file)?;
             return Ok(UpdatesActionResult {
@@ -2650,7 +2745,7 @@ async fn apply_updates_registry(
         "Created backup snapshots",
         None,
     );
-    
+
     // Step 4: Apply artifacts atomically
     for (component_name, version, artifact_path) in &downloads {
         let comp = match component_name.as_str() {
@@ -2661,7 +2756,15 @@ async fn apply_updates_registry(
         };
 
         if matches!(comp, RepoComponent::Rootfs) {
-            match stage_rootfs_ab_update(state, artifact_path, version, &mut state_file, &mut details).await {
+            match stage_rootfs_ab_update(
+                state,
+                artifact_path,
+                version,
+                &mut state_file,
+                &mut details,
+            )
+            .await
+            {
                 Ok(()) => continue,
                 Err(err) => {
                     details.push(format!("FAILED to stage rootfs: {}", err));
@@ -2672,7 +2775,11 @@ async fn apply_updates_registry(
                         format!("Failed to stage rootfs: {}", err),
                         Some("rootfs"),
                     );
-                    if let Some(entry) = state_file.components.iter_mut().find(|c| c.component == "rootfs") {
+                    if let Some(entry) = state_file
+                        .components
+                        .iter_mut()
+                        .find(|c| c.component == "rootfs")
+                    {
                         entry.last_error = Some(err.to_string());
                     }
                     save_state(state, &state_file)?;
@@ -2687,7 +2794,7 @@ async fn apply_updates_registry(
                 }
             }
         }
-        
+
         match extract_and_deploy_artifact(comp, artifact_path, None).await {
             Ok(_) => {
                 let previous_version = {
@@ -2704,14 +2811,16 @@ async fn apply_updates_registry(
                     "apply",
                     "success",
                     match previous_version.as_deref() {
-                        Some(prev) => format!("Deployed {} from v{} to v{}", component_name, prev, version),
+                        Some(prev) => {
+                            format!("Deployed {} from v{} to v{}", component_name, prev, version)
+                        }
                         None => format!("Deployed {} to v{}", component_name, version),
                     },
                     Some(component_name),
                     previous_version.as_deref(),
                     Some(version.as_str()),
                 );
-            },
+            }
             Err(err) => {
                 details.push(format!("FAILED to deploy {}: {}", component_name, err));
                 append_operation_log(
@@ -2722,7 +2831,7 @@ async fn apply_updates_registry(
                     Some(component_name),
                 );
                 save_state(state, &state_file)?;
-                
+
                 return Ok(UpdatesActionResult {
                     operation: "apply".to_string(),
                     success: false,
@@ -2733,11 +2842,11 @@ async fn apply_updates_registry(
             }
         }
     }
-    
+
     // Step 5: Always verify deployment health after applying updates
-    let runtime_downloaded = downloads.iter().any(|(component_name, _, _)| {
-        matches!(component_name.as_str(), "core" | "ui")
-    });
+    let runtime_downloaded = downloads
+        .iter()
+        .any(|(component_name, _, _)| matches!(component_name.as_str(), "core" | "ui"));
     if runtime_downloaded {
         if let Err(err) = ensure_critical_services_healthy().await {
             details.push(format!("post-apply service health check failed: {}", err));
@@ -2749,7 +2858,7 @@ async fn apply_updates_registry(
                 None,
             );
             save_state(state, &state_file)?;
-            
+
             return Ok(UpdatesActionResult {
                 operation: "apply".to_string(),
                 success: false,
@@ -2767,7 +2876,7 @@ async fn apply_updates_registry(
             None,
         );
     }
-    
+
     // Step 6: Mark transaction complete
     state_file.last_applied_at = Some(Utc::now().to_rfc3339());
 
@@ -2778,16 +2887,19 @@ async fn apply_updates_registry(
         "Artifact update apply completed",
         None,
     );
-    
+
     save_state(state, &state_file)?;
-    
+
     // Cleanup staging directory
     let _ = fs::remove_dir_all(&transaction_staging);
-    
+
     Ok(UpdatesActionResult {
         operation: "apply".to_string(),
         success: true,
-        message: if components_to_update.iter().any(|c| matches!(c, RepoComponent::Rootfs)) {
+        message: if components_to_update
+            .iter()
+            .any(|c| matches!(c, RepoComponent::Rootfs))
+        {
             "rootfs update staged; reboot required to trial boot the new slot".to_string()
         } else {
             "updates applied successfully".to_string()
@@ -2905,7 +3017,9 @@ async fn rollback_rootfs_update(state: &AppState) -> Result<UpdatesActionResult>
         operation: "rollback".to_string(),
         success: true,
         message: "rootfs rollback scheduled; reboot required".to_string(),
-        details: vec![format!("scheduled next boot into rootfs slot {previous_slot}")],
+        details: vec![format!(
+            "scheduled next boot into rootfs slot {previous_slot}"
+        )],
         status: get_status(state).await,
     })
 }
@@ -2951,12 +3065,15 @@ pub async fn rollback_updates(
             let target_version = match previous_version {
                 Some(version) => version,
                 None => {
-                    let msg = format!(
-                        "{}: no rollback snapshot/version available",
-                        comp.as_str()
-                    );
+                    let msg = format!("{}: no rollback snapshot/version available", comp.as_str());
                     details.push(msg.clone());
-                    append_operation_log(&mut state_file, "rollback", "error", msg.clone(), Some(comp.as_str()));
+                    append_operation_log(
+                        &mut state_file,
+                        "rollback",
+                        "error",
+                        msg.clone(),
+                        Some(comp.as_str()),
+                    );
                     continue;
                 }
             };
@@ -2972,7 +3089,13 @@ pub async fn rollback_updates(
                     let entry = ensure_component_state(&mut state_file, comp);
                     entry.last_error = Some(msg.clone());
                 }
-                append_operation_log(&mut state_file, "rollback", "error", msg.clone(), Some(comp.as_str()));
+                append_operation_log(
+                    &mut state_file,
+                    "rollback",
+                    "error",
+                    msg.clone(),
+                    Some(comp.as_str()),
+                );
                 save_state(state, &state_file)?;
                 let status = get_status(state).await;
                 return Ok(UpdatesActionResult {
@@ -2992,7 +3115,11 @@ pub async fn rollback_updates(
                 entry.last_error = None;
             }
 
-            details.push(format!("{}: rolled back to {}", comp.as_str(), target_version));
+            details.push(format!(
+                "{}: rolled back to {}",
+                comp.as_str(),
+                target_version
+            ));
             append_operation_log_with_versions(
                 &mut state_file,
                 "rollback",
@@ -3025,7 +3152,13 @@ pub async fn rollback_updates(
                 let entry = ensure_component_state(&mut state_file, comp);
                 entry.last_error = Some(msg.clone());
             }
-            append_operation_log(&mut state_file, "rollback", "error", msg.clone(), Some(comp.as_str()));
+            append_operation_log(
+                &mut state_file,
+                "rollback",
+                "error",
+                msg.clone(),
+                Some(comp.as_str()),
+            );
             save_state(state, &state_file)?;
             let status = get_status(state).await;
             return Ok(UpdatesActionResult {
@@ -3065,7 +3198,13 @@ pub async fn rollback_updates(
                 let entry = ensure_component_state(&mut state_file, comp);
                 entry.last_error = Some(msg.clone());
             }
-            append_operation_log(&mut state_file, "rollback", "error", msg.clone(), Some(comp.as_str()));
+            append_operation_log(
+                &mut state_file,
+                "rollback",
+                "error",
+                msg.clone(),
+                Some(comp.as_str()),
+            );
             save_state(state, &state_file)?;
             let status = get_status(state).await;
             return Ok(UpdatesActionResult {
@@ -3136,7 +3275,11 @@ pub async fn rollback_updates(
         };
 
         if let Err(err) = restore_config_from_snapshot(state, &snapshot_path) {
-            let msg = format!("failed to restore config snapshot ({}): {}", snapshot_path.display(), err);
+            let msg = format!(
+                "failed to restore config snapshot ({}): {}",
+                snapshot_path.display(),
+                err
+            );
             append_operation_log(&mut state_file, "rollback", "error", &msg, None);
             save_state(state, &state_file)?;
             let status = get_status(state).await;
@@ -3153,7 +3296,10 @@ pub async fn rollback_updates(
             &mut state_file,
             "rollback",
             "success",
-            format!("Restored config backup archive: {}", snapshot_path.display()),
+            format!(
+                "Restored config backup archive: {}",
+                snapshot_path.display()
+            ),
             None,
         );
         state_file.config_rollback_path = None;
@@ -3220,7 +3366,10 @@ pub async fn validate_updates(
         if comp.current_commit.is_none() && comp.current_version.is_some() {
             match (&comp.current_version, &comp.last_applied_version) {
                 (Some(current), Some(applied)) if current == applied => {
-                    details.push(format!("{}: registry validation ok ({})", comp.component, current));
+                    details.push(format!(
+                        "{}: registry validation ok ({})",
+                        comp.component, current
+                    ));
                 }
                 (Some(current), Some(applied)) => {
                     success = false;
@@ -3238,14 +3387,21 @@ pub async fn validate_updates(
                 }
                 _ => {
                     success = false;
-                    details.push(format!("{}: unable to determine current version", comp.component));
+                    details.push(format!(
+                        "{}: unable to determine current version",
+                        comp.component
+                    ));
                 }
             }
         } else {
             // Git mode: validate using commits
             match (&comp.current_commit, &comp.last_applied_commit) {
                 (Some(current), Some(applied)) if current == applied => {
-                    details.push(format!("{}: git validation ok ({})", comp.component, short_sha(current)));
+                    details.push(format!(
+                        "{}: git validation ok ({})",
+                        comp.component,
+                        short_sha(current)
+                    ));
                 }
                 (Some(current), Some(applied)) => {
                     success = false;
@@ -3412,8 +3568,8 @@ fn load_rootfs_iso_upgrade_marker(state: &AppState) -> Result<Option<RootfsUpdat
     if !path.exists() {
         return Ok(None);
     }
-    let payload = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let payload =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let update: RootfsUpdateState = serde_json::from_str(&payload)
         .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(Some(update))
@@ -3527,16 +3683,14 @@ async fn reconcile_rootfs_boot_state(state: &AppState) -> Result<()> {
                 update.status = "rollbackScheduled".to_string();
                 update.last_error = Some(message.clone());
             }
-            if let Some(rootfs) = state_file.components.iter_mut().find(|c| c.component == "rootfs") {
+            if let Some(rootfs) = state_file
+                .components
+                .iter_mut()
+                .find(|c| c.component == "rootfs")
+            {
                 rootfs.last_error = Some(message.clone());
             }
-            append_operation_log(
-                &mut state_file,
-                "apply",
-                "error",
-                &message,
-                Some("rootfs"),
-            );
+            append_operation_log(&mut state_file, "apply", "error", &message, Some("rootfs"));
 
             if let Some(previous_slot) = previous_slot {
                 let entry_id = format!("{ROOTFS_GRUB_ENTRY_PREFIX}{previous_slot}");
@@ -3582,7 +3736,8 @@ pub async fn start_update_checker(state: std::sync::Arc<AppState>) {
             };
 
             if now.time().hour() < scheduled_time.hour()
-                || (now.time().hour() == scheduled_time.hour() && now.time().minute() < scheduled_time.minute())
+                || (now.time().hour() == scheduled_time.hour()
+                    && now.time().minute() < scheduled_time.minute())
             {
                 continue;
             }
@@ -3632,7 +3787,11 @@ pub async fn start_update_checker(state: std::sync::Arc<AppState>) {
 
             match check_for_updates_with_trigger(&state, CheckTrigger::Scheduled).await {
                 Ok(status) => {
-                    let available = status.components.iter().filter(|c| c.update_available).count();
+                    let available = status
+                        .components
+                        .iter()
+                        .filter(|c| c.update_available)
+                        .count();
                     info!(available, "updates: periodic check completed");
                 }
                 Err(err) => {

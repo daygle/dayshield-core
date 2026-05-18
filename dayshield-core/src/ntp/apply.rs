@@ -168,17 +168,15 @@ async fn apply_chrony(
     if let Some(parent) = std::path::Path::new(CHRONY_CONF).parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    tokio::fs::write(CHRONY_CONF, content)
-        .await
-        .map_err(|e| {
-            NtpError::Io(std::io::Error::new(
-                e.kind(),
-                format!(
-                    "{} (check dayshield.service ReadWritePaths for /etc/chrony)",
-                    e
-                ),
-            ))
-        })?;
+    tokio::fs::write(CHRONY_CONF, content).await.map_err(|e| {
+        NtpError::Io(std::io::Error::new(
+            e.kind(),
+            format!(
+                "{} (check dayshield.service ReadWritePaths for /etc/chrony)",
+                e
+            ),
+        ))
+    })?;
 
     // Stop timesyncd if it was previously running.
     stop_service("systemd-timesyncd").await;
@@ -190,7 +188,11 @@ async fn apply_chrony(
 
 fn detect_chrony_unit() -> Option<&'static str> {
     const CANDIDATES: [&str; 2] = ["chrony", "chronyd"];
-    const UNIT_DIRS: [&str; 3] = ["/etc/systemd/system", "/lib/systemd/system", "/usr/lib/systemd/system"];
+    const UNIT_DIRS: [&str; 3] = [
+        "/etc/systemd/system",
+        "/lib/systemd/system",
+        "/usr/lib/systemd/system",
+    ];
 
     for unit in CANDIDATES {
         let service_name = format!("{unit}.service");
@@ -204,7 +206,11 @@ fn detect_chrony_unit() -> Option<&'static str> {
 }
 
 fn has_timesyncd_unit() -> bool {
-    const UNIT_DIRS: [&str; 3] = ["/etc/systemd/system", "/lib/systemd/system", "/usr/lib/systemd/system"];
+    const UNIT_DIRS: [&str; 3] = [
+        "/etc/systemd/system",
+        "/lib/systemd/system",
+        "/usr/lib/systemd/system",
+    ];
     for dir in UNIT_DIRS {
         if Path::new(dir).join("systemd-timesyncd.service").exists() {
             return true;

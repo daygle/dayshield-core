@@ -17,8 +17,8 @@ use tracing::{info, warn};
 
 use crate::{
     config::models::{
-        ensure_ipv6_allowed, is_valid_ip, validate_dns_domain, validate_dns_hostname, DnsDomainOverride,
-        DnsHostOverride,
+        ensure_ipv6_allowed, is_valid_ip, validate_dns_domain, validate_dns_hostname,
+        DnsDomainOverride, DnsHostOverride,
     },
     engine::dns::apply_config_with_ipv6,
     state::AppState,

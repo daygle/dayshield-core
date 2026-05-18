@@ -119,7 +119,8 @@ pub(crate) fn parse_journald_firewall_line(line: &str) -> Option<LogEvent> {
     };
 
     // Parse the __REALTIME_TIMESTAMP field (microseconds since epoch).
-    let timestamp = parse_realtime_timestamp(obj.get("__REALTIME_TIMESTAMP").and_then(|v| v.as_str()));
+    let timestamp =
+        parse_realtime_timestamp(obj.get("__REALTIME_TIMESTAMP").and_then(|v| v.as_str()));
 
     parse_nftables_message(&message, &timestamp)
 }

@@ -1,8 +1,8 @@
 //! API module - assembles the Axum router and registers all route handlers.
 
 pub(crate) mod acme;
-mod ai;
 mod admin;
+mod ai;
 mod aliases;
 mod auth;
 mod backup;
@@ -12,8 +12,8 @@ mod dashboard;
 mod dhcp;
 mod dns;
 mod dns_overrides;
-pub(crate) mod dynamic_dns;
 mod dot;
+pub(crate) mod dynamic_dns;
 mod firewall;
 mod gateways;
 mod interfaces;
@@ -173,7 +173,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/system/shutdown", post(system::shutdown))
         .route("/system/updates/status", get(system::get_updates_status))
         .route("/system/updates/settings", get(system::get_update_settings))
-        .route("/system/updates/settings", put(system::update_update_settings))
+        .route(
+            "/system/updates/settings",
+            put(system::update_update_settings),
+        )
         .route("/system/updates/check", post(system::check_updates))
         .route("/system/updates/apply", post(system::apply_updates))
         .route("/system/updates/rollback", post(system::rollback_updates))
@@ -184,7 +187,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/system/schedules", get(schedules::get_schedules))
         .route("/system/schedules", post(schedules::update_schedules))
-        .route("/system/schedules/run/{job}", post(schedules::run_schedule_job))
+        .route(
+            "/system/schedules/run/{job}",
+            post(schedules::run_schedule_job),
+        )
         // Dashboard
         .route("/dashboard/system", get(dashboard::get_system_status))
         .route("/dashboard/network", get(dashboard::get_network_status))
@@ -208,9 +214,18 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/firewall/settings", put(firewall::update_settings))
         .route("/firewall/stats", get(firewall::get_stats))
         // Per-interface firewall rules
-        .route("/interfaces/{name}/firewall/rules", get(firewall::list_interface_rules))
-        .route("/interfaces/{name}/firewall/rules", post(firewall::create_interface_rule))
-        .route("/interfaces/{name}/firewall/rules/{id}", delete(firewall::delete_interface_rule))
+        .route(
+            "/interfaces/{name}/firewall/rules",
+            get(firewall::list_interface_rules),
+        )
+        .route(
+            "/interfaces/{name}/firewall/rules",
+            post(firewall::create_interface_rule),
+        )
+        .route(
+            "/interfaces/{name}/firewall/rules/{id}",
+            delete(firewall::delete_interface_rule),
+        )
         // Firewall aliases
         .route("/firewall/aliases", get(aliases::list_aliases))
         .route("/firewall/aliases", post(aliases::create_alias))
@@ -252,25 +267,64 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/dhcp6/config", get(dhcp::get_config_v6))
         .route("/dhcp6/config", post(dhcp::update_config_v6))
         .route("/dhcp6/static-leases", get(dhcp::list_dhcp6_static_leases))
-        .route("/dhcp6/static-leases", post(dhcp::create_dhcp6_static_lease))
-        .route("/dhcp6/static-leases/{id}", delete(dhcp::delete_dhcp6_static_lease))
+        .route(
+            "/dhcp6/static-leases",
+            post(dhcp::create_dhcp6_static_lease),
+        )
+        .route(
+            "/dhcp6/static-leases/{id}",
+            delete(dhcp::delete_dhcp6_static_lease),
+        )
         .route("/dhcp6/leases", get(dhcp::list_active_dhcp6_leases))
         .route("/dhcp/static-leases", get(dhcp::list_static_leases))
         .route("/dhcp/static-leases", post(dhcp::create_static_lease))
-        .route("/dhcp/static-leases/{id}", delete(dhcp::delete_static_lease))
+        .route(
+            "/dhcp/static-leases/{id}",
+            delete(dhcp::delete_static_lease),
+        )
         .route("/dhcp/leases", get(dhcp::list_active_leases))
         .route("/dhcp/pools", get(dhcp::list_pools))
         // Per-interface DHCP
-        .route("/interfaces/{name}/dhcp/config", get(dhcp::get_interface_dhcp_config))
-        .route("/interfaces/{name}/dhcp/config", post(dhcp::update_interface_dhcp_config))
-        .route("/interfaces/{name}/dhcp6/config", get(dhcp::get_interface_dhcp6_config))
-        .route("/interfaces/{name}/dhcp6/config", post(dhcp::update_interface_dhcp6_config))
-        .route("/interfaces/{name}/dhcp6/static-leases", get(dhcp::list_interface_dhcp6_static_leases))
-        .route("/interfaces/{name}/dhcp6/static-leases", post(dhcp::create_interface_dhcp6_static_lease))
-        .route("/interfaces/{name}/dhcp6/static-leases/{id}", delete(dhcp::delete_interface_dhcp6_static_lease))
-        .route("/interfaces/{name}/dhcp/static-leases", get(dhcp::list_interface_static_leases))
-        .route("/interfaces/{name}/dhcp/static-leases", post(dhcp::create_interface_static_lease))
-        .route("/interfaces/{name}/dhcp/static-leases/{id}", delete(dhcp::delete_interface_static_lease))
+        .route(
+            "/interfaces/{name}/dhcp/config",
+            get(dhcp::get_interface_dhcp_config),
+        )
+        .route(
+            "/interfaces/{name}/dhcp/config",
+            post(dhcp::update_interface_dhcp_config),
+        )
+        .route(
+            "/interfaces/{name}/dhcp6/config",
+            get(dhcp::get_interface_dhcp6_config),
+        )
+        .route(
+            "/interfaces/{name}/dhcp6/config",
+            post(dhcp::update_interface_dhcp6_config),
+        )
+        .route(
+            "/interfaces/{name}/dhcp6/static-leases",
+            get(dhcp::list_interface_dhcp6_static_leases),
+        )
+        .route(
+            "/interfaces/{name}/dhcp6/static-leases",
+            post(dhcp::create_interface_dhcp6_static_lease),
+        )
+        .route(
+            "/interfaces/{name}/dhcp6/static-leases/{id}",
+            delete(dhcp::delete_interface_dhcp6_static_lease),
+        )
+        .route(
+            "/interfaces/{name}/dhcp/static-leases",
+            get(dhcp::list_interface_static_leases),
+        )
+        .route(
+            "/interfaces/{name}/dhcp/static-leases",
+            post(dhcp::create_interface_static_lease),
+        )
+        .route(
+            "/interfaces/{name}/dhcp/static-leases/{id}",
+            delete(dhcp::delete_interface_static_lease),
+        )
         // Suricata IPS/IDS
         .route("/suricata/config", get(suricata::get_config))
         .route("/suricata/config", post(suricata::update_config))
@@ -278,33 +332,39 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/suricata/rulesets", post(suricata::create_ruleset))
         .route("/suricata/rulesets/{id}", put(suricata::update_ruleset))
         .route("/suricata/alerts", get(suricata::list_alerts))
-        .route("/interfaces/{name}/suricata", get(suricata::get_interface_suricata_config))
-        .route("/interfaces/{name}/suricata", post(suricata::update_interface_suricata_config))
+        .route(
+            "/interfaces/{name}/suricata",
+            get(suricata::get_interface_suricata_config),
+        )
+        .route(
+            "/interfaces/{name}/suricata",
+            post(suricata::update_interface_suricata_config),
+        )
         // Managed rulesets
         .route("/rulesets/available", get(rulesets::list_available))
         .route("/rulesets", get(rulesets::list_installed))
         .route("/rulesets/{id}/install", post(rulesets::install_ruleset))
         .route("/rulesets/{id}/check-update", post(rulesets::check_update))
-        .route("/rulesets/check-all-updates", post(rulesets::check_all_updates))
+        .route(
+            "/rulesets/check-all-updates",
+            post(rulesets::check_all_updates),
+        )
         .route("/rulesets/{id}/update", post(rulesets::update_ruleset))
         .route("/rulesets/{id}/enable", post(rulesets::enable_ruleset))
         .route("/rulesets/{id}/disable", post(rulesets::disable_ruleset))
         .route("/rulesets/{id}", delete(rulesets::delete_ruleset))
         .route("/rulesets/{id}/rules", get(rulesets::list_ruleset_rules))
-        .route("/rulesets/{id}/disabled-rules", post(rulesets::update_disabled_rules))
+        .route(
+            "/rulesets/{id}/disabled-rules",
+            post(rulesets::update_disabled_rules),
+        )
         // CrowdSec
         .route("/crowdsec/config", get(crowdsec::get_config))
         .route("/crowdsec/config", post(crowdsec::update_config))
         .route("/crowdsec/decisions", get(crowdsec::get_decisions))
         // WireGuard VPN
-        .route(
-            "/wireguard/interfaces",
-            get(wireguard::list_interfaces),
-        )
-        .route(
-            "/wireguard/interfaces",
-            post(wireguard::create_interface),
-        )
+        .route("/wireguard/interfaces", get(wireguard::list_interfaces))
+        .route("/wireguard/interfaces", post(wireguard::create_interface))
         .route(
             "/wireguard/interfaces/{name}",
             delete(wireguard::delete_interface),
@@ -368,11 +428,26 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/cloudflared/restart", post(cloudflared::restart_service))
         .route("/cloudflared/logs", get(cloudflared::get_logs))
         // Captive Portal
-        .route("/captive-portal/config", get(crate::captive_portal::get_admin_config))
-        .route("/captive-portal/config", put(crate::captive_portal::update_admin_config))
-        .route("/captive-portal/status", get(crate::captive_portal::get_admin_status))
-        .route("/captive-portal/sessions", get(crate::captive_portal::list_admin_sessions))
-        .route("/captive-portal/sessions", post(crate::captive_portal::create_admin_session))
+        .route(
+            "/captive-portal/config",
+            get(crate::captive_portal::get_admin_config),
+        )
+        .route(
+            "/captive-portal/config",
+            put(crate::captive_portal::update_admin_config),
+        )
+        .route(
+            "/captive-portal/status",
+            get(crate::captive_portal::get_admin_status),
+        )
+        .route(
+            "/captive-portal/sessions",
+            get(crate::captive_portal::list_admin_sessions),
+        )
+        .route(
+            "/captive-portal/sessions",
+            post(crate::captive_portal::create_admin_session),
+        )
         .route(
             "/captive-portal/sessions/{id}",
             delete(crate::captive_portal::revoke_admin_session),
@@ -380,7 +455,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/portal", get(crate::captive_portal::portal_page))
         .route("/portal/config", get(crate::captive_portal::public_config))
         .route("/portal/status", get(crate::captive_portal::public_status))
-        .route("/portal/authorize", post(crate::captive_portal::public_authorize))
+        .route(
+            "/portal/authorize",
+            post(crate::captive_portal::public_authorize),
+        )
         .route("/portal/logout", post(crate::captive_portal::public_logout))
         // AI threat events / blocking
         .route("/api/ai/threats", get(ai::list_threats))

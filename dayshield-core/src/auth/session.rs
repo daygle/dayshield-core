@@ -67,14 +67,17 @@ pub struct SessionClaims {
 pub fn load_or_create_key(path: &Path) -> Result<Vec<u8>, AuthError> {
     // If file exists and is valid, load it
     if path.exists() {
-        let bytes = fs::read(path)
-            .map_err(|e| AuthError::StorageError(format!("read key: {e}")))?;
+        let bytes =
+            fs::read(path).map_err(|e| AuthError::StorageError(format!("read key: {e}")))?;
         if bytes.len() == KEY_BYTES {
             return Ok(bytes);
         }
         // File exists but is too short (empty or corrupted) - recreate it
         // This can happen if a placeholder empty file was created by the installer
-        tracing::warn!("session key file is corrupted ({} bytes), recreating", bytes.len());
+        tracing::warn!(
+            "session key file is corrupted ({} bytes), recreating",
+            bytes.len()
+        );
     }
 
     // Generate a new random key.

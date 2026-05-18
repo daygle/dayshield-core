@@ -322,7 +322,9 @@ async fn run_update_cycle(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(12))
         .build()
-        .map_err(|err| DynamicDnsApiError::RuntimeError(format!("failed to create HTTP client: {err}")))?;
+        .map_err(|err| {
+            DynamicDnsApiError::RuntimeError(format!("failed to create HTTP client: {err}"))
+        })?;
 
     let mut statuses = Vec::new();
 
@@ -428,7 +430,9 @@ async fn apply_entry_update(
                 entry.hostname.trim(),
                 ip
             );
-            client.get(url).basic_auth(username.to_string(), Some(password.to_string()))
+            client
+                .get(url)
+                .basic_auth(username.to_string(), Some(password.to_string()))
         }
         DynamicDnsProvider::Dynu => {
             let url = format!(
@@ -436,13 +440,14 @@ async fn apply_entry_update(
                 entry.hostname.trim(),
                 ip
             );
-            client.get(url).basic_auth(username.to_string(), Some(password.to_string()))
+            client
+                .get(url)
+                .basic_auth(username.to_string(), Some(password.to_string()))
         }
         DynamicDnsProvider::FreeDns => {
             let url = format!(
                 "https://freedns.afraid.org/dynamic/update.php?{}&address={}",
-                password,
-                ip
+                password, ip
             );
             client.get(url)
         }
@@ -527,6 +532,7 @@ fn save_status_file(status: &DynamicDnsPersistedStatus) -> Result<(), DynamicDns
         DynamicDnsApiError::RuntimeError(format!("failed to serialize status: {err}"))
     })?;
 
-    std::fs::write(path, raw)
-        .map_err(|err| DynamicDnsApiError::RuntimeError(format!("failed to write status file: {err}")))
+    std::fs::write(path, raw).map_err(|err| {
+        DynamicDnsApiError::RuntimeError(format!("failed to write status file: {err}"))
+    })
 }

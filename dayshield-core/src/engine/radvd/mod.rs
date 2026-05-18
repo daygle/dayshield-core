@@ -82,10 +82,7 @@ pub async fn apply_radvd(assignments: &[PrefixAssignment]) -> anyhow::Result<()>
         .await
         .map_err(|e| anyhow::anyhow!("write radvd.conf: {e}"))?;
 
-    debug!(
-        interfaces = assignments.len(),
-        "radvd: wrote configuration"
-    );
+    debug!(interfaces = assignments.len(), "radvd: wrote configuration");
 
     reload_or_start_radvd().await
 }
@@ -95,9 +92,7 @@ pub async fn apply_radvd(assignments: &[PrefixAssignment]) -> anyhow::Result<()>
 // ---------------------------------------------------------------------------
 
 fn generate_radvd_conf(assignments: &[PrefixAssignment]) -> String {
-    let mut conf = String::from(
-        "# Managed by dayshield-core - do not edit manually\n\n",
-    );
+    let mut conf = String::from("# Managed by dayshield-core - do not edit manually\n\n");
 
     for a in assignments {
         let network = network_from_cidr(&a.prefix);
@@ -234,7 +229,9 @@ async fn validate_radvd_config() -> anyhow::Result<bool> {
 
     let result = match timeout(Duration::from_secs(2), child.wait()).await {
         Ok(Ok(status)) if status.success() => Ok(true),
-        Ok(Ok(status)) => Err(anyhow::anyhow!("radvd config test failed with status {status}")),
+        Ok(Ok(status)) => Err(anyhow::anyhow!(
+            "radvd config test failed with status {status}"
+        )),
         Ok(Err(e)) => Err(anyhow::anyhow!("radvd config test failed: {e}")),
         Err(_) => {
             // A valid foreground radvd keeps running. If it survived the probe
@@ -277,14 +274,8 @@ mod tests {
 
     #[test]
     fn network_strips_host_bits() {
-        assert_eq!(
-            network_from_cidr("2001:db8:0:3::1/64"),
-            "2001:db8:0:3::/64"
-        );
-        assert_eq!(
-            network_from_cidr("2001:db8:0:3::/64"),
-            "2001:db8:0:3::/64"
-        );
+        assert_eq!(network_from_cidr("2001:db8:0:3::1/64"), "2001:db8:0:3::/64");
+        assert_eq!(network_from_cidr("2001:db8:0:3::/64"), "2001:db8:0:3::/64");
     }
 
     #[test]

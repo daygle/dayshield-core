@@ -244,7 +244,11 @@ pub async fn get_config(
         .map_err(DhcpError::StorageError)?
         .unwrap_or_else(default_dhcp_cfg);
 
-    info!(enabled = cfg.enabled, scopes = cfg.scopes.len(), "dhcp: loaded config");
+    info!(
+        enabled = cfg.enabled,
+        scopes = cfg.scopes.len(),
+        "dhcp: loaded config"
+    );
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -271,8 +275,12 @@ pub async fn update_config(
         .unwrap_or_else(default_dhcp_cfg);
 
     // Apply top-level fields.
-    if let Some(v) = req.enabled    { cfg.enabled   = v; }
-    if let Some(v) = req.interface  { cfg.interface  = v; }
+    if let Some(v) = req.enabled {
+        cfg.enabled = v;
+    }
+    if let Some(v) = req.interface {
+        cfg.interface = v;
+    }
 
     // Ensure at least one scope exists to hold the pool settings.
     if cfg.scopes.is_empty() {
@@ -281,7 +289,8 @@ pub async fn update_config(
         // 2. Derive a /24 from the pool start address if provided.
         // 3. Fall back to a /24 based on the gateway if provided.
         // 4. Last resort: use the gateway/range to derive, or 192.168.1.0/24.
-        let subnet = req.subnet
+        let subnet = req
+            .subnet
             .as_deref()
             .filter(|s| !s.is_empty())
             .map(String::from)
@@ -314,13 +323,27 @@ pub async fn update_config(
 
     let scope = &mut cfg.scopes[0];
     // Subnet can be updated explicitly; otherwise preserve the existing value.
-    if let Some(v) = req.subnet.filter(|s| !s.is_empty()) { scope.subnet = v; }
-    if let Some(v) = req.range_start  { scope.pool_start    = v; }
-    if let Some(v) = req.range_end    { scope.pool_end      = v; }
-    if let Some(v) = req.gateway      { scope.gateway       = if v.is_empty() { None } else { Some(v) }; }
-    if let Some(v) = req.dns_servers  { scope.dns_servers   = v; }
-    if let Some(v) = req.lease_time   { scope.lease_seconds = v; }
-    if let Some(v) = req.domain_name  { scope.domain_name   = if v.is_empty() { None } else { Some(v) }; }
+    if let Some(v) = req.subnet.filter(|s| !s.is_empty()) {
+        scope.subnet = v;
+    }
+    if let Some(v) = req.range_start {
+        scope.pool_start = v;
+    }
+    if let Some(v) = req.range_end {
+        scope.pool_end = v;
+    }
+    if let Some(v) = req.gateway {
+        scope.gateway = if v.is_empty() { None } else { Some(v) };
+    }
+    if let Some(v) = req.dns_servers {
+        scope.dns_servers = v;
+    }
+    if let Some(v) = req.lease_time {
+        scope.lease_seconds = v;
+    }
+    if let Some(v) = req.domain_name {
+        scope.domain_name = if v.is_empty() { None } else { Some(v) };
+    }
 
     // --- Validation --------------------------------------------------------
 
@@ -328,12 +351,14 @@ pub async fn update_config(
 
     if !scope.pool_start.is_empty() && !is_valid_ipv4_addr(&scope.pool_start) {
         return Err(DhcpError::ValidationFailed(format!(
-            "invalid rangeStart: {}", scope.pool_start
+            "invalid rangeStart: {}",
+            scope.pool_start
         )));
     }
     if !scope.pool_end.is_empty() && !is_valid_ipv4_addr(&scope.pool_end) {
         return Err(DhcpError::ValidationFailed(format!(
-            "invalid rangeEnd: {}", scope.pool_end
+            "invalid rangeEnd: {}",
+            scope.pool_end
         )));
     }
     if !scope.pool_start.is_empty()
@@ -341,17 +366,22 @@ pub async fn update_config(
         && !is_valid_ipv4_range(&scope.pool_start, &scope.pool_end)
     {
         return Err(DhcpError::ValidationFailed(format!(
-            "rangeStart {} must be ≤ rangeEnd {}", scope.pool_start, scope.pool_end
+            "rangeStart {} must be ≤ rangeEnd {}",
+            scope.pool_start, scope.pool_end
         )));
     }
     if let Some(gw) = &scope.gateway {
         if !is_valid_ipv4_addr(gw) {
-            return Err(DhcpError::ValidationFailed(format!("invalid gateway: {gw}")));
+            return Err(DhcpError::ValidationFailed(format!(
+                "invalid gateway: {gw}"
+            )));
         }
     }
     for dns in &scope.dns_servers {
         if !is_valid_ipv4_addr(dns) {
-            return Err(DhcpError::ValidationFailed(format!("invalid DNS server: {dns}")));
+            return Err(DhcpError::ValidationFailed(format!(
+                "invalid DNS server: {dns}"
+            )));
         }
     }
 
@@ -510,9 +540,9 @@ pub async fn delete_static_lease(
     Path(id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, DhcpError> {
-    let target = id.parse::<Uuid>().map_err(|_| {
-        DhcpError::ValidationFailed(format!("invalid lease ID: {id}"))
-    })?;
+    let target = id
+        .parse::<Uuid>()
+        .map_err(|_| DhcpError::ValidationFailed(format!("invalid lease ID: {id}")))?;
 
     let mut cfg = state
         .config_store
@@ -559,9 +589,7 @@ pub async fn delete_static_lease(
 /// `address,hwaddr,client-id,valid-lifetime,expire,subnet-id,fqdn-fwd,fqdn-rev,hostname,state,user-context`
 ///
 /// Returns an empty array when the file does not exist.
-pub async fn list_active_leases(
-    State(_state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn list_active_leases(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
     use crate::engine::dhcp::KEA_LEASES_PATH;
 
     let content = match tokio::fs::read_to_string(KEA_LEASES_PATH).await {
@@ -584,22 +612,22 @@ pub async fn list_active_leases(
             // address,hwaddr,client-id,valid-lifetime,expire,subnet-id,
             //   fqdn-fwd,fqdn-rev,hostname,state,user-context
             let mut cols = line.splitn(11, ',');
-            let address       = cols.next()?.to_string();
-            let hwaddr        = cols.next()?.to_string();
-            let _client_id    = cols.next();
-            let _valid_life   = cols.next();
-            let expire: u64   = cols.next()?.parse().ok()?;
-            let _subnet_id    = cols.next();
-            let _fqdn_fwd     = cols.next();
-            let _fqdn_rev     = cols.next();
-            let hostname      = cols.next().unwrap_or("").to_string();
+            let address = cols.next()?.to_string();
+            let hwaddr = cols.next()?.to_string();
+            let _client_id = cols.next();
+            let _valid_life = cols.next();
+            let expire: u64 = cols.next()?.parse().ok()?;
+            let _subnet_id = cols.next();
+            let _fqdn_fwd = cols.next();
+            let _fqdn_rev = cols.next();
+            let hostname = cols.next().unwrap_or("").to_string();
             let state_col: u8 = cols.next().unwrap_or("0").trim().parse().unwrap_or(0);
             // Kea state: 0=default(active), 1=declined, 2=expired-reclaimed
             let state_str = match state_col {
                 0 if expire > now => "active",
-                0                 => "expired",
-                1                 => "declined",
-                _                 => "reclaimed",
+                0 => "expired",
+                1 => "declined",
+                _ => "reclaimed",
             };
             Some(DhcpLeaseResponse {
                 mac: hwaddr,
@@ -713,11 +741,14 @@ pub async fn update_interface_dhcp_config(
     cfg.interface = interface_name.clone();
 
     // Apply top-level fields.
-    if let Some(v) = req.enabled    { cfg.enabled   = v; }
+    if let Some(v) = req.enabled {
+        cfg.enabled = v;
+    }
 
     // Ensure at least one scope exists to hold the pool settings.
     if cfg.scopes.is_empty() {
-        let subnet = req.subnet
+        let subnet = req
+            .subnet
             .as_deref()
             .filter(|s| !s.is_empty())
             .map(String::from)
@@ -750,13 +781,27 @@ pub async fn update_interface_dhcp_config(
 
     let scope = &mut cfg.scopes[0];
     // Subnet can be updated explicitly; otherwise preserve the existing value.
-    if let Some(v) = req.subnet.filter(|s| !s.is_empty()) { scope.subnet = v; }
-    if let Some(v) = req.range_start  { scope.pool_start    = v; }
-    if let Some(v) = req.range_end    { scope.pool_end      = v; }
-    if let Some(v) = req.gateway      { scope.gateway       = if v.is_empty() { None } else { Some(v) }; }
-    if let Some(v) = req.dns_servers  { scope.dns_servers   = v; }
-    if let Some(v) = req.lease_time   { scope.lease_seconds = v; }
-    if let Some(v) = req.domain_name  { scope.domain_name   = if v.is_empty() { None } else { Some(v) }; }
+    if let Some(v) = req.subnet.filter(|s| !s.is_empty()) {
+        scope.subnet = v;
+    }
+    if let Some(v) = req.range_start {
+        scope.pool_start = v;
+    }
+    if let Some(v) = req.range_end {
+        scope.pool_end = v;
+    }
+    if let Some(v) = req.gateway {
+        scope.gateway = if v.is_empty() { None } else { Some(v) };
+    }
+    if let Some(v) = req.dns_servers {
+        scope.dns_servers = v;
+    }
+    if let Some(v) = req.lease_time {
+        scope.lease_seconds = v;
+    }
+    if let Some(v) = req.domain_name {
+        scope.domain_name = if v.is_empty() { None } else { Some(v) };
+    }
 
     // --- Validation --------------------------------------------------------
 
@@ -764,12 +809,14 @@ pub async fn update_interface_dhcp_config(
 
     if !scope.pool_start.is_empty() && !is_valid_ipv4_addr(&scope.pool_start) {
         return Err(DhcpError::ValidationFailed(format!(
-            "invalid rangeStart: {}", scope.pool_start
+            "invalid rangeStart: {}",
+            scope.pool_start
         )));
     }
     if !scope.pool_end.is_empty() && !is_valid_ipv4_addr(&scope.pool_end) {
         return Err(DhcpError::ValidationFailed(format!(
-            "invalid rangeEnd: {}", scope.pool_end
+            "invalid rangeEnd: {}",
+            scope.pool_end
         )));
     }
     if !scope.pool_start.is_empty()
@@ -777,17 +824,22 @@ pub async fn update_interface_dhcp_config(
         && !is_valid_ipv4_range(&scope.pool_start, &scope.pool_end)
     {
         return Err(DhcpError::ValidationFailed(format!(
-            "rangeStart {} must be ≤ rangeEnd {}", scope.pool_start, scope.pool_end
+            "rangeStart {} must be ≤ rangeEnd {}",
+            scope.pool_start, scope.pool_end
         )));
     }
     if let Some(gw) = &scope.gateway {
         if !is_valid_ipv4_addr(gw) {
-            return Err(DhcpError::ValidationFailed(format!("invalid gateway: {gw}")));
+            return Err(DhcpError::ValidationFailed(format!(
+                "invalid gateway: {gw}"
+            )));
         }
     }
     for dns in &scope.dns_servers {
         if !is_valid_ipv4_addr(dns) {
-            return Err(DhcpError::ValidationFailed(format!("invalid DNS server: {dns}")));
+            return Err(DhcpError::ValidationFailed(format!(
+                "invalid DNS server: {dns}"
+            )));
         }
     }
 
@@ -969,9 +1021,9 @@ pub async fn delete_interface_static_lease(
     State(state): State<Arc<AppState>>,
     Path((interface_name, id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, DhcpError> {
-    let target = id.parse::<Uuid>().map_err(|_| {
-        DhcpError::ValidationFailed(format!("invalid lease ID: {id}"))
-    })?;
+    let target = id
+        .parse::<Uuid>()
+        .map_err(|_| DhcpError::ValidationFailed(format!("invalid lease ID: {id}")))?;
 
     let mut cfg = state
         .config_store
@@ -1181,7 +1233,9 @@ fn validate_dhcp6_scope(scope: &Dhcp6Scope) -> Result<(), DhcpError> {
     }
     for dns in &scope.dns_servers {
         if !is_valid_ipv6_addr(dns) {
-            return Err(DhcpError::ValidationFailed(format!("invalid DNS server: {dns}")));
+            return Err(DhcpError::ValidationFailed(format!(
+                "invalid DNS server: {dns}"
+            )));
         }
     }
     for reservation in &scope.reservations {
@@ -1230,8 +1284,14 @@ fn validate_dhcp6_config_for_apply(cfg: &Dhcp6Config) -> Result<(), DhcpError> {
 
 fn dhcp6_request_has_scope_values(req: &UpdateDhcp6FlatRequest) -> bool {
     req.subnet.as_deref().is_some_and(|s| !s.trim().is_empty())
-        || req.range_start.as_deref().is_some_and(|s| !s.trim().is_empty())
-        || req.range_end.as_deref().is_some_and(|s| !s.trim().is_empty())
+        || req
+            .range_start
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+        || req
+            .range_end
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
         || req
             .dns_servers
             .as_ref()
@@ -1295,7 +1355,11 @@ fn apply_dhcp6_scope_request(cfg: &mut Dhcp6Config, req: UpdateDhcp6FlatRequest)
     }
     if let Some(v) = req.domain_name {
         let domain = v.trim().to_string();
-        scope.domain_name = if domain.is_empty() { None } else { Some(domain) };
+        scope.domain_name = if domain.is_empty() {
+            None
+        } else {
+            Some(domain)
+        };
     }
 }
 
@@ -1355,9 +1419,7 @@ fn normalize_dhcp6_reservation_duid(
     };
 
     if !is_valid_duid(&duid) {
-        return Err(DhcpError::ValidationFailed(format!(
-            "invalid DUID: {duid}"
-        )));
+        return Err(DhcpError::ValidationFailed(format!("invalid DUID: {duid}")));
     }
 
     Ok(duid)
@@ -1474,8 +1536,12 @@ pub async fn update_config_v6(
         .map_err(DhcpError::StorageError)?
         .unwrap_or_else(default_dhcp6_cfg);
 
-    if let Some(v) = req.enabled { cfg.enabled = v; }
-    if let Some(v) = req.interface.as_deref() { cfg.interface = v.trim().to_string(); }
+    if let Some(v) = req.enabled {
+        cfg.enabled = v;
+    }
+    if let Some(v) = req.interface.as_deref() {
+        cfg.interface = v.trim().to_string();
+    }
 
     apply_dhcp6_scope_request(&mut cfg, req);
     validate_dhcp6_config_for_apply(&cfg)?;
@@ -1542,7 +1608,9 @@ pub async fn update_interface_dhcp6_config(
         .unwrap_or_else(default_dhcp6_cfg);
 
     cfg.interface = interface_name;
-    if let Some(v) = req.enabled { cfg.enabled = v; }
+    if let Some(v) = req.enabled {
+        cfg.enabled = v;
+    }
 
     apply_dhcp6_scope_request(&mut cfg, req);
     validate_dhcp6_config_for_apply(&cfg)?;
@@ -1706,9 +1774,9 @@ pub async fn delete_dhcp6_static_lease(
     Path(id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, DhcpError> {
-    let target = id.parse::<Uuid>().map_err(|_| {
-        DhcpError::ValidationFailed(format!("invalid lease ID: {id}"))
-    })?;
+    let target = id
+        .parse::<Uuid>()
+        .map_err(|_| DhcpError::ValidationFailed(format!("invalid lease ID: {id}")))?;
 
     let mut cfg = state
         .config_store
@@ -1754,9 +1822,9 @@ pub async fn delete_interface_dhcp6_static_lease(
     State(state): State<Arc<AppState>>,
     Path((interface_name, id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, DhcpError> {
-    let target = id.parse::<Uuid>().map_err(|_| {
-        DhcpError::ValidationFailed(format!("invalid lease ID: {id}"))
-    })?;
+    let target = id
+        .parse::<Uuid>()
+        .map_err(|_| DhcpError::ValidationFailed(format!("invalid lease ID: {id}")))?;
 
     let mut cfg = state
         .config_store
@@ -1813,9 +1881,7 @@ pub async fn delete_interface_dhcp6_static_lease(
 ///  fqdn-fwd,fqdn-rev,hostname,hwaddr,state[,user-context,hwtype,hwaddr-source]`
 ///
 /// Returns an empty array when the lease file does not exist.
-pub async fn list_active_dhcp6_leases(
-    State(_state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn list_active_dhcp6_leases(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
     use crate::engine::dhcp6::KEA6_LEASES_PATH;
 
     let content = match tokio::fs::read_to_string(KEA6_LEASES_PATH).await {
@@ -1844,19 +1910,19 @@ pub async fn list_active_dhcp6_leases(
             if cols[4].trim() != "0" {
                 return None;
             }
-            let address     = cols[0].to_string();
+            let address = cols[0].to_string();
             if !is_valid_ipv6_addr(&address) {
                 return None;
             }
-            let duid        = cols[1].to_string();
+            let duid = cols[1].to_string();
             let expire: u64 = cols[7].parse().ok()?;
-            let hostname    = cols[11].to_string();
+            let hostname = cols[11].to_string();
             let state_col: u8 = cols[13].trim().parse().unwrap_or(0);
             let state_str = match state_col {
                 0 if expire > now => "active",
-                0                 => "expired",
-                1                 => "declined",
-                _                 => "reclaimed",
+                0 => "expired",
+                1 => "declined",
+                _ => "reclaimed",
             };
             Some(Dhcp6LeaseResponse {
                 ip_address: address,

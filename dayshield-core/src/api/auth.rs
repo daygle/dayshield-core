@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::auth::{
-    model::{AuthenticatedUser, AuthError},
+    model::{AuthError, AuthenticatedUser},
     password::{hash_password, verify_password},
     session::{create_token_with_lifetime, load_or_create_key, DEFAULT_KEY_PATH},
     storage::{load_user, update_password, DEFAULT_ADMIN_PATH},
@@ -113,7 +113,13 @@ pub async fn login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
 ) -> Result<impl IntoResponse, AuthApiError> {
-    login_with_paths(state, req, Path::new(DEFAULT_ADMIN_PATH), Path::new(DEFAULT_KEY_PATH)).await
+    login_with_paths(
+        state,
+        req,
+        Path::new(DEFAULT_ADMIN_PATH),
+        Path::new(DEFAULT_KEY_PATH),
+    )
+    .await
 }
 
 /// Testable variant that accepts explicit file paths.
@@ -124,7 +130,9 @@ pub async fn login_with_paths(
     key_path: &Path,
 ) -> Result<impl IntoResponse, AuthApiError> {
     if req.username.is_empty() || req.password.is_empty() {
-        return Err(AuthApiError::BadRequest("username and password are required".into()));
+        return Err(AuthApiError::BadRequest(
+            "username and password are required".into(),
+        ));
     }
 
     // Load admin security settings.
@@ -237,9 +245,7 @@ pub async fn login_with_paths(
 /// returns 200 OK with a confirmation message.
 ///
 /// Future: maintain a server-side denylist here.
-pub async fn logout(
-    Extension(user): Extension<AuthenticatedUser>,
-) -> impl IntoResponse {
+pub async fn logout(Extension(user): Extension<AuthenticatedUser>) -> impl IntoResponse {
     info!(username = %user.username, "logout");
     Json(serde_json::json!({ "message": "logged out" }))
 }
@@ -278,7 +284,9 @@ pub async fn change_password_with_path(
     admin_path: &Path,
 ) -> Result<impl IntoResponse, AuthApiError> {
     if req.new_password.is_empty() {
-        return Err(AuthApiError::BadRequest("new_password must not be empty".into()));
+        return Err(AuthApiError::BadRequest(
+            "new_password must not be empty".into(),
+        ));
     }
     let min_len = sec.min_password_length as usize;
     if req.new_password.len() < min_len {
@@ -297,9 +305,7 @@ pub async fn change_password_with_path(
             "new_password must contain at least one number".into(),
         ));
     }
-    if sec.require_special
-        && !req.new_password.chars().any(|c| !c.is_alphanumeric())
-    {
+    if sec.require_special && !req.new_password.chars().any(|c| !c.is_alphanumeric()) {
         return Err(AuthApiError::BadRequest(
             "new_password must contain at least one special character".into(),
         ));
@@ -349,9 +355,7 @@ pub struct AuthStatusResponse {
 ///
 /// If the middleware has injected an [`AuthenticatedUser`] extension, the
 /// request is authenticated.
-pub async fn status(
-    user: Option<Extension<AuthenticatedUser>>,
-) -> impl IntoResponse {
+pub async fn status(user: Option<Extension<AuthenticatedUser>>) -> impl IntoResponse {
     match user {
         Some(Extension(u)) => Json(AuthStatusResponse {
             authenticated: true,
@@ -449,7 +453,9 @@ mod tests {
         let admin_path = dir.path().join("admin.json");
         seed_admin(&admin_path, "old-password");
 
-        let user = AuthenticatedUser { username: "admin".into() };
+        let user = AuthenticatedUser {
+            username: "admin".into(),
+        };
         let sec = crate::config::models::AdminSecuritySettings::default();
         let req = ChangePasswordRequest {
             old_password: "old-password".into(),
@@ -462,7 +468,8 @@ mod tests {
 
         // New password should now work.
         let loaded = load_user(&admin_path).unwrap().unwrap();
-        verify_password("new-password-123", &loaded.password_hash).expect("new password must verify");
+        verify_password("new-password-123", &loaded.password_hash)
+            .expect("new password must verify");
     }
 
     #[tokio::test]
@@ -471,7 +478,9 @@ mod tests {
         let admin_path = dir.path().join("admin.json");
         seed_admin(&admin_path, "correct-old-password");
 
-        let user = AuthenticatedUser { username: "admin".into() };
+        let user = AuthenticatedUser {
+            username: "admin".into(),
+        };
         let sec = crate::config::models::AdminSecuritySettings::default();
         let req = ChangePasswordRequest {
             old_password: "wrong-old".into(),
@@ -488,7 +497,9 @@ mod tests {
         let admin_path = dir.path().join("admin.json");
         seed_admin(&admin_path, "old-password");
 
-        let user = AuthenticatedUser { username: "admin".into() };
+        let user = AuthenticatedUser {
+            username: "admin".into(),
+        };
         let sec = crate::config::models::AdminSecuritySettings::default();
         let req = ChangePasswordRequest {
             old_password: "old-password".into(),

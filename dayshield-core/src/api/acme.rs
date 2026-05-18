@@ -28,9 +28,7 @@ use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use tracing::{info, warn};
 
 use crate::{
-    config::models::{
-        validate_acme_config, AcmeChallengeType, AcmeConfig, AcmeProvider,
-    },
+    config::models::{validate_acme_config, AcmeChallengeType, AcmeConfig, AcmeProvider},
     engine::acme::AcmeEngine,
     state::AppState,
 };

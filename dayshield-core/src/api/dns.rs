@@ -13,22 +13,20 @@
 
 use std::sync::Arc;
 
-use axum::{extract::{Path, State}, http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+};
 use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
     config::models::{
-        ensure_ipv6_allowed,
-        is_valid_domain,
-        is_valid_interface_name,
-        is_valid_ip,
-        DnsBlocklistEntry,
-        DnsConfig,
-        DnsInterfaceBlocklists,
-        DnsLocalRecord,
+        ensure_ipv6_allowed, is_valid_domain, is_valid_interface_name, is_valid_ip,
+        validate_dot_config, DnsBlocklistEntry, DnsConfig, DnsInterfaceBlocklists, DnsLocalRecord,
         DotConfig,
-        validate_dot_config,
     },
     engine::dns::apply_config_with_ipv6,
     state::AppState,
@@ -137,9 +135,9 @@ fn is_wan_interface(state: &Arc<AppState>, interface_name: &str) -> Result<bool,
         .load_interfaces()
         .map_err(DnsError::StorageError)?;
 
-    Ok(interfaces
-        .iter()
-        .any(|iface| iface.name == interface_name && (iface.wan_mode.is_some() || iface.gateway.is_some())))
+    Ok(interfaces.iter().any(|iface| {
+        iface.name == interface_name && (iface.wan_mode.is_some() || iface.gateway.is_some())
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -150,9 +148,7 @@ fn is_wan_interface(state: &Arc<AppState>, interface_name: &str) -> Result<bool,
 ///
 /// Loads the DNS config from persistent storage.  If no configuration has been
 /// saved yet, returns the clean-install default config.
-pub async fn get_config(
-    State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, DnsError> {
+pub async fn get_config(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, DnsError> {
     let cfg = state
         .config_store
         .load_dns_config()
@@ -341,7 +337,10 @@ pub async fn update_config(
 
     let dot_acme_domain = req.dot_acme_domain.filter(|s| !s.trim().is_empty());
     let dot_acme_cert_storage_path = if dot_acme_domain.is_some() {
-        if let Some(path) = req.dot_acme_cert_storage_path.filter(|s| !s.trim().is_empty()) {
+        if let Some(path) = req
+            .dot_acme_cert_storage_path
+            .filter(|s| !s.trim().is_empty())
+        {
             Some(path)
         } else {
             state
@@ -478,7 +477,11 @@ pub async fn create_interface_blocklist(
 
     let entry = DnsBlocklistEntry {
         id: Uuid::new_v4(),
-        name: req.name.as_ref().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()),
+        name: req
+            .name
+            .as_ref()
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty()),
         url: req.url.trim().to_string(),
         enabled: req.enabled,
     };
@@ -533,9 +536,9 @@ pub async fn delete_interface_blocklist(
         )));
     }
 
-    let target = id.parse::<Uuid>().map_err(|_| {
-        DnsError::ValidationFailed(format!("invalid blocklist ID: {id}"))
-    })?;
+    let target = id
+        .parse::<Uuid>()
+        .map_err(|_| DnsError::ValidationFailed(format!("invalid blocklist ID: {id}")))?;
 
     let mut cfg = state
         .config_store
@@ -560,7 +563,8 @@ pub async fn delete_interface_blocklist(
         )));
     }
 
-    cfg.interface_blocklists.retain(|group| !group.blocklists.is_empty());
+    cfg.interface_blocklists
+        .retain(|group| !group.blocklists.is_empty());
 
     state
         .config_store

@@ -58,7 +58,16 @@ pub fn parse_cpu_stat(content: &str) -> Option<CpuStat> {
     let irq = parts.next()?.parse().unwrap_or(0);
     let softirq = parts.next()?.parse().unwrap_or(0);
     let steal = parts.next()?.parse().unwrap_or(0);
-    Some(CpuStat { user, nice, system, idle, iowait, irq, softirq, steal })
+    Some(CpuStat {
+        user,
+        nice,
+        system,
+        idle,
+        iowait,
+        irq,
+        softirq,
+        steal,
+    })
 }
 
 /// Calculate CPU usage percentage given two consecutive [`CpuStat`] readings.
@@ -98,7 +107,7 @@ pub fn parse_ram_metrics(content: &str) -> (f64, u64, u64) {
         (Some(t), Some(a)) if t > 0 => {
             let used = t.saturating_sub(a);
             let percent = (used as f64 / t as f64) * 100.0;
-            (percent, used * 1024, t * 1024)  // Convert from KiB to bytes
+            (percent, used * 1024, t * 1024) // Convert from KiB to bytes
         }
         _ => (0.0, 0, 0),
     }
@@ -254,11 +263,15 @@ pub async fn collect_system(prev_cpu: Option<&CpuStat>) -> (SystemMetrics, CpuSt
     };
 
     // --- RAM ---
-    let mem_content = fs::read_to_string("/proc/meminfo").await.unwrap_or_default();
+    let mem_content = fs::read_to_string("/proc/meminfo")
+        .await
+        .unwrap_or_default();
     let (ram_pct, ram_used_bytes, ram_total_bytes) = parse_ram_metrics(&mem_content);
 
     // --- Load average ---
-    let load_content = fs::read_to_string("/proc/loadavg").await.unwrap_or_default();
+    let load_content = fs::read_to_string("/proc/loadavg")
+        .await
+        .unwrap_or_default();
     let (l1, l5, l15) = parse_loadavg(&load_content);
 
     // --- Temperature ---
@@ -318,9 +331,27 @@ mod tests {
 
     #[test]
     fn test_cpu_percent_calculation() {
-        let prev = CpuStat { user: 1000, nice: 0, system: 200, idle: 3800, iowait: 0, irq: 0, softirq: 0, steal: 0 };
+        let prev = CpuStat {
+            user: 1000,
+            nice: 0,
+            system: 200,
+            idle: 3800,
+            iowait: 0,
+            irq: 0,
+            softirq: 0,
+            steal: 0,
+        };
         // 200ms of work out of 1000ms total → 20%
-        let curr = CpuStat { user: 1150, nice: 0, system: 250, idle: 4550, iowait: 50, irq: 0, softirq: 0, steal: 0 };
+        let curr = CpuStat {
+            user: 1150,
+            nice: 0,
+            system: 250,
+            idle: 4550,
+            iowait: 50,
+            irq: 0,
+            softirq: 0,
+            steal: 0,
+        };
         let pct = cpu_percent(&prev, &curr);
         // total_delta = 200; idle_delta = 800; used = -600 → clamped to 0 - wait, let me recalc
         // prev.total = 1000+200+3800 = 5000; curr.total = 1150+250+4550+50 = 6000 → delta = 1000
@@ -337,7 +368,8 @@ mod tests {
 
     #[test]
     fn test_parse_ram_percent() {
-        let content = "MemTotal:       8000000 kB\nMemFree:        1000000 kB\nMemAvailable:   2000000 kB\n";
+        let content =
+            "MemTotal:       8000000 kB\nMemFree:        1000000 kB\nMemAvailable:   2000000 kB\n";
         let pct = parse_ram_percent(content);
         // used = 8_000_000 - 2_000_000 = 6_000_000; pct = 75.0
         assert!((pct - 75.0).abs() < 0.01, "Expected 75.0 got {}", pct);

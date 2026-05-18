@@ -165,9 +165,7 @@ pub async fn create_handler(
         .unwrap_or("")
         .to_string();
 
-    let size_bytes = std::fs::metadata(&path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let size_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
     info!(filename = %filename, size_bytes = %size_bytes, "backup created via API");
 
@@ -279,7 +277,9 @@ pub async fn delete_handler(
 
     info!(filename = %filename, "backup deleted via API");
 
-    Ok(Json(serde_json::json!({ "status": "ok", "deleted": filename })))
+    Ok(Json(
+        serde_json::json!({ "status": "ok", "deleted": filename }),
+    ))
 }
 
 /// `POST /backup/restore`
@@ -512,6 +512,9 @@ mod tests {
         let e = BackupApiError::NotFound("x".into());
         assert_eq!(e.into_response().status(), StatusCode::NOT_FOUND);
         let e = BackupApiError::StorageError(anyhow::anyhow!("disk"));
-        assert_eq!(e.into_response().status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            e.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }

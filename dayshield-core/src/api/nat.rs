@@ -133,9 +133,7 @@ fn next_nat_priority(config: &NatConfig) -> i32 {
 /// Handler: `GET /nat/config`
 ///
 /// Returns the current [`NatConfig`] (or a default if none has been saved).
-pub async fn get_config(
-    State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, NatError> {
+pub async fn get_config(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, NatError> {
     let cfg = state
         .config_store
         .load_nat_config()
@@ -197,9 +195,7 @@ pub async fn put_config(
 /// Handler: `GET /nat/rules`
 ///
 /// Returns the user-defined [`NatRule`] list from the current [`NatConfig`].
-pub async fn list_rules(
-    State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, NatError> {
+pub async fn list_rules(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, NatError> {
     let cfg = state
         .config_store
         .load_nat_config()

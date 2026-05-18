@@ -10,23 +10,23 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
-use std::sync::Arc;
 use std::env;
+use std::sync::Arc;
 
 use axum::Router;
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 
-mod api;
 mod ai_engine;
 mod ai_model;
+mod api;
 mod auth;
 mod backup;
 mod captive_portal;
 mod config;
 mod engine;
-mod logs;
 mod logging;
+mod logs;
 mod metrics;
 mod nat;
 mod notify;
@@ -45,9 +45,9 @@ async fn main() -> anyhow::Result<()> {
     // Handle one-shot subcommands before starting the server.
     let args: Vec<String> = env::args().collect();
     if args.get(1).map(String::as_str) == Some("init-admin") {
-        let password = args.get(2).ok_or_else(|| {
-            anyhow::anyhow!("usage: dayshield-core init-admin <password>")
-        })?;
+        let password = args
+            .get(2)
+            .ok_or_else(|| anyhow::anyhow!("usage: dayshield-core init-admin <password>"))?;
         let hash = auth::password::hash_password(password)
             .map_err(|e| anyhow::anyhow!("failed to hash password: {e}"))?;
         let user = auth::model::User::new("admin", hash);
@@ -94,7 +94,9 @@ async fn main() -> anyhow::Result<()> {
     // Initialize the session signing key (creates it if missing or corrupted).
     // This must happen before the router is created so that the login endpoint
     // will have a valid key ready to use.
-    if let Err(e) = auth::session::load_or_create_key(std::path::Path::new(auth::session::DEFAULT_KEY_PATH)) {
+    if let Err(e) =
+        auth::session::load_or_create_key(std::path::Path::new(auth::session::DEFAULT_KEY_PATH))
+    {
         warn!("failed to initialize session key: {}", e);
         // Don't exit - the key will be created lazily on first login attempt
     }
@@ -210,9 +212,9 @@ fn parse_update_component(value: Option<&str>) -> anyhow::Result<update::UpdateC
         "ui" => Ok(update::UpdateComponent::Ui),
         "rootfs" => Ok(update::UpdateComponent::Rootfs),
         "both" => Ok(update::UpdateComponent::Both),
-        other => anyhow::bail!(
-            "invalid update component '{other}' (expected core, ui, rootfs, or both)"
-        ),
+        other => {
+            anyhow::bail!("invalid update component '{other}' (expected core, ui, rootfs, or both)")
+        }
     }
 }
 

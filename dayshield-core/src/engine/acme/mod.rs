@@ -42,8 +42,7 @@ use axum::{
     Router,
 };
 use instant_acme::{
-    Account, AccountCredentials, ChallengeType, Identifier, NewAccount, NewOrder,
-    OrderStatus,
+    Account, AccountCredentials, ChallengeType, Identifier, NewAccount, NewOrder, OrderStatus,
 };
 use rcgen::CertificateParams;
 use tokio::net::TcpListener;
@@ -262,13 +261,11 @@ impl AcmeEngine {
 
             match self.config.challenge_type {
                 AcmeChallengeType::Http01 => {
-                    let mut challenge = auth
-                        .challenge(ChallengeType::Http01)
-                        .ok_or_else(|| {
-                            AcmeError::Other(format!(
-                                "no HTTP-01 challenge available for domain {domain}"
-                            ))
-                        })?;
+                    let mut challenge = auth.challenge(ChallengeType::Http01).ok_or_else(|| {
+                        AcmeError::Other(format!(
+                            "no HTTP-01 challenge available for domain {domain}"
+                        ))
+                    })?;
 
                     let key_auth = challenge.key_authorization();
                     {
@@ -285,13 +282,11 @@ impl AcmeEngine {
                     );
                 }
                 AcmeChallengeType::Dns01 => {
-                    let challenge = auth
-                        .challenge(ChallengeType::Dns01)
-                        .ok_or_else(|| {
-                            AcmeError::Other(format!(
-                                "no DNS-01 challenge available for domain {domain}"
-                            ))
-                        })?;
+                    let challenge = auth.challenge(ChallengeType::Dns01).ok_or_else(|| {
+                        AcmeError::Other(format!(
+                            "no DNS-01 challenge available for domain {domain}"
+                        ))
+                    })?;
 
                     let key_auth = challenge.key_authorization();
                     let dns_value = key_auth.dns_value();
@@ -367,8 +362,8 @@ impl AcmeEngine {
         let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
             .map_err(AcmeError::CertGen)?;
 
-        let params = CertificateParams::new(self.config.domains.clone())
-            .map_err(AcmeError::CertGen)?;
+        let params =
+            CertificateParams::new(self.config.domains.clone()).map_err(AcmeError::CertGen)?;
 
         let csr = params
             .serialize_request(&key_pair)
@@ -398,9 +393,7 @@ impl AcmeEngine {
                 }
             }
             cert_pem.ok_or_else(|| {
-                AcmeError::ChallengeTimeout(
-                    "certificate not available after finalisation".into(),
-                )
+                AcmeError::ChallengeTimeout("certificate not available after finalisation".into())
             })?
         };
 
@@ -445,9 +438,7 @@ impl AcmeEngine {
             .modified()
             .map_err(|e| AcmeError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
-        let age = modified
-            .elapsed()
-            .unwrap_or(Duration::from_secs(u64::MAX));
+        let age = modified.elapsed().unwrap_or(Duration::from_secs(u64::MAX));
 
         // Renew if the certificate is older than 60 days.
         let renewal_threshold = Duration::from_secs(60 * 86400);
@@ -507,7 +498,11 @@ async fn start_http01_server(
         )
         .with_state(map);
 
-    let bind_addr = if ipv6_enabled { "[::]:80" } else { "0.0.0.0:80" };
+    let bind_addr = if ipv6_enabled {
+        "[::]:80"
+    } else {
+        "0.0.0.0:80"
+    };
     let listener = TcpListener::bind(bind_addr).await.map_err(|e| {
         AcmeError::Other(format!("failed to bind port 80 for HTTP-01 challenge: {e}"))
     })?;
@@ -600,19 +595,20 @@ mod tests {
     #[tokio::test]
     async fn renewal_check_returns_true_when_no_cert() {
         // Use a unique directory that definitely has no cert file.
-        let dir = std::env::temp_dir()
-            .join(format!("acme-test-{}", uuid::Uuid::new_v4().simple()));
+        let dir = std::env::temp_dir().join(format!("acme-test-{}", uuid::Uuid::new_v4().simple()));
         let mut cfg = test_config();
         cfg.cert_storage_path = dir.to_str().unwrap().to_string();
         let engine = AcmeEngine::new(cfg);
         let needs = engine.renewal_check().await.unwrap();
-        assert!(needs, "expected renewal_check to return true when cert is absent");
+        assert!(
+            needs,
+            "expected renewal_check to return true when cert is absent"
+        );
     }
 
     #[tokio::test]
     async fn renewal_check_returns_false_for_fresh_cert() {
-        let dir = std::env::temp_dir()
-            .join(format!("acme-test-{}", uuid::Uuid::new_v4().simple()));
+        let dir = std::env::temp_dir().join(format!("acme-test-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
 
         let mut cfg = test_config();
@@ -624,7 +620,10 @@ mod tests {
         std::fs::write(&cert_path, "placeholder").unwrap();
 
         let needs = engine.renewal_check().await.unwrap();
-        assert!(!needs, "expected renewal_check to return false for a fresh cert");
+        assert!(
+            !needs,
+            "expected renewal_check to return false for a fresh cert"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -638,4 +637,3 @@ mod tests {
         assert!(result.is_err(), "expected error when no domains configured");
     }
 }
-

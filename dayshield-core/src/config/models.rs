@@ -336,7 +336,10 @@ pub fn is_valid_mac(mac: &str) -> bool {
         return false;
     };
     let parts: Vec<&str> = mac.split(sep).collect();
-    parts.len() == 6 && parts.iter().all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit()))
+    parts.len() == 6
+        && parts
+            .iter()
+            .all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
 /// Return `true` if `duid` is a syntactically valid DHCPv6 DUID.
@@ -345,7 +348,10 @@ pub fn is_valid_mac(mac: &str) -> bool {
 /// Example: `00:03:00:01:aa:bb:cc:dd:ee:ff`
 pub fn is_valid_duid(duid: &str) -> bool {
     let parts: Vec<&str> = duid.split(':').collect();
-    parts.len() >= 3 && parts.iter().all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit()))
+    parts.len() >= 3
+        && parts
+            .iter()
+            .all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
 /// Return `true` if `domain` is a syntactically valid domain name.
@@ -649,13 +655,25 @@ pub struct FirewallStateLimits {
     pub max_states: Option<u32>,
     /// Maximum tracked source nodes. Stored for UI/config parity; enforcement
     /// requires nftables dynamic sets and is intentionally conservative.
-    #[serde(default, alias = "maxSourceNodes", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "maxSourceNodes",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub max_source_nodes: Option<u32>,
     /// Maximum concurrent conntrack entries per source.
-    #[serde(default, alias = "maxSourceStates", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "maxSourceStates",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub max_source_states: Option<u32>,
     /// Maximum concurrent connections per source.
-    #[serde(default, alias = "maxSourceConnections", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "maxSourceConnections",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub max_source_connections: Option<u32>,
     /// Maximum new connections in the configured window for traffic matching this rule.
     #[serde(
@@ -758,8 +776,12 @@ pub fn validate_firewall_schedule(schedule: &FirewallSchedule) -> Result<(), Str
     }
 
     if let Some(time_start) = &schedule.time_start {
-        NaiveTime::parse_from_str(time_start, "%H:%M")
-            .map_err(|_| format!("firewall schedule time_start {:?} must use HH:MM", time_start))?;
+        NaiveTime::parse_from_str(time_start, "%H:%M").map_err(|_| {
+            format!(
+                "firewall schedule time_start {:?} must use HH:MM",
+                time_start
+            )
+        })?;
     }
     if let Some(time_end) = &schedule.time_end {
         NaiveTime::parse_from_str(time_end, "%H:%M")
@@ -769,7 +791,10 @@ pub fn validate_firewall_schedule(schedule: &FirewallSchedule) -> Result<(), Str
     let date_start = if let Some(date_start) = &schedule.date_start {
         Some(
             NaiveDate::parse_from_str(date_start, "%Y-%m-%d").map_err(|_| {
-                format!("firewall schedule date_start {:?} must use YYYY-MM-DD", date_start)
+                format!(
+                    "firewall schedule date_start {:?} must use YYYY-MM-DD",
+                    date_start
+                )
             })?,
         )
     } else {
@@ -778,7 +803,10 @@ pub fn validate_firewall_schedule(schedule: &FirewallSchedule) -> Result<(), Str
     let date_end = if let Some(date_end) = &schedule.date_end {
         Some(
             NaiveDate::parse_from_str(date_end, "%Y-%m-%d").map_err(|_| {
-                format!("firewall schedule date_end {:?} must use YYYY-MM-DD", date_end)
+                format!(
+                    "firewall schedule date_end {:?} must use YYYY-MM-DD",
+                    date_end
+                )
             })?,
         )
     } else {
@@ -854,8 +882,7 @@ pub fn validate_firewall_rule(rule: &FirewallRule, ipv6_enabled: bool) -> Result
                 &format!("Firewall rule {} {}", rule.id, label),
             )?;
 
-            if firewall_value_is_ipv6(addr)
-                && matches!(rule.ip_family, FirewallAddressFamily::Ipv4)
+            if firewall_value_is_ipv6(addr) && matches!(rule.ip_family, FirewallAddressFamily::Ipv4)
             {
                 return Err(format!(
                     "Firewall rule {} has IPv6 {} but ip_family is ipv4",
@@ -916,7 +943,10 @@ pub fn validate_firewall_rule(rule: &FirewallRule, ipv6_enabled: bool) -> Result
         ("max_states", rule.state_limits.max_states),
         ("max_source_nodes", rule.state_limits.max_source_nodes),
         ("max_source_states", rule.state_limits.max_source_states),
-        ("max_source_connections", rule.state_limits.max_source_connections),
+        (
+            "max_source_connections",
+            rule.state_limits.max_source_connections,
+        ),
         ("max_new_connections", rule.state_limits.max_new_connections),
         (
             "max_new_connections_seconds",
@@ -1222,7 +1252,9 @@ pub fn validate_nat_rule_with_ipv6(rule: &NatRule, ipv6_enabled: bool) -> Result
     }
     let has_match_ports = rule.source_port.is_some() || rule.destination_port.is_some();
     if has_match_ports && matches!(&rule.protocol, NatProtocol::Any) {
-        return Err("source_port and destination_port require tcp, udp, or tcp_udp protocol".into());
+        return Err(
+            "source_port and destination_port require tcp, udp, or tcp_udp protocol".into(),
+        );
     }
     if let Some(port) = rule.source_port {
         if port == 0 {
@@ -1237,14 +1269,15 @@ pub fn validate_nat_rule_with_ipv6(rule: &NatRule, ipv6_enabled: bool) -> Result
     // Translation validation.
     match rule.rule_type {
         NatRuleType::Snat | NatRuleType::Dnat => {
-            let translation = rule.translation.as_ref().ok_or_else(|| {
+            let translation = rule
+                .translation
+                .as_ref()
+                .ok_or_else(|| format!("{:?} rule must specify a translation", rule.rule_type))?;
+            let addr = translation.address.as_deref().ok_or_else(|| {
                 format!(
-                    "{:?} rule must specify a translation",
+                    "{:?} rule translation must specify an address",
                     rule.rule_type
                 )
-            })?;
-            let addr = translation.address.as_deref().ok_or_else(|| {
-                format!("{:?} rule translation must specify an address", rule.rule_type)
             })?;
             if !is_valid_nat_addr_for_family(addr, &rule.address_family) {
                 return Err(format!(
@@ -1286,10 +1319,7 @@ pub fn validate_nat_config(config: &NatConfig) -> Result<(), String> {
 
 /// Return `Ok(())` if `config` is a valid [`NatConfig`] for the current IPv6
 /// mode, or `Err` with a descriptive message.
-pub fn validate_nat_config_with_ipv6(
-    config: &NatConfig,
-    ipv6_enabled: bool,
-) -> Result<(), String> {
+pub fn validate_nat_config_with_ipv6(config: &NatConfig, ipv6_enabled: bool) -> Result<(), String> {
     for iface in &config.wan_interfaces {
         if !is_valid_interface_name(iface) {
             return Err(format!(
@@ -1435,9 +1465,21 @@ pub fn validate_dot_config(config: &DotConfig) -> Result<(), String> {
         return Err("DoT port must be non-zero".into());
     }
     if config.enabled {
-        let use_acme = config.acme_domain.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false);
-        let has_raw_cert = config.cert_pem.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false);
-        let has_raw_key = config.key_pem.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+        let use_acme = config
+            .acme_domain
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        let has_raw_cert = config
+            .cert_pem
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        let has_raw_key = config
+            .key_pem
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
 
         if !use_acme {
             if !has_raw_cert {
@@ -1458,13 +1500,16 @@ pub fn validate_dot_config(config: &DotConfig) -> Result<(), String> {
                 );
             }
             if !key_pem.contains("-----BEGIN") {
-                return Err(
-                    "DoT key_pem does not appear to be a valid PEM private key \
+                return Err("DoT key_pem does not appear to be a valid PEM private key \
                      (expected '-----BEGIN' header)"
-                        .into(),
-                );
+                    .into());
             }
-        } else if config.acme_cert_storage_path.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true) {
+        } else if config
+            .acme_cert_storage_path
+            .as_ref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+        {
             return Err("DoT acme_cert_storage_path must be set when using an ACME domain".into());
         }
     }
@@ -1888,7 +1933,10 @@ pub fn validate_suricata_config(config: &SuricataConfig) -> Result<(), String> {
 
     for iface in &config.interfaces {
         if !is_valid_interface_name(iface) {
-            return Err(format!("interface {:?} is not a valid interface name", iface));
+            return Err(format!(
+                "interface {:?} is not a valid interface name",
+                iface
+            ));
         }
     }
 
@@ -2370,20 +2418,26 @@ pub struct SystemSettings {
 fn default_ntp_servers() -> Vec<String> {
     vec!["0.pool.ntp.org".into(), "1.pool.ntp.org".into()]
 }
-fn default_ssh_enabled() -> bool { true }
-fn default_ssh_port()    -> u16  { 22 }
-fn default_web_port()    -> u16  { 443 }
+fn default_ssh_enabled() -> bool {
+    true
+}
+fn default_ssh_port() -> u16 {
+    22
+}
+fn default_web_port() -> u16 {
+    443
+}
 
 impl Default for SystemSettings {
     fn default() -> Self {
         Self {
-            hostname:    "dayshield".into(),
-            timezone:    "UTC".into(),
+            hostname: "dayshield".into(),
+            timezone: "UTC".into(),
             ntp_servers: default_ntp_servers(),
             dns_servers: vec![],
             ssh_enabled: default_ssh_enabled(),
-            ssh_port:    default_ssh_port(),
-            web_port:    default_web_port(),
+            ssh_port: default_ssh_port(),
+            web_port: default_web_port(),
             ipv6_enabled: false,
             management_tls_acme_domain: None,
         }
@@ -2466,10 +2520,7 @@ pub fn validate_ntp_config(config: &NtpConfig) -> Result<(), String> {
 }
 
 /// Return `Ok(())` if `config` is valid for the current IPv6 mode.
-pub fn validate_ntp_config_with_ipv6(
-    config: &NtpConfig,
-    ipv6_enabled: bool,
-) -> Result<(), String> {
+pub fn validate_ntp_config_with_ipv6(config: &NtpConfig, ipv6_enabled: bool) -> Result<(), String> {
     if !config.enabled {
         return Ok(());
     }
@@ -3062,7 +3113,9 @@ pub fn validate_ai_engine_config(config: &AiEngineConfig) -> Result<(), String> 
         || config.model_learning_rate <= 0.0
         || config.model_learning_rate > 1.0
     {
-        return Err("model_learning_rate must be greater than 0.0 and no more than 1.0".to_string());
+        return Err(
+            "model_learning_rate must be greater than 0.0 and no more than 1.0".to_string(),
+        );
     }
     Ok(())
 }

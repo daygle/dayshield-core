@@ -25,7 +25,12 @@
 
 use std::sync::Arc;
 
-use axum::{extract::{Path, State}, http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -33,8 +38,8 @@ use crate::{
     config::models::{
         ensure_ipv6_allowed, is_valid_cidr_or_addr, is_valid_interface_name, is_valid_port,
         validate_firewall_rule, validate_firewall_schedule, validate_firewall_settings, Action,
-        FirewallAddressFamily, FirewallDirection, FirewallRule, FirewallSchedule,
-        FirewallSettings, FirewallStateLimits, Protocol,
+        FirewallAddressFamily, FirewallDirection, FirewallRule, FirewallSchedule, FirewallSettings,
+        FirewallStateLimits, Protocol,
     },
     engine::nftables::{get_rule_stats, NftError},
     state::AppState,
@@ -48,9 +53,7 @@ use crate::{
 ///
 /// Loads the rule list from config storage, syncs the in-memory cache, and
 /// returns the list as JSON.
-pub async fn list_rules(
-    State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, NftError> {
+pub async fn list_rules(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, NftError> {
     let rules = state
         .config_store
         .load_firewall_rules()
@@ -61,7 +64,8 @@ pub async fn list_rules(
         .as_ref()
         .map(|settings| settings.ipv6_enabled)
         .unwrap_or(false);
-    let system_rules = crate::engine::nftables::system_firewall_rules(&cfg.interfaces, ipv6_enabled);
+    let system_rules =
+        crate::engine::nftables::system_firewall_rules(&cfg.interfaces, ipv6_enabled);
 
     info!(
         count = rules.len(),
@@ -77,16 +81,16 @@ pub async fn list_rules(
 
     let mut response = Vec::with_capacity(system_rules.len() + rules.len());
     for rule in system_rules {
-        let mut value = serde_json::to_value(rule)
-            .map_err(|e| NftError::GenerateFailed(e.to_string()))?;
+        let mut value =
+            serde_json::to_value(rule).map_err(|e| NftError::GenerateFailed(e.to_string()))?;
         if let Some(obj) = value.as_object_mut() {
             obj.insert("system".to_string(), serde_json::Value::Bool(true));
         }
         response.push(value);
     }
     for rule in rules {
-        let mut value = serde_json::to_value(rule)
-            .map_err(|e| NftError::GenerateFailed(e.to_string()))?;
+        let mut value =
+            serde_json::to_value(rule).map_err(|e| NftError::GenerateFailed(e.to_string()))?;
         if let Some(obj) = value.as_object_mut() {
             obj.insert("system".to_string(), serde_json::Value::Bool(false));
         }
@@ -174,15 +178,14 @@ pub async fn update_settings(
         .save_firewall_settings(settings.clone())
         .map_err(NftError::StorageError)?;
 
-    if let Err(apply_err) = crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await {
+    if let Err(apply_err) =
+        crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await
+    {
         warn!(
             error = %apply_err,
             "firewall: nftables apply failed after settings save; rolling back settings"
         );
-        if let Err(rollback_err) = state
-            .config_store
-            .save_firewall_settings(previous_settings)
-        {
+        if let Err(rollback_err) = state.config_store.save_firewall_settings(previous_settings) {
             warn!(
                 error = %rollback_err,
                 "firewall: failed to restore previous firewall settings after apply failure"
@@ -225,9 +228,13 @@ pub struct CreateRuleRequest {
     pub state_limits: FirewallStateLimits,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
-fn default_direction() -> FirewallDirection { FirewallDirection::Forward }
+fn default_direction() -> FirewallDirection {
+    FirewallDirection::Forward
+}
 
 fn validate_rule_request(req: &CreateRuleRequest, ipv6_enabled: bool) -> Result<(), NftError> {
     if req.priority < 0 {
@@ -271,7 +278,9 @@ fn validate_rule_request(req: &CreateRuleRequest, ipv6_enabled: bool) -> Result<
     if let Some(src) = &req.source {
         if !is_valid_cidr_or_addr(src) {
             warn!(src = %src, "firewall: invalid source IP/CIDR");
-            return Err(NftError::ValidationFailed(format!("invalid source IP/CIDR: {src}")));
+            return Err(NftError::ValidationFailed(format!(
+                "invalid source IP/CIDR: {src}"
+            )));
         }
         if let Err(msg) = ensure_ipv6_allowed(src, ipv6_enabled, "firewall source IP/CIDR") {
             return Err(NftError::ValidationFailed(msg));
@@ -291,7 +300,9 @@ fn validate_rule_request(req: &CreateRuleRequest, ipv6_enabled: bool) -> Result<
     if let Some(dst) = &req.destination {
         if !is_valid_cidr_or_addr(dst) {
             warn!(dst = %dst, "firewall: invalid destination IP/CIDR");
-            return Err(NftError::ValidationFailed(format!("invalid destination IP/CIDR: {dst}")));
+            return Err(NftError::ValidationFailed(format!(
+                "invalid destination IP/CIDR: {dst}"
+            )));
         }
         if let Err(msg) = ensure_ipv6_allowed(dst, ipv6_enabled, "firewall destination IP/CIDR") {
             return Err(NftError::ValidationFailed(msg));
@@ -339,7 +350,9 @@ fn validate_rule_request(req: &CreateRuleRequest, ipv6_enabled: bool) -> Result<
     if let Some(iface) = &req.interface {
         if !is_valid_interface_name(iface) {
             warn!(iface = %iface, "firewall: invalid interface name");
-            return Err(NftError::ValidationFailed(format!("invalid interface name: {iface}")));
+            return Err(NftError::ValidationFailed(format!(
+                "invalid interface name: {iface}"
+            )));
         }
     }
 
@@ -351,7 +364,10 @@ fn validate_rule_request(req: &CreateRuleRequest, ipv6_enabled: bool) -> Result<
         ("maxStates", req.state_limits.max_states),
         ("maxSourceNodes", req.state_limits.max_source_nodes),
         ("maxSourceStates", req.state_limits.max_source_states),
-        ("maxSourceConnections", req.state_limits.max_source_connections),
+        (
+            "maxSourceConnections",
+            req.state_limits.max_source_connections,
+        ),
         ("maxNewConnections", req.state_limits.max_new_connections),
         (
             "maxNewConnectionsSeconds",
@@ -376,10 +392,7 @@ fn validate_rule_request(req: &CreateRuleRequest, ipv6_enabled: bool) -> Result<
     Ok(())
 }
 
-async fn save_rules_and_apply<F, T>(
-    state: &Arc<AppState>,
-    mutate: F,
-) -> Result<T, NftError>
+async fn save_rules_and_apply<F, T>(state: &Arc<AppState>, mutate: F) -> Result<T, NftError>
 where
     F: FnOnce(&mut Vec<FirewallRule>) -> Result<T, NftError>,
 {
@@ -397,7 +410,9 @@ where
         .map_err(NftError::StorageError)?;
     *cache = new_rules;
 
-    if let Err(apply_err) = crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await {
+    if let Err(apply_err) =
+        crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await
+    {
         warn!(
             error = %apply_err,
             "firewall: nftables apply failed after save; rolling back firewall rules"
@@ -562,7 +577,9 @@ pub async fn update_rule(
     if let Some(src) = &req.source {
         if !is_valid_cidr_or_addr(src) {
             warn!(src = %src, "firewall: invalid source CIDR");
-            return Err(NftError::ValidationFailed(format!("invalid source CIDR: {src}")));
+            return Err(NftError::ValidationFailed(format!(
+                "invalid source CIDR: {src}"
+            )));
         }
         if let Err(msg) = ensure_ipv6_allowed(src, ipv6_enabled, "firewall source CIDR") {
             return Err(NftError::ValidationFailed(msg));
@@ -571,7 +588,9 @@ pub async fn update_rule(
     if let Some(dst) = &req.destination {
         if !is_valid_cidr_or_addr(dst) {
             warn!(dst = %dst, "firewall: invalid destination CIDR");
-            return Err(NftError::ValidationFailed(format!("invalid destination CIDR: {dst}")));
+            return Err(NftError::ValidationFailed(format!(
+                "invalid destination CIDR: {dst}"
+            )));
         }
         if let Err(msg) = ensure_ipv6_allowed(dst, ipv6_enabled, "firewall destination CIDR") {
             return Err(NftError::ValidationFailed(msg));
@@ -601,7 +620,9 @@ pub async fn update_rule(
     if let Some(iface) = &req.interface {
         if !is_valid_interface_name(iface) {
             warn!(iface = %iface, "firewall: invalid interface name");
-            return Err(NftError::ValidationFailed(format!("invalid interface name: {iface}")));
+            return Err(NftError::ValidationFailed(format!(
+                "invalid interface name: {iface}"
+            )));
         }
     }
 
@@ -681,9 +702,7 @@ pub async fn clone_rule(
 }
 
 /// Handler: return per-rule hit counters read from nftables.
-pub async fn get_stats(
-    State(_state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn get_stats(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
     let stats = get_rule_stats().await;
     Json(stats)
 }

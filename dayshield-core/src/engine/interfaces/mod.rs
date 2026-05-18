@@ -102,7 +102,11 @@ impl axum::response::IntoResponse for InterfaceError {
             | InterfaceError::StorageError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
-        (status, Json(serde_json::json!({ "error": self.to_string() }))).into_response()
+        (
+            status,
+            Json(serde_json::json!({ "error": self.to_string() })),
+        )
+            .into_response()
     }
 }
 
@@ -199,7 +203,7 @@ pub async fn list_kernel_interfaces() -> Result<Vec<KernelInterface>, InterfaceE
 
     // --- ip -j link --------------------------------------------------------
     let link_out = Command::new("ip")
-           .args(["-j", "-s", "link"])
+        .args(["-j", "-s", "link"])
         .output()
         .await
         .map_err(|e| InterfaceError::KernelQueryFailed(e.to_string()))?;
@@ -211,10 +215,8 @@ pub async fn list_kernel_interfaces() -> Result<Vec<KernelInterface>, InterfaceE
         )));
     }
 
-    let link_entries: Vec<IpLinkEntry> =
-        serde_json::from_slice(&link_out.stdout).map_err(|e| {
-            InterfaceError::KernelQueryFailed(format!("ip link parse error: {e}"))
-        })?;
+    let link_entries: Vec<IpLinkEntry> = serde_json::from_slice(&link_out.stdout)
+        .map_err(|e| InterfaceError::KernelQueryFailed(format!("ip link parse error: {e}")))?;
 
     debug!(count = link_entries.len(), "interfaces: parsed ip -j link");
 
@@ -433,7 +435,9 @@ pub async fn apply_interface_with_ipv6(
                                 if let Some(assigned) = prefix_delegation::compute_track_address(
                                     &delegated, prefix_id, target_len, 1,
                                 ) {
-                                    if let Err(e) = assign_ipv6_address_exclusive(name, &assigned).await {
+                                    if let Err(e) =
+                                        assign_ipv6_address_exclusive(name, &assigned).await
+                                    {
                                         warn!(name = %name, addr = %assigned, error = %e,
                                             "interfaces: failed to assign tracked IPv6 prefix");
                                     } else {
@@ -476,7 +480,10 @@ pub async fn apply_interface_with_ipv6(
                     }
                     info!(name = %name, gateway = %gw_ip, "interfaces: applying static default route");
                     if gw_ip.contains(':') {
-                        run_ip(&["-6", "route", "replace", "default", "via", gw_ip, "dev", name]).await?;
+                        run_ip(&[
+                            "-6", "route", "replace", "default", "via", gw_ip, "dev", name,
+                        ])
+                        .await?;
                     } else {
                         run_ip(&["route", "replace", "default", "via", gw_ip, "dev", name]).await?;
                     }
@@ -535,9 +542,7 @@ pub async fn sync_interfaces_with_ipv6(
 
         // Only skip apply if both state and addresses already match.
         let already_up = config.enabled == current_up;
-        let kernel_addrs: &[String] = kernel_iface
-            .map(|k| k.addresses.as_slice())
-            .unwrap_or(&[]);
+        let kernel_addrs: &[String] = kernel_iface.map(|k| k.addresses.as_slice()).unwrap_or(&[]);
         let desired_addrs = config
             .addresses
             .iter()
@@ -563,7 +568,9 @@ pub async fn sync_interfaces_with_ipv6(
             .collect::<Vec<String>>();
         let addrs_match = (manage_ipv4_static || manage_ipv6_static)
             && desired_addrs.len() == managed_kernel_addrs.len()
-            && desired_addrs.iter().all(|a| managed_kernel_addrs.contains(a));
+            && desired_addrs
+                .iter()
+                .all(|a| managed_kernel_addrs.contains(a));
 
         if !already_up || !addrs_match {
             apply_interface_with_ipv6(config, ipv6_enabled).await?;
@@ -592,8 +599,7 @@ pub async fn sync_interfaces_with_ipv6(
                             "interfaces: removing stale address"
                         );
                         // Best-effort removal; log but don't abort on failure.
-                        let _ =
-                            run_ip(&["addr", "del", kernel_addr, "dev", &config.name]).await;
+                        let _ = run_ip(&["addr", "del", kernel_addr, "dev", &config.name]).await;
                     }
                 }
             }
@@ -635,9 +641,11 @@ pub async fn refresh_router_advertisements(configured: &[Interface], ipv6_enable
 
         match prefix_delegation::read_delegated_prefix(src) {
             Some(delegated) => {
-                match prefix_delegation::compute_track_address(&delegated, prefix_id, target_len, 1) {
+                match prefix_delegation::compute_track_address(&delegated, prefix_id, target_len, 1)
+                {
                     Some(assigned) => {
-                        if let Err(e) = assign_ipv6_address_exclusive(&config.name, &assigned).await {
+                        if let Err(e) = assign_ipv6_address_exclusive(&config.name, &assigned).await
+                        {
                             warn!(
                                 name = %config.name,
                                 addr = %assigned,
@@ -845,9 +853,7 @@ async fn start_dhcp6_pd_client(name: &str, hint_len: Option<u8>) -> Result<(), I
         .args(&arg_refs)
         .spawn()
         .map_err(|e| {
-            InterfaceError::ApplyFailed(format!(
-                "failed to spawn dhclient6-pd for {name}: {e}"
-            ))
+            InterfaceError::ApplyFailed(format!("failed to spawn dhclient6-pd for {name}: {e}"))
         })?;
     Ok(())
 }
@@ -914,7 +920,9 @@ async fn set_ipv6_ra_accept(name: &str, enabled: bool) -> Result<(), InterfaceEr
         .args(["-w", &assignment])
         .output()
         .await
-        .map_err(|e| InterfaceError::ApplyFailed(format!("failed to spawn sysctl for {name}: {e}")))?;
+        .map_err(|e| {
+            InterfaceError::ApplyFailed(format!("failed to spawn sysctl for {name}: {e}"))
+        })?;
 
     if !out.status.success() {
         return Err(InterfaceError::ApplyFailed(format!(
@@ -1024,10 +1032,7 @@ async fn stop_pppoe(wan_iface: &str) {
 
     if let Ok(pid_text) = tokio::fs::read_to_string(&pid_file).await {
         if let Ok(pid) = pid_text.trim().parse::<u32>() {
-            let _ = Command::new("kill")
-                .args([pid.to_string()])
-                .output()
-                .await;
+            let _ = Command::new("kill").args([pid.to_string()]).output().await;
         }
         let _ = tokio::fs::remove_file(&pid_file).await;
     }

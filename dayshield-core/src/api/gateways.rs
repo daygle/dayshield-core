@@ -4,7 +4,10 @@
 //! - `POST   /gateways`        - create or update a gateway
 //! - `DELETE /gateways/{name}` - delete a gateway by name
 
-use std::{collections::{HashMap, HashSet}, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use axum::{
     extract::{Path, State},
@@ -17,7 +20,9 @@ use tracing::{info, warn};
 
 use crate::{
     config::models::{ensure_ipv6_allowed, Gateway},
-    engine::gateway::{apply_gateway_with_ipv6, list_kernel_gateways_with_ipv6, probe_all_gateways, GatewayState},
+    engine::gateway::{
+        apply_gateway_with_ipv6, list_kernel_gateways_with_ipv6, probe_all_gateways, GatewayState,
+    },
     state::AppState,
 };
 
@@ -96,7 +101,8 @@ pub async fn list_gateways(State(state): State<Arc<AppState>>) -> impl IntoRespo
 
     // Surface auto-discovered default routes even when no explicit gateway
     // config entry exists yet, so the UI can show live upstream details.
-    let configured_ifaces: HashSet<&str> = configured.iter().map(|gw| gw.interface.as_str()).collect();
+    let configured_ifaces: HashSet<&str> =
+        configured.iter().map(|gw| gw.interface.as_str()).collect();
     for route in &kernel_routes {
         if configured_ifaces.contains(route.interface.as_str()) {
             continue;

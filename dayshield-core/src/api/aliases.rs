@@ -16,9 +16,7 @@ use axum::{
 use tracing::{info, warn};
 
 use crate::{
-    config::models::{
-        validate_alias_name, validate_alias_values, AliasType, FirewallAlias,
-    },
+    config::models::{validate_alias_name, validate_alias_values, AliasType, FirewallAlias},
     state::AppState,
 };
 

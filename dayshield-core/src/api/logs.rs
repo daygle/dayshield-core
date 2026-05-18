@@ -15,11 +15,8 @@ use tokio::process::Command;
 use tracing::warn;
 
 use crate::logs::{
-    firewall::parse_journald_firewall_line,
-    suricata::parse_eve_line,
-    system::parse_journald_system_line,
-    websocket::logs_websocket,
-    LogEvent,
+    firewall::parse_journald_firewall_line, suricata::parse_eve_line,
+    system::parse_journald_system_line, websocket::logs_websocket, LogEvent,
 };
 
 #[derive(Debug, Deserialize)]
@@ -73,8 +70,7 @@ fn parse_event_ts(event: &LogEvent) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(raw)
         .map(|dt| dt.with_timezone(&Utc))
         .or_else(|_| {
-            DateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S%.f%z")
-                .map(|dt| dt.with_timezone(&Utc))
+            DateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S%.f%z").map(|dt| dt.with_timezone(&Utc))
         })
         .ok()
 }
@@ -121,7 +117,9 @@ async fn query_journal_system(from: &str, to: &str) -> Result<Vec<LogEvent>, Log
         ])
         .output()
         .await
-        .map_err(|e| LogsApiError::Search(format!("failed to run journalctl for system logs: {e}")))?;
+        .map_err(|e| {
+            LogsApiError::Search(format!("failed to run journalctl for system logs: {e}"))
+        })?;
 
     if !out.status.success() {
         return Err(LogsApiError::Search(format!(
@@ -149,7 +147,9 @@ async fn query_journal_firewall(from: &str, to: &str) -> Result<Vec<LogEvent>, L
         ])
         .output()
         .await
-        .map_err(|e| LogsApiError::Search(format!("failed to run journalctl for firewall logs: {e}")))?;
+        .map_err(|e| {
+            LogsApiError::Search(format!("failed to run journalctl for firewall logs: {e}"))
+        })?;
 
     if !out.status.success() {
         return Err(LogsApiError::Search(format!(

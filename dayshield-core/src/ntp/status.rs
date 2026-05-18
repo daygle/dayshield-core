@@ -155,11 +155,7 @@ fn parse_system_time_line(line: &str) -> Option<f64> {
 /// Extract a floating-point seconds value from a `"Label : N.NNN seconds"` line.
 fn extract_seconds_value(line: &str) -> Option<f64> {
     let after_colon = line.split(':').nth(1)?;
-    after_colon
-        .split_whitespace()
-        .next()?
-        .parse::<f64>()
-        .ok()
+    after_colon.split_whitespace().next()?.parse::<f64>().ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -243,7 +239,10 @@ fn parse_timedatectl_timesync(text: &str, status: &mut NtpStatus) {
                 }
                 "TimeOffsetUSec" => {
                     // Value looks like "123456us" or just "123456"
-                    let digits: String = val.chars().take_while(|c| c.is_ascii_digit() || *c == '-').collect();
+                    let digits: String = val
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit() || *c == '-')
+                        .collect();
                     if let Ok(us) = digits.parse::<i64>() {
                         status.offset_ms = us as f64 / 1000.0;
                     }

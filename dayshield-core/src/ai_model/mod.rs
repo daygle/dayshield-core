@@ -69,15 +69,7 @@ impl AiModel {
         history: &AiContextFeatures,
     ) -> Result<(f64, Vec<String>)> {
         Ok(self.inner.predict_suricata_alert(
-            signature,
-            severity,
-            category,
-            protocol,
-            src_ip,
-            dst_ip,
-            src_port,
-            dst_port,
-            history,
+            signature, severity, category, protocol, src_ip, dst_ip, src_port, dst_port, history,
         ))
     }
 
@@ -93,14 +85,7 @@ impl AiModel {
         history: &AiContextFeatures,
     ) -> Result<(f64, Vec<String>)> {
         Ok(self.inner.predict_firewall_event(
-            action,
-            protocol,
-            src_ip,
-            dst_ip,
-            src_port,
-            dst_port,
-            iface,
-            history,
+            action, protocol, src_ip, dst_ip, src_port, dst_port, iface, history,
         ))
     }
 
@@ -142,8 +127,12 @@ impl AiModel {
             reasons.push(format!("Alert category: {}", category_lc));
         }
 
-        let scan = (signature_lc.contains("scan") || category_lc.contains("scan") || category_lc.contains("recon")) as u8 as f64;
-        let brute = (signature_lc.contains("brute") || signature_lc.contains("password") || category_lc.contains("brute")) as u8 as f64;
+        let scan = (signature_lc.contains("scan")
+            || category_lc.contains("scan")
+            || category_lc.contains("recon")) as u8 as f64;
+        let brute = (signature_lc.contains("brute")
+            || signature_lc.contains("password")
+            || category_lc.contains("brute")) as u8 as f64;
         let malware = (signature_lc.contains("botnet")
             || signature_lc.contains("malware")
             || signature_lc.contains("trojan")
@@ -151,7 +140,8 @@ impl AiModel {
             || category_lc.contains("malware")) as u8 as f64;
         let ssh = (signature_lc.contains("ssh") || category_lc.contains("ssh")) as u8 as f64;
         let rdp = (signature_lc.contains("rdp") || category_lc.contains("rdp")) as u8 as f64;
-        let http = ((protocol.eq_ignore_ascii_case("tcp") && signature_lc.contains("http")) || category_lc.contains("http")) as u8 as f64;
+        let http = ((protocol.eq_ignore_ascii_case("tcp") && signature_lc.contains("http"))
+            || category_lc.contains("http")) as u8 as f64;
 
         let proto_tcp = protocol.eq_ignore_ascii_case("tcp") as u8 as f64;
         let proto_udp = protocol.eq_ignore_ascii_case("udp") as u8 as f64;
@@ -171,7 +161,10 @@ impl AiModel {
         let external_iface = iface
             .map(|value| {
                 let lower = value.to_lowercase();
-                !lower.is_empty() && lower != "lo" && !lower.starts_with("br") && !lower.starts_with("docker")
+                !lower.is_empty()
+                    && lower != "lo"
+                    && !lower.starts_with("br")
+                    && !lower.starts_with("docker")
             })
             .unwrap_or(false) as u8 as f64;
 
@@ -194,7 +187,10 @@ impl AiModel {
             reasons.push("High-risk port observed".to_string());
         }
         if history.recent_high_risk_count > 0.0 {
-            reasons.push(format!("{} recent high-risk events for this source", history.recent_high_risk_count));
+            reasons.push(format!(
+                "{} recent high-risk events for this source",
+                history.recent_high_risk_count
+            ));
         }
         if history.recent_feedback_malicious > 0.0 {
             reasons.push("Source IP has prior confirmed malicious feedback".to_string());
@@ -206,10 +202,16 @@ impl AiModel {
             reasons.push("Source IP was manually unblocked previously".to_string());
         }
         if history.recent_firewall_drops > 0.0 {
-            reasons.push(format!("{} recent firewall drop events", history.recent_firewall_drops));
+            reasons.push(format!(
+                "{} recent firewall drop events",
+                history.recent_firewall_drops
+            ));
         }
         if history.recent_scan_events > 0.0 {
-            reasons.push(format!("{} recent scan-like events", history.recent_scan_events));
+            reasons.push(format!(
+                "{} recent scan-like events",
+                history.recent_scan_events
+            ));
         }
         if history.crowdsec_decisions > 0.0 {
             reasons.push("CrowdSec has decisions for this source IP".to_string());
@@ -265,7 +267,10 @@ impl AiModel {
     }
 
     fn is_high_risk_port(port: Option<u16>) -> bool {
-        matches!(port, Some(22 | 23 | 25 | 53 | 80 | 123 | 443 | 445 | 3389 | 5900 | 8080))
+        matches!(
+            port,
+            Some(22 | 23 | 25 | 53 | 80 | 123 | 443 | 445 | 3389 | 5900 | 8080)
+        )
     }
 
     fn is_public_ip(value: &str) -> bool {
@@ -273,10 +278,17 @@ impl AiModel {
             .parse::<IpAddr>()
             .map(|ip| match ip {
                 IpAddr::V4(addr) => {
-                    !(addr.is_private() || addr.is_loopback() || addr.is_link_local() || addr.is_broadcast() || addr.is_documentation())
+                    !(addr.is_private()
+                        || addr.is_loopback()
+                        || addr.is_link_local()
+                        || addr.is_broadcast()
+                        || addr.is_documentation())
                 }
                 IpAddr::V6(addr) => {
-                    !(addr.is_loopback() || addr.is_unique_local() || addr.is_unspecified() || addr.is_multicast())
+                    !(addr.is_loopback()
+                        || addr.is_unique_local()
+                        || addr.is_unspecified()
+                        || addr.is_multicast())
                 }
             })
             .unwrap_or(false)
@@ -312,33 +324,33 @@ impl LocalLogisticModel {
 
     fn default_weights() -> Vec<f64> {
         vec![
-            -2.4, // bias
-            1.10, // severity
-            0.25, // src_public
-            0.15, // dst_public
-            0.90, // scan
-            1.10, // brute/password
-            1.40, // malware/botnet
-            0.75, // ssh
-            0.80, // rdp
-            0.40, // http
-            0.22, // tcp
-            0.10, // udp
-            0.18, // icmp
-            0.60, // high_risk_port
-            0.85, // action_drop
+            -2.4,  // bias
+            1.10,  // severity
+            0.25,  // src_public
+            0.15,  // dst_public
+            0.90,  // scan
+            1.10,  // brute/password
+            1.40,  // malware/botnet
+            0.75,  // ssh
+            0.80,  // rdp
+            0.40,  // http
+            0.22,  // tcp
+            0.10,  // udp
+            0.18,  // icmp
+            0.60,  // high_risk_port
+            0.85,  // action_drop
             -0.25, // action_accept
-            0.15, // action_other
-            0.12, // external_iface
-            0.25, // recent_scan_events
-            0.55, // crowdsec_decisions
-            0.35, // dns_blocklist_configured
-            0.20, // recent_high_risk_count
-            1.25, // recent_feedback_malicious
+            0.15,  // action_other
+            0.12,  // external_iface
+            0.25,  // recent_scan_events
+            0.55,  // crowdsec_decisions
+            0.35,  // dns_blocklist_configured
+            0.20,  // recent_high_risk_count
+            1.25,  // recent_feedback_malicious
             -1.10, // recent_feedback_false_positive
             -0.75, // recent_manual_unblock
-            0.40, // recent_firewall_drops
-            0.10, // recent_firewall_accepts
+            0.40,  // recent_firewall_drops
+            0.10,  // recent_firewall_accepts
         ]
     }
 
@@ -433,7 +445,12 @@ impl LocalLogisticModel {
 
     fn predict(&self, features: &[f64]) -> f64 {
         debug_assert_eq!(features.len(), self.weights.len());
-        let raw: f64 = self.weights.iter().zip(features.iter()).map(|(w, f)| w * f).sum();
+        let raw: f64 = self
+            .weights
+            .iter()
+            .zip(features.iter())
+            .map(|(w, f)| w * f)
+            .sum();
         1.0 / (1.0 + (-raw).exp())
     }
 
@@ -456,8 +473,9 @@ impl LocalLogisticModel {
 
     fn save(&self) -> Result<()> {
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create model directory {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create model directory {}", parent.display())
+            })?;
         }
 
         let state = AiModelState {
@@ -475,7 +493,6 @@ impl LocalLogisticModel {
         self.weights = Self::default_weights();
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -588,8 +605,15 @@ mod tests {
             &history,
         );
 
-        assert!(score > 0.4, "expected firewall drop on high-risk port to raise risk");
-        assert!(reasons.iter().any(|r| r.contains("Firewall drop action observed")));
-        assert!(reasons.iter().any(|r| r.contains("High-risk port observed")));
+        assert!(
+            score > 0.4,
+            "expected firewall drop on high-risk port to raise risk"
+        );
+        assert!(reasons
+            .iter()
+            .any(|r| r.contains("Firewall drop action observed")));
+        assert!(reasons
+            .iter()
+            .any(|r| r.contains("High-risk port observed")));
     }
 }

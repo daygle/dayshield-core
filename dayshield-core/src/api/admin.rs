@@ -7,12 +7,7 @@
 
 use std::sync::Arc;
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde_json::json;
 
 use crate::config::models::AdminSecuritySettings;
@@ -23,9 +18,7 @@ use crate::state::AppState;
 // ---------------------------------------------------------------------------
 
 /// Get the current admin security settings.
-pub async fn get_security(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn get_security(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let settings = state
         .config_store
         .load_admin_security_settings()

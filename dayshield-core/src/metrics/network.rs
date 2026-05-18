@@ -54,7 +54,15 @@ pub fn parse_proc_net_dev(content: &str) -> HashMap<String, IfaceCounters> {
         let tx_bytes: u64 = nums.next().and_then(|v| v.parse().ok()).unwrap_or(0);
         let tx_packets: u64 = nums.next().and_then(|v| v.parse().ok()).unwrap_or(0);
 
-        map.insert(name, IfaceCounters { rx_bytes, tx_bytes, rx_packets, tx_packets });
+        map.insert(
+            name,
+            IfaceCounters {
+                rx_bytes,
+                tx_bytes,
+                rx_packets,
+                tx_packets,
+            },
+        );
     }
 
     map
@@ -144,10 +152,26 @@ mod tests {
     #[test]
     fn test_compute_throughput_basic() {
         let mut prev = HashMap::new();
-        prev.insert("eth0".to_string(), IfaceCounters { rx_bytes: 0, tx_bytes: 0, rx_packets: 0, tx_packets: 0 });
+        prev.insert(
+            "eth0".to_string(),
+            IfaceCounters {
+                rx_bytes: 0,
+                tx_bytes: 0,
+                rx_packets: 0,
+                tx_packets: 0,
+            },
+        );
 
         let mut curr = HashMap::new();
-        curr.insert("eth0".to_string(), IfaceCounters { rx_bytes: 1000, tx_bytes: 500, rx_packets: 10, tx_packets: 5 });
+        curr.insert(
+            "eth0".to_string(),
+            IfaceCounters {
+                rx_bytes: 1000,
+                tx_bytes: 500,
+                rx_packets: 10,
+                tx_packets: 5,
+            },
+        );
 
         let metrics = compute_throughput(&prev, &curr, 1.0);
         assert_eq!(metrics.len(), 1);
@@ -165,7 +189,15 @@ mod tests {
         prev.insert("lo".to_string(), IfaceCounters::default());
 
         let mut curr = HashMap::new();
-        curr.insert("lo".to_string(), IfaceCounters { rx_bytes: 9999, tx_bytes: 9999, rx_packets: 100, tx_packets: 100 });
+        curr.insert(
+            "lo".to_string(),
+            IfaceCounters {
+                rx_bytes: 9999,
+                tx_bytes: 9999,
+                rx_packets: 100,
+                tx_packets: 100,
+            },
+        );
 
         let metrics = compute_throughput(&prev, &curr, 1.0);
         assert!(metrics.is_empty(), "loopback should be excluded");
@@ -175,10 +207,26 @@ mod tests {
     fn test_compute_throughput_counter_wrap_saturation() {
         // Simulates a counter reset (e.g., interface down/up).
         let mut prev = HashMap::new();
-        prev.insert("eth0".to_string(), IfaceCounters { rx_bytes: 5000, tx_bytes: 3000, rx_packets: 50, tx_packets: 30 });
+        prev.insert(
+            "eth0".to_string(),
+            IfaceCounters {
+                rx_bytes: 5000,
+                tx_bytes: 3000,
+                rx_packets: 50,
+                tx_packets: 30,
+            },
+        );
 
         let mut curr = HashMap::new();
-        curr.insert("eth0".to_string(), IfaceCounters { rx_bytes: 100, tx_bytes: 100, rx_packets: 10, tx_packets: 5 });
+        curr.insert(
+            "eth0".to_string(),
+            IfaceCounters {
+                rx_bytes: 100,
+                tx_bytes: 100,
+                rx_packets: 10,
+                tx_packets: 5,
+            },
+        );
 
         let metrics = compute_throughput(&prev, &curr, 1.0);
         // saturating_sub → 0 bytes delta

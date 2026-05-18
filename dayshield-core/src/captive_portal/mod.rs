@@ -597,15 +597,9 @@ fn save_sessions(config_store: &ConfigStore, sessions: &[CaptivePortalSession]) 
     .context("failed to serialize captive portal sessions")?;
 
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, raw)
-        .with_context(|| format!("failed to write {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path).with_context(|| {
-        format!(
-            "failed to rename {} to {}",
-            tmp.display(),
-            path.display()
-        )
-    })?;
+    std::fs::write(&tmp, raw).with_context(|| format!("failed to write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("failed to rename {} to {}", tmp.display(), path.display()))?;
 
     Ok(())
 }
@@ -632,18 +626,14 @@ pub fn prune_expired_sessions(
     sessions.len() != before
 }
 
-pub async fn apply_current_ruleset(
-    config_store: &ConfigStore,
-) -> Result<(), CaptivePortalError> {
+pub async fn apply_current_ruleset(config_store: &ConfigStore) -> Result<(), CaptivePortalError> {
     apply_current_ruleset_nft(config_store)
         .await
         .map_err(nft_error_to_portal_error)
 }
 
 pub async fn apply_current_ruleset_nft(config_store: &ConfigStore) -> Result<(), NftError> {
-    let cfg = config_store
-        .load()
-        .map_err(NftError::StorageError)?;
+    let cfg = config_store.load().map_err(NftError::StorageError)?;
     let mut sessions = load_sessions(config_store).map_err(NftError::StorageError)?;
     let active_sessions = if let Some(portal) = cfg.captive_portal.as_ref() {
         if prune_expired_sessions(portal, &mut sessions) {
@@ -746,9 +736,7 @@ fn redeem_voucher(
     let code = code
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            CaptivePortalError::ValidationFailed("voucherCode is required".into())
-        })?;
+        .ok_or_else(|| CaptivePortalError::ValidationFailed("voucherCode is required".into()))?;
 
     let voucher = config
         .vouchers
@@ -853,7 +841,11 @@ fn render_portal_html(config: &CaptivePortalConfig) -> String {
     } else {
         "none"
     };
-    let terms_style = if config.terms_required { "block" } else { "none" };
+    let terms_style = if config.terms_required {
+        "block"
+    } else {
+        "none"
+    };
     let terms_checked = if config.terms_required { "" } else { "checked" };
     let form_style = if config.enabled { "block" } else { "none" };
     let submit_disabled = if config.enabled { "" } else { "disabled" };

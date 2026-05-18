@@ -74,9 +74,9 @@ pub fn is_valid_mac(s: &str) -> bool {
         // Cisco dot notation: three groups of four hex chars separated by dots.
         let groups: Vec<&str> = s.split('.').collect();
         return groups.len() == 3
-            && groups.iter().all(|g| {
-                g.len() == 4 && g.chars().all(|c| c.is_ascii_hexdigit())
-            });
+            && groups
+                .iter()
+                .all(|g| g.len() == 4 && g.chars().all(|c| c.is_ascii_hexdigit()));
     }
     let sep = if s.contains(':') {
         ':'
@@ -87,9 +87,9 @@ pub fn is_valid_mac(s: &str) -> bool {
     };
     let parts: Vec<&str> = s.split(sep).collect();
     parts.len() == 6
-        && parts.iter().all(|p| {
-            p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit())
-        })
+        && parts
+            .iter()
+            .all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
 // ── Shell-quoting utilities ──────────────────────────────────────────────────
@@ -168,9 +168,8 @@ pub mod fs {
         let tmp = PathBuf::from(format!("{}.tmp", path.display()));
         std::fs::write(&tmp, contents)
             .with_context(|| format!("Failed to write temp file {}", tmp.display()))?;
-        std::fs::rename(&tmp, path).with_context(|| {
-            format!("Failed to rename {} to {}", tmp.display(), path.display())
-        })?;
+        std::fs::rename(&tmp, path)
+            .with_context(|| format!("Failed to rename {} to {}", tmp.display(), path.display()))?;
         Ok(())
     }
 
@@ -181,8 +180,9 @@ pub mod fs {
     pub fn backup_file(path: &Path) -> Result<PathBuf> {
         let bak = PathBuf::from(format!("{}.bak", path.display()));
         if path.exists() {
-            std::fs::copy(path, &bak)
-                .with_context(|| format!("Failed to back up {} to {}", path.display(), bak.display()))?;
+            std::fs::copy(path, &bak).with_context(|| {
+                format!("Failed to back up {} to {}", path.display(), bak.display())
+            })?;
         }
         Ok(bak)
     }
@@ -276,9 +276,7 @@ pub mod process {
         let mut elapsed = 0u64;
         while is_running(pid) {
             if elapsed >= timeout_ms {
-                anyhow::bail!(
-                    "Timed out waiting for PID {pid} to exit after {timeout_ms} ms"
-                );
+                anyhow::bail!("Timed out waiting for PID {pid} to exit after {timeout_ms} ms");
             }
             tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
             elapsed = elapsed.saturating_add(interval_ms);

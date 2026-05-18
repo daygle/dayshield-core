@@ -29,10 +29,10 @@ use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
 use super::models::{
-    AcmeConfig, AdminSecuritySettings, AiEngineConfig, CaptivePortalConfig, CloudflaredConfig, CrowdSecConfig, Dhcp6Config, DhcpConfig, DnsConfig, DnsDomainOverride,
-    DynamicDnsConfig,
-    DnsHostOverride, DotConfig, FirewallAlias, FirewallRule, FirewallSettings, Gateway, Interface, NatConfig,
-    NotifyConfig, NtpConfig, SuricataConfig, SystemConfig, WireGuardInterface,
+    AcmeConfig, AdminSecuritySettings, AiEngineConfig, CaptivePortalConfig, CloudflaredConfig,
+    CrowdSecConfig, Dhcp6Config, DhcpConfig, DnsConfig, DnsDomainOverride, DnsHostOverride,
+    DotConfig, DynamicDnsConfig, FirewallAlias, FirewallRule, FirewallSettings, Gateway, Interface,
+    NatConfig, NotifyConfig, NtpConfig, SuricataConfig, SystemConfig, WireGuardInterface,
 };
 
 /// Default path to the configuration directory.
@@ -70,9 +70,8 @@ fn write_restricted(path: &Path, data: &[u8]) -> Result<()> {
             .with_context(|| format!("Failed to write temp file {}", tmp.display()))?;
     }
 
-    std::fs::rename(&tmp, path).with_context(|| {
-        format!("Failed to rename {} to {}", tmp.display(), path.display())
-    })?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("Failed to rename {} to {}", tmp.display(), path.display()))?;
 
     Ok(())
 }
@@ -83,9 +82,8 @@ fn write_restricted(path: &Path, data: &[u8]) -> Result<()> {
     let tmp = PathBuf::from(format!("{}{}", path.display(), TMP_SUFFIX));
     std::fs::write(&tmp, data)
         .with_context(|| format!("Failed to write temp file {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| {
-        format!("Failed to rename {} to {}", tmp.display(), path.display())
-    })?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("Failed to rename {} to {}", tmp.display(), path.display()))?;
     Ok(())
 }
 
@@ -295,7 +293,10 @@ impl ConfigStore {
         let config: SystemConfig = serde_json::from_value(merged)
             .context("Failed to deserialise merged config fragments")?;
 
-        info!(count = entries.len(), "Loaded config fragments from directory");
+        info!(
+            count = entries.len(),
+            "Loaded config fragments from directory"
+        );
         Ok(config)
     }
 
@@ -305,11 +306,10 @@ impl ConfigStore {
     /// describing the first validation failure found.
     pub fn validate(&self, config: &SystemConfig) -> Result<()> {
         use crate::config::models::{
-            ensure_ipv6_allowed,
-            is_valid_cidr, is_valid_cidr_or_addr, is_valid_domain, is_valid_interface_name, is_valid_ip,
-            is_valid_ipv4_addr, is_valid_ipv4_range, is_valid_mac, is_valid_mss, is_valid_mtu,
-            is_valid_port, is_valid_vlan_id, validate_firewall_rule, validate_firewall_settings,
-            Ipv6Mode,
+            ensure_ipv6_allowed, is_valid_cidr, is_valid_cidr_or_addr, is_valid_domain,
+            is_valid_interface_name, is_valid_ip, is_valid_ipv4_addr, is_valid_ipv4_range,
+            is_valid_mac, is_valid_mss, is_valid_mtu, is_valid_port, is_valid_vlan_id,
+            validate_firewall_rule, validate_firewall_settings, Ipv6Mode,
         };
 
         let interface_names: std::collections::HashSet<&str> =
@@ -537,11 +537,9 @@ impl ConfigStore {
                         src
                     );
                 }
-                if let Err(msg) = ensure_ipv6_allowed(
-                    src,
-                    ipv6_enabled,
-                    "Firewall management_allowed_sources",
-                ) {
+                if let Err(msg) =
+                    ensure_ipv6_allowed(src, ipv6_enabled, "Firewall management_allowed_sources")
+                {
                     anyhow::bail!("{msg}");
                 }
             }
@@ -628,20 +626,12 @@ impl ConfigStore {
                 }
                 if let Some(gw) = &scope.gateway {
                     if !is_valid_ipv4_addr(gw) {
-                        anyhow::bail!(
-                            "DHCP scope {} has invalid gateway {:?}",
-                            scope.id,
-                            gw
-                        );
+                        anyhow::bail!("DHCP scope {} has invalid gateway {:?}", scope.id, gw);
                     }
                 }
                 for dns in &scope.dns_servers {
                     if !is_valid_ipv4_addr(dns) {
-                        anyhow::bail!(
-                            "DHCP scope {} has invalid DNS server {:?}",
-                            scope.id,
-                            dns
-                        );
+                        anyhow::bail!("DHCP scope {} has invalid DNS server {:?}", scope.id, dns);
                     }
                 }
                 for res in &scope.reservations {
@@ -715,11 +705,7 @@ impl ConfigStore {
                 }
                 for dns in &scope.dns_servers {
                     if !crate::config::models::is_valid_ipv6_addr(dns) {
-                        anyhow::bail!(
-                            "DHCPv6 scope {} has invalid DNS server {:?}",
-                            scope.id,
-                            dns
-                        );
+                        anyhow::bail!("DHCPv6 scope {} has invalid DNS server {:?}", scope.id, dns);
                     }
                 }
                 for reservation in &scope.reservations {
@@ -746,7 +732,10 @@ impl ConfigStore {
         // DNS local record type validation.
         if let Some(dns) = &config.dns {
             for rec in &dns.local_records {
-                if !matches!(rec.record_type.to_uppercase().as_str(), "A" | "AAAA" | "CNAME" | "PTR" | "MX" | "TXT") {
+                if !matches!(
+                    rec.record_type.to_uppercase().as_str(),
+                    "A" | "AAAA" | "CNAME" | "PTR" | "MX" | "TXT"
+                ) {
                     anyhow::bail!(
                         "DNS local record {:?} has unsupported record type {:?}",
                         rec.name,
@@ -769,7 +758,11 @@ impl ConfigStore {
             if let Err(msg) = validate_suricata_config(suricata) {
                 anyhow::bail!("Suricata config is invalid: {msg}");
             }
-            for cidr in suricata.home_nets.iter().chain(suricata.external_nets.iter()) {
+            for cidr in suricata
+                .home_nets
+                .iter()
+                .chain(suricata.external_nets.iter())
+            {
                 if let Err(msg) = ensure_ipv6_allowed(cidr, ipv6_enabled, "Suricata network") {
                     anyhow::bail!("Suricata config is invalid: {msg}");
                 }
@@ -815,18 +808,16 @@ impl ConfigStore {
 
         // DNS host-override validation.
         {
-            use crate::config::models::{validate_dns_hostname, is_valid_ip};
+            use crate::config::models::{is_valid_ip, validate_dns_hostname};
             for ov in &config.dns_host_overrides {
                 if !validate_dns_hostname(&ov.hostname) {
-                    anyhow::bail!(
-                        "DNS host override has invalid hostname {:?}",
-                        ov.hostname
-                    );
+                    anyhow::bail!("DNS host override has invalid hostname {:?}", ov.hostname);
                 }
                 if !is_valid_ip(&ov.address) {
                     anyhow::bail!(
                         "DNS host override {:?} has invalid address {:?}",
-                        ov.hostname, ov.address
+                        ov.hostname,
+                        ov.address
                     );
                 }
                 if let Err(msg) =
@@ -839,18 +830,16 @@ impl ConfigStore {
 
         // DNS domain-override validation.
         {
-            use crate::config::models::{validate_dns_domain, is_valid_ip};
+            use crate::config::models::{is_valid_ip, validate_dns_domain};
             for ov in &config.dns_domain_overrides {
                 if !validate_dns_domain(&ov.domain) {
-                    anyhow::bail!(
-                        "DNS domain override has invalid domain {:?}",
-                        ov.domain
-                    );
+                    anyhow::bail!("DNS domain override has invalid domain {:?}", ov.domain);
                 }
                 if !is_valid_ip(&ov.forward_to) {
                     anyhow::bail!(
                         "DNS domain override {:?} has invalid forward_to address {:?}",
-                        ov.domain, ov.forward_to
+                        ov.domain,
+                        ov.forward_to
                     );
                 }
                 if let Err(msg) =
@@ -1092,8 +1081,7 @@ impl ConfigStore {
         // Captive portal config validation.
         if let Some(captive_portal) = &config.captive_portal {
             use crate::config::models::validate_captive_portal_config_with_ipv6;
-            if let Err(msg) =
-                validate_captive_portal_config_with_ipv6(captive_portal, ipv6_enabled)
+            if let Err(msg) = validate_captive_portal_config_with_ipv6(captive_portal, ipv6_enabled)
             {
                 anyhow::bail!("Captive portal config is invalid: {msg}");
             }
@@ -1340,9 +1328,7 @@ impl ConfigStore {
     /// Return the DNS host and domain overrides from the persisted config.
     ///
     /// Returns `(host_overrides, domain_overrides)`.
-    pub fn load_dns_overrides(
-        &self,
-    ) -> Result<(Vec<DnsHostOverride>, Vec<DnsDomainOverride>)> {
+    pub fn load_dns_overrides(&self) -> Result<(Vec<DnsHostOverride>, Vec<DnsDomainOverride>)> {
         let cfg = self.load()?;
         Ok((cfg.dns_host_overrides, cfg.dns_domain_overrides))
     }
@@ -1470,7 +1456,8 @@ impl ConfigStore {
     /// Return the system settings from the persisted config.
     ///
     /// Returns defaults when no settings have been saved yet.
-    pub fn load_system_settings(&self) -> Result<super::models::SystemSettings> {        Ok(self.load()?.system_settings.unwrap_or_default())
+    pub fn load_system_settings(&self) -> Result<super::models::SystemSettings> {
+        Ok(self.load()?.system_settings.unwrap_or_default())
     }
 
     /// Atomically replace the system settings in the persisted config.
@@ -1557,12 +1544,8 @@ impl ConfigStore {
 
         // Step 1 - backup.
         if self.config_path.exists() {
-            std::fs::copy(&self.config_path, &bak_path).with_context(|| {
-                format!(
-                    "Failed to back up config to {}",
-                    bak_path.display()
-                )
-            })?;
+            std::fs::copy(&self.config_path, &bak_path)
+                .with_context(|| format!("Failed to back up config to {}", bak_path.display()))?;
             debug!(backup = %bak_path.display(), "Config backed up");
         }
 
@@ -2077,9 +2060,7 @@ mod tests {
         let store = ConfigStore::with_dir(&dir);
 
         // Save an interface first.
-        store
-            .save_interfaces(vec![make_interface("eth0")])
-            .unwrap();
+        store.save_interfaces(vec![make_interface("eth0")]).unwrap();
 
         // Now save firewall rules - interfaces must still be present.
         store
@@ -2087,7 +2068,11 @@ mod tests {
             .unwrap();
 
         let cfg = store.load().unwrap();
-        assert_eq!(cfg.interfaces.len(), 1, "interfaces must survive firewall save");
+        assert_eq!(
+            cfg.interfaces.len(),
+            1,
+            "interfaces must survive firewall save"
+        );
         assert_eq!(cfg.firewall_rules.len(), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2214,9 +2199,9 @@ mod tests {
     #[test]
     fn is_valid_mac_invalid() {
         use crate::config::models::is_valid_mac;
-        assert!(!is_valid_mac("aabbccddeeff"));         // no separator
-        assert!(!is_valid_mac("aa:bb:cc:dd:ee"));       // only 5 groups
-        assert!(!is_valid_mac("aa:bb:cc:dd:ee:gg"));    // invalid hex
+        assert!(!is_valid_mac("aabbccddeeff")); // no separator
+        assert!(!is_valid_mac("aa:bb:cc:dd:ee")); // only 5 groups
+        assert!(!is_valid_mac("aa:bb:cc:dd:ee:gg")); // invalid hex
         assert!(!is_valid_mac(""));
     }
 
@@ -2225,18 +2210,18 @@ mod tests {
         use crate::config::models::is_valid_domain;
         assert!(is_valid_domain("example.com"));
         assert!(is_valid_domain("sub.example.com"));
-        assert!(is_valid_domain("example.com."));   // trailing dot
+        assert!(is_valid_domain("example.com.")); // trailing dot
         assert!(is_valid_domain("my-host.local"));
-        assert!(is_valid_domain("a"));              // single label
+        assert!(is_valid_domain("a")); // single label
     }
 
     #[test]
     fn is_valid_domain_invalid() {
         use crate::config::models::is_valid_domain;
         assert!(!is_valid_domain(""));
-        assert!(!is_valid_domain("-bad.com"));      // starts with hyphen
-        assert!(!is_valid_domain("bad-.com"));      // ends with hyphen
-        assert!(!is_valid_domain("bad..com"));      // empty label
+        assert!(!is_valid_domain("-bad.com")); // starts with hyphen
+        assert!(!is_valid_domain("bad-.com")); // ends with hyphen
+        assert!(!is_valid_domain("bad..com")); // empty label
         assert!(!is_valid_domain(&"a".repeat(254))); // too long
     }
 
@@ -2292,7 +2277,10 @@ mod tests {
         let dns = make_dns_config();
         store.save_dns_config(dns.clone()).unwrap();
 
-        let loaded = store.load_dns_config().unwrap().expect("DNS config should be Some");
+        let loaded = store
+            .load_dns_config()
+            .unwrap()
+            .expect("DNS config should be Some");
         assert_eq!(loaded.port, 53);
         assert_eq!(loaded.forwarders, vec!["1.1.1.1"]);
         assert!(loaded.enabled);
@@ -2331,7 +2319,10 @@ mod tests {
         let dhcp = make_dhcp_config();
         store.save_dhcp_config(dhcp).unwrap();
 
-        let loaded = store.load_dhcp_config().unwrap().expect("DHCP config should be Some");
+        let loaded = store
+            .load_dhcp_config()
+            .unwrap()
+            .expect("DHCP config should be Some");
         assert!(loaded.enabled);
         assert_eq!(loaded.scopes.len(), 1);
         assert_eq!(loaded.scopes[0].pool_start, "192.168.1.100");
@@ -2458,7 +2449,10 @@ mod tests {
         let acme = make_acme_config();
         store.save_acme_config(acme.clone()).unwrap();
 
-        let loaded = store.load_acme_config().unwrap().expect("ACME config should be Some");
+        let loaded = store
+            .load_acme_config()
+            .unwrap()
+            .expect("ACME config should be Some");
         assert!(loaded.enabled);
         assert_eq!(loaded.email, "admin@example.com");
         assert_eq!(loaded.domains, vec!["example.com"]);
@@ -2499,7 +2493,10 @@ mod tests {
         acme.email = "not-an-email".into();
         cfg.acme = Some(acme);
 
-        assert!(store.validate(&cfg).is_err(), "invalid email must be rejected");
+        assert!(
+            store.validate(&cfg).is_err(),
+            "invalid email must be rejected"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2514,7 +2511,10 @@ mod tests {
         acme.domains = vec!["-invalid-domain".into()];
         cfg.acme = Some(acme);
 
-        assert!(store.validate(&cfg).is_err(), "invalid domain must be rejected");
+        assert!(
+            store.validate(&cfg).is_err(),
+            "invalid domain must be rejected"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2529,7 +2529,10 @@ mod tests {
         acme.renew_interval_hours = 0;
         cfg.acme = Some(acme);
 
-        assert!(store.validate(&cfg).is_err(), "zero renew_interval_hours must be rejected");
+        assert!(
+            store.validate(&cfg).is_err(),
+            "zero renew_interval_hours must be rejected"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2544,7 +2547,10 @@ mod tests {
         acme.directory_url = "not-a-url".into();
         cfg.acme = Some(acme);
 
-        assert!(store.validate(&cfg).is_err(), "invalid directory_url must be rejected");
+        assert!(
+            store.validate(&cfg).is_err(),
+            "invalid directory_url must be rejected"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2558,7 +2564,7 @@ mod tests {
         let mut cfg = SystemConfig::default();
         cfg.acme = Some(crate::config::models::AcmeConfig {
             enabled: false,
-            directory_url: "not-a-url".into(),  // would fail if enabled
+            directory_url: "not-a-url".into(), // would fail if enabled
             email: "not-an-email".into(),
             domains: vec![],
             challenge_type: crate::config::models::AcmeChallengeType::Http01,
@@ -2567,7 +2573,10 @@ mod tests {
             cert_storage_path: "/tmp".into(),
         });
 
-        assert!(store.validate(&cfg).is_ok(), "disabled ACME must skip validation");
+        assert!(
+            store.validate(&cfg).is_ok(),
+            "disabled ACME must skip validation"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2588,8 +2597,8 @@ mod tests {
     fn validate_email_rejects_invalid_emails() {
         use crate::config::models::validate_email;
         assert!(!validate_email("not-an-email"));
-        assert!(!validate_email("@example.com"));      // empty local part
-        assert!(!validate_email("user@"));             // empty domain
+        assert!(!validate_email("@example.com")); // empty local part
+        assert!(!validate_email("user@")); // empty domain
         assert!(!validate_email("user@@example.com")); // multiple @
         assert!(!validate_email(""));
     }
@@ -2597,7 +2606,9 @@ mod tests {
     #[test]
     fn validate_directory_url_accepts_valid_urls() {
         use crate::config::models::validate_directory_url;
-        assert!(validate_directory_url("https://acme-v02.api.letsencrypt.org/directory"));
+        assert!(validate_directory_url(
+            "https://acme-v02.api.letsencrypt.org/directory"
+        ));
         assert!(validate_directory_url("http://localhost:8080/dir"));
     }
 
@@ -2644,8 +2655,12 @@ mod tests {
         let cfg = store.load().unwrap();
         assert_eq!(cfg.hostname, "legacy-fw");
 
-        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(store.config_path()).unwrap()).unwrap();
-        assert_eq!(saved["schema_version"].as_u64(), Some(CURRENT_SCHEMA_VERSION as u64));
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(store.config_path()).unwrap()).unwrap();
+        assert_eq!(
+            saved["schema_version"].as_u64(),
+            Some(CURRENT_SCHEMA_VERSION as u64)
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2682,11 +2697,7 @@ mod tests {
         let store = ConfigStore::with_dir(&dir);
 
         // Write two fragment files.
-        std::fs::write(
-            dir.join("hostname.json"),
-            r#"{"hostname":"fragment-fw"}"#,
-        )
-        .unwrap();
+        std::fs::write(dir.join("hostname.json"), r#"{"hostname":"fragment-fw"}"#).unwrap();
         std::fs::write(
             dir.join("interfaces.json"),
             r#"{"interfaces":[{"name":"eth0","addresses":["192.168.1.1/24"],"enabled":true,"dhcp4":false,"dhcp6":false}]}"#,

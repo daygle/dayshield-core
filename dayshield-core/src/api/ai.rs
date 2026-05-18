@@ -7,7 +7,7 @@ use axum::{
     Json,
 };
 
-use crate::config::models::{AiEngineConfig, validate_ai_engine_config};
+use crate::config::models::{validate_ai_engine_config, AiEngineConfig};
 use crate::state::AppState;
 
 #[derive(Debug, thiserror::Error)]
@@ -103,10 +103,15 @@ pub async fn submit_feedback(
     Path(id): Path<String>,
     Json(req): Json<FeedbackRequest>,
 ) -> Result<impl IntoResponse, AiApiError> {
-    let feedback = crate::ai_engine::FeedbackKind::parse(req.feedback.as_str())
-        .ok_or_else(|| AiApiError::BadRequest(format!("invalid feedback value: {}", req.feedback)))?;
+    let feedback =
+        crate::ai_engine::FeedbackKind::parse(req.feedback.as_str()).ok_or_else(|| {
+            AiApiError::BadRequest(format!("invalid feedback value: {}", req.feedback))
+        })?;
 
-    let event = state.ai_runtime.apply_feedback(&state, &id, feedback).await?;
+    let event = state
+        .ai_runtime
+        .apply_feedback(&state, &id, feedback)
+        .await?;
     match event {
         Some(evt) => Ok(Json(evt).into_response()),
         None => Err(AiApiError::NotFound),
@@ -126,8 +131,7 @@ pub async fn update_config(
     State(state): State<Arc<AppState>>,
     Json(config): Json<AiEngineConfig>,
 ) -> Result<impl IntoResponse, AiApiError> {
-    validate_ai_engine_config(&config)
-        .map_err(|e| AiApiError::BadRequest(e))?;
+    validate_ai_engine_config(&config).map_err(|e| AiApiError::BadRequest(e))?;
 
     state.config_store.save_ai_engine_config(config.clone())?;
     state.ai_runtime.update_model_config(&config).await?;

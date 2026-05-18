@@ -127,10 +127,7 @@ pub fn save_user(path: &Path, user: &User) -> Result<(), AuthError> {
     // Write to a temporary sibling file with restricted permissions, then
     // rename atomically so the admin credentials file is owner-read/write only.
     let tmp_path = {
-        let mut name = path
-            .file_name()
-            .unwrap_or_default()
-            .to_os_string();
+        let mut name = path.file_name().unwrap_or_default().to_os_string();
         name.push(".tmp");
         path.with_file_name(name)
     };

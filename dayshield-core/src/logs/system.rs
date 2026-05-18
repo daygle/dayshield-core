@@ -16,8 +16,8 @@ use tokio::{
 };
 use tracing::{info, warn};
 
-use crate::logs::LogEvent;
 use crate::logs::firewall::parse_nftables_message;
+use crate::logs::LogEvent;
 
 // ---------------------------------------------------------------------------
 // Public streaming function
@@ -32,12 +32,7 @@ pub async fn stream_system(tx: Sender<LogEvent>) {
         info!("system: starting journalctl system stream");
 
         let mut child = match Command::new("journalctl")
-            .args([
-                "--output=json",
-                "--follow",
-                "--lines=50",
-                "--priority=info",
-            ])
+            .args(["--output=json", "--follow", "--lines=50", "--priority=info"])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -106,9 +101,8 @@ pub(crate) fn parse_journald_system_line(line: &str) -> Option<LogEvent> {
         return None;
     }
 
-    let timestamp = parse_realtime_timestamp(
-        obj.get("__REALTIME_TIMESTAMP").and_then(|v| v.as_str()),
-    );
+    let timestamp =
+        parse_realtime_timestamp(obj.get("__REALTIME_TIMESTAMP").and_then(|v| v.as_str()));
 
     // Some firewall drops are emitted by the kernel logger (SYSLOG_IDENTIFIER=kernel)
     // while still carrying nftables key=value message format.

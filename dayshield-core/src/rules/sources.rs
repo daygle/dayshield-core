@@ -33,9 +33,7 @@ fn et_open_group_source(group_slug: &str) -> CuratedSource {
     CuratedSource {
         id: format!("et-open/{group_slug}"),
         display_name: format!("ET Open {display}"),
-        description: format!(
-            "Emerging Threats Open Suricata 6.x group: {group_slug}.rules"
-        ),
+        description: format!("Emerging Threats Open Suricata 6.x group: {group_slug}.rules"),
         url: format!("{ET_OPEN_SURICATA6_RULES_BASE}/{group_slug}.rules"),
         license: "BSD".to_string(),
         vendor: "Proofpoint / Emerging Threats".to_string(),
@@ -113,9 +111,7 @@ pub fn curated_sources() -> Vec<CuratedSource> {
         vendor: "Proofpoint / Emerging Threats".to_string(),
     }];
 
-    sources.extend(et_open_group_slugs
-        .into_iter()
-        .map(et_open_group_source));
+    sources.extend(et_open_group_slugs.into_iter().map(et_open_group_source));
 
     sources
 }

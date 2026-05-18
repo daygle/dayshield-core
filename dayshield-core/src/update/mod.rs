@@ -491,8 +491,14 @@ pub struct ArtifactMetadata {
     pub version: String,
     pub download_url: String,
     pub checksum_sha256: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_release_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -511,12 +517,39 @@ struct GitHubRelease {
     pub tag_name: String,
     pub assets: Vec<GitHubAsset>,
     pub created_at: String,
+    #[serde(default)]
+    pub html_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GitHubAsset {
     pub name: String,
     pub browser_download_url: String,
+}
+
+fn is_github_repo_api_url(url: &str) -> bool {
+    url.contains("api.github.com") && url.contains("/repos/")
+}
+
+fn registry_manifest_url(registry_url: &str) -> String {
+    let trimmed = registry_url.trim_end_matches('/');
+    if trimmed.ends_with(".json") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/manifest.json")
+    }
+}
+
+fn github_contents_manifest_url(github_api_url: &str) -> String {
+    format!("{}/contents/manifest.json", github_api_url.trim_end_matches('/'))
+}
+
+fn github_repo_slug(github_api_url: &str) -> Option<String> {
+    let rest = github_api_url.split("/repos/").nth(1)?;
+    let mut parts = rest.trim_matches('/').split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    Some(format!("{owner}/{repo}"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1535,21 +1568,27 @@ async fn download_artifact(
 /// Query artifact registry for latest versions
 async fn query_registry(registry_url: &str) -> Result<RegistryManifest> {
     let client = reqwest::Client::new();
-    
-    // If registry_url is GitHub API, fetch latest release
-    if registry_url.contains("api.github.com") && registry_url.contains("repos") {
-        return query_github_releases(registry_url, &client).await;
-    }
-    
-    // Fallback: assume traditional manifest.json endpoint
-    let manifest_url = if registry_url.ends_with('/') {
-        format!("{}manifest.json", registry_url)
-    } else {
-        format!("{}/manifest.json", registry_url)
-    };
 
+    if is_github_repo_api_url(registry_url) {
+        match query_github_repo_manifest(registry_url, &client).await {
+            Ok(manifest) => return Ok(manifest),
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    "updates: failed to fetch GitHub manifest.json; falling back to releases/latest"
+                );
+                return query_github_releases(registry_url, &client).await;
+            }
+        }
+    }
+
+    let manifest_url = registry_manifest_url(registry_url);
+    query_registry_manifest_url(&client, &manifest_url).await
+}
+
+async fn query_registry_manifest_url(client: &reqwest::Client, manifest_url: &str) -> Result<RegistryManifest> {
     let response = client
-        .get(&manifest_url)
+        .get(manifest_url)
         .send()
         .await
         .with_context(|| format!("failed to query registry manifest at {}", manifest_url))?;
@@ -1562,15 +1601,68 @@ async fn query_registry(registry_url: &str) -> Result<RegistryManifest> {
         );
     }
 
-    let manifest: RegistryManifest = response
+    response
         .json()
         .await
-        .with_context(|| format!("failed to parse registry manifest from {}", manifest_url))?;
-
-    Ok(manifest)
+        .with_context(|| format!("failed to parse registry manifest from {}", manifest_url))
 }
 
-/// Query GitHub Releases API for latest release artifacts
+async fn query_github_repo_manifest(
+    github_api_url: &str,
+    client: &reqwest::Client,
+) -> Result<RegistryManifest> {
+    let manifest_url = github_contents_manifest_url(github_api_url);
+    let mut request = client
+        .get(&manifest_url)
+        .header(
+            ACCEPT,
+            HeaderValue::from_static("application/vnd.github.raw+json"),
+        )
+        .header(USER_AGENT, HeaderValue::from_static("dayshield-core/1.0"))
+        .header(
+            HeaderName::from_static("x-github-api-version"),
+            HeaderValue::from_static("2022-11-28"),
+        );
+
+    if let Ok(token) = env::var("DAYSHIELD_GITHUB_TOKEN")
+        .or_else(|_| env::var("GITHUB_TOKEN"))
+        .or_else(|_| env::var("GH_TOKEN"))
+    {
+        let token = token.trim();
+        if !token.is_empty() {
+            let value = HeaderValue::from_str(&format!("Bearer {}", token))
+                .context("invalid GitHub token value")?;
+            request = request.header(AUTHORIZATION, value);
+        }
+    }
+
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("failed to query GitHub manifest at {}", manifest_url))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "GitHub manifest query failed: HTTP {} from {}{}",
+            status,
+            manifest_url,
+            if body.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", body.trim())
+            }
+        );
+    }
+
+    response
+        .json()
+        .await
+        .with_context(|| format!("failed to parse GitHub manifest from {}", manifest_url))
+}
+
+/// Query GitHub Releases API for latest release artifacts (legacy fallback).
 async fn query_github_releases(
     github_api_url: &str,
     client: &reqwest::Client,
@@ -1625,6 +1717,7 @@ async fn query_github_releases(
     // Parse assets into ArtifactMetadata
     let mut components = Vec::new();
     let component_names = ["core", "ui", "rootfs"];
+    let source_repo = github_repo_slug(github_api_url);
 
     for comp_name in &component_names {
         // Find asset matching pattern: {component}-v*.tar.zst
@@ -1645,6 +1738,9 @@ async fn query_github_releases(
                 download_url: asset.browser_download_url.clone(),
                 checksum_sha256: String::new(), // Will be populated from checksums.txt if available
                 signature_url: None,
+                source_repo: source_repo.clone(),
+                source_tag: Some(release.tag_name.clone()),
+                source_release_url: release.html_url.clone(),
             });
 
             info!(
@@ -2346,21 +2442,24 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
                     update_available
                 };
 
-                if matches!(comp, RepoComponent::Rootfs) && update_available {
-                    let slot_status = rootfs_slot_status(&settings, &state_file);
-                    if slot_status.as_ref().map(|s| s.supported).unwrap_or(false) {
-                        state_file.pending_appliance_rebuild = false;
-                        state_file.appliance_rebuild_reason = None;
+                if matches!(comp, RepoComponent::Rootfs) {
+                    if update_available {
+                        let slot_status = rootfs_slot_status(&settings, &state_file);
+                        if slot_status.as_ref().map(|s| s.supported).unwrap_or(false) {
+                            clear_appliance_rebuild_required(&mut state_file);
+                        } else {
+                            let reason = slot_status
+                                .and_then(|s| s.reason)
+                                .unwrap_or_else(|| "A/B rootfs slot layout is not available".to_string());
+                            state_file.pending_appliance_rebuild = true;
+                            state_file.appliance_rebuild_reason = Some(format!(
+                                "Root filesystem image v{} is available, but in-place rootfs updates require an A/B root layout with shared /boot: {}.",
+                                artifact.version, reason
+                            ));
+                            state_file.appliance_rebuild_marked_at = None;
+                        }
                     } else {
-                        let reason = slot_status
-                            .and_then(|s| s.reason)
-                            .unwrap_or_else(|| "A/B rootfs slot layout is not available".to_string());
-                        state_file.pending_appliance_rebuild = true;
-                        state_file.appliance_rebuild_reason = Some(format!(
-                            "Root filesystem image v{} is available, but in-place rootfs updates require an A/B root layout with shared /boot: {}.",
-                            artifact.version, reason
-                        ));
-                        state_file.appliance_rebuild_marked_at = None;
+                        clear_appliance_rebuild_required(&mut state_file);
                     }
                 }
 
@@ -2380,10 +2479,15 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
                 let comp_state = ensure_component_state(&mut state_file, component);
                 comp_state.remote_version = None;
                 comp_state.update_available = false;
-                comp_state.last_error = Some(format!(
-                    "component '{}' missing from registry manifest",
-                    component.as_str()
-                ));
+                comp_state.last_error = None;
+                info!(
+                    component = component.as_str(),
+                    "updates: component not listed in registry manifest"
+                );
+            }
+
+            if !seen_components.contains(RepoComponent::Rootfs.as_str()) {
+                clear_appliance_rebuild_required(&mut state_file);
             }
             
             save_state(state, &state_file)?;
@@ -2450,7 +2554,39 @@ async fn apply_updates_registry(
                 format!("Downloaded and verified {}-{}", &artifact.component, &artifact.version),
                 Some(&artifact.component),
             );
+        } else {
+            append_operation_log(
+                &mut state_file,
+                "apply",
+                "info",
+                format!(
+                    "No registry artifact entry for '{}' in current manifest; skipping",
+                    comp.as_str()
+                ),
+                Some(comp.as_str()),
+            );
         }
+    }
+
+    if downloads.is_empty() {
+        let selected = components_to_update
+            .iter()
+            .map(|c| c.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let message =
+            format!("no matching artifacts were published for selected components: {selected}");
+        details.push(message.clone());
+        append_operation_log(&mut state_file, "apply", "info", &message, None);
+        save_state(state, &state_file)?;
+        let _ = fs::remove_dir_all(&transaction_staging);
+        return Ok(UpdatesActionResult {
+            operation: "apply".to_string(),
+            success: true,
+            message,
+            details,
+            status: get_status(state).await,
+        });
     }
 
     let config_snapshot = match snapshot_config_for_rollback(state, settings.encrypt_update_config_backups) {
@@ -3504,4 +3640,83 @@ pub async fn start_update_checker(state: std::sync::Arc<AppState>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{github_repo_slug, registry_manifest_url, ArtifactMetadata, RegistryManifest};
+
+    #[test]
+    fn registry_manifest_url_appends_manifest_filename() {
+        assert_eq!(
+            registry_manifest_url("https://updates.example.com"),
+            "https://updates.example.com/manifest.json"
+        );
+        assert_eq!(
+            registry_manifest_url("https://updates.example.com/"),
+            "https://updates.example.com/manifest.json"
+        );
+        assert_eq!(
+            registry_manifest_url("https://updates.example.com/manifest.json"),
+            "https://updates.example.com/manifest.json"
+        );
+    }
+
+    #[test]
+    fn github_repo_slug_extracts_owner_and_repo() {
+        assert_eq!(
+            github_repo_slug("https://api.github.com/repos/daygle/dayshield-core"),
+            Some("daygle/dayshield-core".to_string())
+        );
+        assert_eq!(github_repo_slug("https://example.com"), None);
+    }
+
+    #[test]
+    fn manifest_supports_independent_component_metadata() {
+        let manifest = RegistryManifest {
+            generated_at: "2026-05-18T00:00:00Z".to_string(),
+            components: vec![ArtifactMetadata {
+                component: "rootfs".to_string(),
+                version: "2026.05.10".to_string(),
+                download_url: "https://example.invalid/rootfs.tar.zst".to_string(),
+                checksum_sha256: "abc123".to_string(),
+                signature_url: Some("https://example.invalid/rootfs.sig".to_string()),
+                source_repo: Some("daygle/dayshield-rootfs".to_string()),
+                source_tag: Some("v2026.05.10".to_string()),
+                source_release_url: Some(
+                    "https://github.com/daygle/dayshield-rootfs/releases/tag/v2026.05.10"
+                        .to_string(),
+                ),
+            }],
+        };
+
+        let json = serde_json::to_string(&manifest).expect("serialize manifest");
+        let parsed: RegistryManifest = serde_json::from_str(&json).expect("deserialize manifest");
+        let comp = parsed.components.first().expect("component entry");
+        assert_eq!(comp.source_repo.as_deref(), Some("daygle/dayshield-rootfs"));
+        assert_eq!(comp.source_tag.as_deref(), Some("v2026.05.10"));
+        assert_eq!(
+            comp.source_release_url.as_deref(),
+            Some("https://github.com/daygle/dayshield-rootfs/releases/tag/v2026.05.10")
+        );
+    }
+
+    #[test]
+    fn manifest_metadata_fields_are_backward_compatible() {
+        let legacy = r#"{
+            "generatedAt": "2026-05-18T00:00:00Z",
+            "components": [{
+                "component": "core",
+                "version": "1.0.0",
+                "downloadUrl": "https://example.invalid/core.tar.zst",
+                "checksumSha256": "def456"
+            }]
+        }"#;
+
+        let parsed: RegistryManifest = serde_json::from_str(legacy).expect("parse legacy manifest");
+        let comp = parsed.components.first().expect("component entry");
+        assert!(comp.source_repo.is_none());
+        assert!(comp.source_tag.is_none());
+        assert!(comp.source_release_url.is_none());
+    }
 }

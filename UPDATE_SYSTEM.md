@@ -1,77 +1,142 @@
-# DayShield Update System - GitHub Releases Architecture
+# DayShield Update System - Manifest-Driven Registry Architecture
 
 ## Overview
 
-The redesigned update system eliminates the need for build tools (cargo, npm) on the production appliance. All components are prebuilt and hosted on GitHub Releases, which the appliance downloads and applies atomically.
+DayShield updates are manifest-first. The updater consumes a central `manifest.json` that tracks the latest published artifact for each component (`core`, `ui`, `rootfs`) independently.
+
+This supports **Option B**:
+- independent repos/tags/versions for `dayshield-core`, `dayshield-ui`, and `dayshield-rootfs`
+- component-by-component update discovery
+- runtime (`core`/`ui`) atomic apply
+- rootfs A/B staging as a separate transaction
 
 ## Architecture
 
-### Components
+1. **Component build/publish pipelines**
+   - `dayshield-core`, `dayshield-ui`, `dayshield-rootfs` can publish independently
+   - each component artifact has its own version/tag cadence
 
-1. **CI/Build Pipeline** (GitHub Actions)
-   - Builds core binary via `cargo build --release`
-   - Builds UI dist via `npm run build`
-   - Builds rootfs image via shell scripts
-   - Creates `.tar.zst` artifacts for each component
-   - Generates SHA256 checksums
-   - Uploads to GitHub Releases
+2. **Central manifest registry**
+   - updater reads `manifest.json` as the primary source of truth
+   - each component entry includes:
+     - `component`
+     - `version`
+     - `downloadUrl`
+     - `checksumSha256`
+     - optional `signatureUrl`
+     - optional source metadata (`sourceRepo`, `sourceTag`, `sourceReleaseUrl`)
+   - top-level field: `generatedAt`
 
-2. **Artifact Storage** (GitHub Releases)
-   - Registry: `https://api.github.com/repos/daygle/dayshield-core` (or use any repo)
-   - Release format: `v1.2.3` semantic versioning
-   - Assets: `core-v1.2.3.tar.zst`, `ui-v1.2.3.tar.zst`, `rootfs-v1.2.3.tar.zst`, `checksums.txt`
+3. **Appliance update engine (`dayshield-core`)**
+   - default mode: `registry`
+   - checks central manifest first
+   - GitHub release parsing is retained as a backward-compatible fallback path
+   - missing component entries are treated as "not published", not hard errors
+   - runtime updates (`core`/`ui`) stay atomic
+   - rootfs updates stay separate and staged into inactive A/B slot
 
-3. **Appliance Update Engine** (dayshield-core)
-   - Default mode: `registry` (automatic)
-   - Default registry: GitHub Releases API
-   - Fetches latest release via `GET /repos/{owner}/{repo}/releases/latest`
-   - Downloads artifacts to `/var/lib/dayshield/update-staging/{transaction-id}/`
-   - Verifies SHA256 checksums
-   - Applies runtime artifacts atomically (core/UI all or nothing)
-   - Stages rootfs artifacts into the inactive A/B slot when the appliance layout supports it
-   - Verifies services health
-   - Records runtime versions, rootfs slot state, and confirmed rootfs image baselines
+## Example manifest
 
-## Setup
-
-### 1. Create Release Repository
-
-Option A: Use existing `dayshield-core` repository
-```bash
-# In dayshield-core repo
-git tag v1.0.0
-git push origin v1.0.0
-# GitHub Actions workflow triggers automatically
+```json
+{
+  "generatedAt": "2026-05-18T11:00:00Z",
+  "components": [
+    {
+      "component": "core",
+      "version": "1.4.2",
+      "downloadUrl": "https://github.com/daygle/dayshield-core/releases/download/v1.4.2/core-v1.4.2.tar.zst",
+      "checksumSha256": "...",
+      "signatureUrl": "https://github.com/daygle/dayshield-core/releases/download/v1.4.2/core-v1.4.2.tar.zst.sig",
+      "sourceRepo": "daygle/dayshield-core",
+      "sourceTag": "v1.4.2",
+      "sourceReleaseUrl": "https://github.com/daygle/dayshield-core/releases/tag/v1.4.2"
+    },
+    {
+      "component": "ui",
+      "version": "2.1.0",
+      "downloadUrl": "https://github.com/daygle/dayshield-ui/releases/download/v2.1.0/ui-v2.1.0.tar.zst",
+      "checksumSha256": "...",
+      "sourceRepo": "daygle/dayshield-ui",
+      "sourceTag": "v2.1.0"
+    },
+    {
+      "component": "rootfs",
+      "version": "2026.05.10",
+      "downloadUrl": "https://github.com/daygle/dayshield-rootfs/releases/download/v2026.05.10/rootfs-v2026.05.10.tar.zst",
+      "checksumSha256": "...",
+      "sourceRepo": "daygle/dayshield-rootfs",
+      "sourceTag": "v2026.05.10"
+    }
+  ]
+}
 ```
 
-Option B: Create dedicated release repository
-```bash
-git clone https://github.com/<org>/<release-repo>.git
-cd <release-repo>
-# No code needed, only workflows and releases
-```
+## Appliance update flow
 
-### 2. Configure GitHub Actions Workflow
+### Check for updates
 
-The `.github/workflows/release-artifacts.yml` workflow:
-- Triggers on tag push (`git tag v1.2.3 && git push origin v1.2.3`)
-- Builds all three components in parallel (or sequence)
-- Generates checksums
-- Creates GitHub Release with all artifacts attached
-- Automatically accessible via GitHub Releases API
+1. User triggers check (`/system/updates/check`)
+2. Updater fetches manifest and compares local vs remote version per component
+3. `core`, `ui`, and `rootfs` availability is evaluated independently
+4. Components omitted from manifest are simply treated as unavailable
 
-### 3. Configure Appliance
+### Apply runtime updates (atomic)
 
-Default configuration automatically uses GitHub Releases. Update settings:
+- runtime apply target is `both` (`core` + `ui`)
+- if runtime artifacts are selected and present, they are downloaded/verified/applied atomically
+- post-apply service health checks still gate success
+- rollback behavior remains unchanged
+
+### Apply rootfs updates (A/B staged)
+
+- rootfs update is always separate from runtime apply
+- updater stages rootfs artifact into inactive slot
+- schedules one-shot boot to trial slot
+- confirms or rolls back based on health
+
+Single-root appliances still show rebuild required for rootfs updates.
+
+## Configuration
+
+Use registry mode with a manifest URL (or a GitHub API repo URL that hosts `manifest.json` at repo root):
 
 ```json
 {
   "updateMode": "registry",
-  "registryUrl": "https://api.github.com/repos/daygle/dayshield-core"
+  "registryUrl": "https://updates.example.com/manifest.json"
 }
 ```
 
-Alternative: Use git-based updates (legacy fallback)
+Git-based mode remains available as fallback.
+
+## Release checklist (Option B)
+
+- [ ] Publish updated artifact(s) from the component repo(s)
+- [ ] Generate SHA256 checksums
+- [ ] Update central `manifest.json` with latest per-component entries
+- [ ] Verify `generatedAt` and component metadata
+- [ ] Verify appliance check/apply behavior
+
+## Troubleshooting
+
+### No updates shown
+
+Validate manifest contents and URLs:
+
+```bash
+curl -s https://updates.example.com/manifest.json | jq
+```
+
+### Checksum mismatch
+
+- recompute artifact SHA256
+- update `checksumSha256` in manifest
+- republish manifest atomically
+
+### Registry unavailable
+
+Switch to git-based updates temporarily:
+
 ```json
 {
   "updateMode": "git",
@@ -80,204 +145,3 @@ Alternative: Use git-based updates (legacy fallback)
   "rootfsRepoUrl": "https://github.com/daygle/dayshield-rootfs"
 }
 ```
-
-## Release Process
-
-### Manual Release (one-time)
-
-```bash
-# In any of the dayshield-* repos
-git tag v1.2.3
-git push origin v1.2.3
-
-# GitHub Actions automatically:
-# 1. Checks out dayshield-core, dayshield-ui, dayshield-rootfs
-# 2. Builds core: cargo build --release
-# 3. Builds ui: npm ci && npm run build
-# 4. Builds rootfs: shell scripts
-# 5. Creates artifacts: core-v1.2.3.tar.zst, etc.
-# 6. Generates checksums.txt
-# 7. Creates GitHub Release with all assets
-# 8. Appliance discovers via GitHub Releases API
-```
-
-### Automated Release (recommended)
-
-Create a scheduled workflow or integrate with your CI/CD:
-
-```bash
-#!/bin/bash
-# scripts/release.sh
-
-VERSION=$(date +%Y.%m.%d)
-git tag "v${VERSION}"
-git push origin "v${VERSION}"
-echo "Released v${VERSION}"
-```
-
-## Appliance Update Flow
-
-### Check for Updates
-
-1. User clicks "Check for Updates" in web console
-2. Appliance queries: `GET https://api.github.com/repos/daygle/dayshield-core/releases/latest`
-3. Parses response to find:
-   - `core-v*.tar.zst`
-   - `ui-v*.tar.zst`
-   - `rootfs-v*.tar.zst`
-   - `checksums.txt`
-4. Displays runtime updates for core/UI and rootfs A/B slot readiness
-
-### Apply Runtime Updates (Atomic Transaction)
-
-```
-User clicks "Apply Runtime Updates"
-    |
-Create transaction ID: /var/lib/dayshield/update-staging/{transaction-id}/
-    |
-Download phase:
-  - GET {release_url}/core-v1.2.4.tar.zst
-  - GET {release_url}/ui-v1.2.4.tar.zst
-  - GET {release_url}/checksums.txt
-    |
-Verify phase:
-  - SHA256 each artifact against checksums.txt
-  - If any fails -> abort (no changes)
-    |
-Backup phase:
-  - Snapshot current /usr/local/sbin/dayshield-core
-  - Snapshot current /usr/local/share/dayshield-ui/
-    |
-Deploy phase:
-  - Extract core-v1.2.4.tar.zst -> deploy to /usr/local/sbin/dayshield-core
-  - Extract ui-v1.2.4.tar.zst -> deploy to /usr/local/share/dayshield-ui/
-    |
-Health check phase:
-  - Verify systemctl is-active dayshield.service
-  - Verify systemctl is-active nftables.service
-  - Verify systemctl is-active unbound.service
-  - If any unhealthy -> rollback from backups
-    |
-Finalize:
-  - Mark transaction complete
-  - Update state: current_version = 1.2.4
-  - Cleanup staging dir
-```
-
-### Apply Rootfs Updates (A/B Slot Transaction)
-
-New installs use an A/B root layout:
-
-- `DAYSHIELD_BOOT` mounted at `/boot`
-- `DAYSHIELD_ROOT_A` mounted as the active `/`
-- `DAYSHIELD_ROOT_B` kept as the inactive root slot
-
-When `rootfs-vX.Y.Z.tar.zst` is available, the updater:
-
-1. Downloads and verifies the rootfs artifact.
-2. Formats the inactive root slot with its stable slot label.
-3. Extracts the rootfs artifact into the inactive slot.
-4. Copies persistent appliance state into the inactive slot (`/etc/dayshield`, `/var/lib/dayshield`, WireGuard, Cloudflared, host identity, SSH host keys, and network state).
-5. Writes the inactive slot fstab for `/`, `/boot`, and `/boot/efi`.
-6. Copies the inactive slot kernel/initrd into `/boot/dayshield/slot-{a,b}/`.
-7. Regenerates GRUB entries `dayshield-a` and `dayshield-b`.
-8. Runs `grub-reboot` for a one-shot trial boot into the new slot.
-9. On the next boot, DayShield waits for critical service health, then runs `grub-set-default` to confirm the slot.
-10. If health confirmation fails while DayShield is running, it schedules the previous slot and reboots. The rootfs image also includes a small systemd watchdog that reboots to the previous slot if confirmation never happens.
-
-Single-root appliances cannot use in-place rootfs updates. They will continue to show a rebuild/reinstall requirement until migrated to the A/B partition layout.
-
-## Release Checklist
-
-- [ ] Update version in `Cargo.toml` (core)
-- [ ] Update version in `package.json` (ui)
-- [ ] Update version in rootfs build config
-- [ ] Commit changes to all repos
-- [ ] Tag with `v{VERSION}`
-- [ ] Push tag: `git push origin v{VERSION}`
-- [ ] Wait for GitHub Actions to complete
-- [ ] Verify release assets on GitHub
-- [ ] Verify checksums are present
-- [ ] Announce release to users
-
-## Troubleshooting
-
-### Release Build Failed
-
-Check GitHub Actions logs:
-```
-GitHub > Actions > release-artifacts > View run
-```
-
-Common issues:
-- Node.js version mismatch (use 18+)
-- Missing apt packages (cargo, node)
-- Insufficient disk space
-
-### Appliance Update Failed
-
-Check appliance logs:
-```bash
-root@dayshield:~# journalctl -u dayshield.service -n 50
-# Look for error in update transaction
-```
-
-Common issues:
-- Network unreachable (can't reach GitHub)
-- Checksum mismatch (corrupted download)
-- Disk full (no space to extract artifacts)
-- Service health check failed (rollback triggered)
-
-### Rollback After Failed Update
-
-Automatic: If any service health check fails, automatically rolls back from backups.
-
-Manual: If appliance is in bad state:
-```bash
-root@dayshield:~# systemctl restart dayshield.service
-# Check if service recovers
-
-# Or apply via git (fallback):
-export DAYSHIELD_UPDATE_MODE=git
-systemctl restart dayshield.service
-```
-
-## Fallback to Git-Based Updates
-
-If GitHub is unavailable:
-```json
-{
-  "updateMode": "git",
-  "coreRepoUrl": "https://github.com/daygle/dayshield-core",
-  "uiRepoUrl": "https://github.com/daygle/dayshield-ui"
-}
-```
-
-Appliance will use existing git repos in `/opt/dayshield-*/` instead of downloading prebuilt artifacts.
-
-## API Endpoints
-
-- `GET /system/updates/status` - Get current versions + available updates
-- `GET /system/updates/settings` - View update configuration
-- `PUT /system/updates/settings` - Change registry URL / update mode
-- `POST /system/updates/check` - Force check against registry
-- `POST /system/updates/apply` - Download and apply runtime updates atomically
-- `POST /system/updates/rollback` - Revert to previous versions (if available)
-
-## Security Considerations
-
-- SHA256 checksums verify artifact integrity
-- GitHub HTTPS ensures transport security
-- Atomic transactions prevent partial/corrupted updates
-- Service health checks catch broken deployments
-- Automatic rollback protects against bad updates
-- No build tools = reduced attack surface on appliance
-
-## Future Enhancements
-
-1. **GPG Signatures** - Sign artifacts with release key
-2. **Update Scheduling** - Schedule updates during maintenance windows
-3. **A/B Rootfs Updates** - Add inactive-root deployment with boot-health rollback
-4. **Staged Rollout** - Deploy to subset of appliances first
-5. **Differential Updates** - Only download changed components
-6. **Version Pinning** - Lock to specific version instead of latest

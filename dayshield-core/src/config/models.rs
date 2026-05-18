@@ -204,6 +204,12 @@ pub struct Interface {
     /// after configuring the interface addresses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<String>,
+    /// Block RFC1918/unique-local source networks on this WAN interface.
+    #[serde(default)]
+    pub block_private_networks: bool,
+    /// Block invalid/reserved source networks on this WAN interface.
+    #[serde(default)]
+    pub block_bogon_networks: bool,
 }
 
 impl Interface {

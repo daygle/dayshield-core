@@ -9,7 +9,11 @@
 //! | [`apply_rules`]       | Write ruleset to a temp file and run `nft -f`.      |
 //! | [`flush_rules`]       | Flush the entire nftables ruleset.                  |
 
-use std::{collections::HashMap, net::IpAddr};
+use std::{
+    collections::{hash_map::DefaultHasher, HashMap},
+    hash::{Hash, Hasher},
+    net::IpAddr,
+};
 
 use chrono::{Datelike, Local, NaiveDate, NaiveTime, Timelike};
 use serde::Serialize;
@@ -20,11 +24,25 @@ use uuid::Uuid;
 use crate::config::models::{
     Action, AddressFamily, AliasType, FirewallAddressFamily, FirewallAlias, FirewallChainPolicy,
     CaptivePortalConfig, CaptivePortalSession, FirewallDirection, FirewallRule, FirewallSchedule,
-    FirewallSettings, LogPosition, NatConfig, NatProtocol, NatRuleType, OutboundMode, Protocol,
+    FirewallSettings, FirewallStateLimits, Interface, LogPosition, NatConfig, NatProtocol,
+    NatRuleType, OutboundMode, Protocol,
 };
 
 const DEFAULT_BLOCK_LOG_RATE_PER_SECOND: u32 = 10;
 const DEFAULT_BLOCK_LOG_BURST_PACKETS: u32 = 20;
+const PRIVATE_IPV4_NETWORKS: &[&str] = &["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"];
+const PRIVATE_IPV6_NETWORKS: &[&str] = &["fc00::/7"];
+const BOGON_IPV4_NETWORKS: &[&str] = &[
+    "0.0.0.0/8",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "192.0.2.0/24",
+    "198.51.100.0/24",
+    "203.0.113.0/24",
+    "224.0.0.0/4",
+    "240.0.0.0/4",
+];
+const BOGON_IPV6_NETWORKS: &[&str] = &["::/128", "::1/128", "::ffff:0:0/96", "2001:db8::/32"];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FilterChain {
@@ -140,7 +158,7 @@ pub fn generate_ruleset_with_ipv6(
     resolved_url_tables: &HashMap<String, Vec<String>>,
     ipv6_enabled: bool,
 ) -> String {
-    generate_ruleset_with_captive(
+    generate_ruleset_with_captive_and_interfaces(
         rules,
         nat_config,
         aliases,
@@ -149,7 +167,131 @@ pub fn generate_ruleset_with_ipv6(
         ipv6_enabled,
         None,
         &[],
+        &[],
     )
+}
+
+pub fn system_firewall_rules(interfaces: &[Interface], ipv6_enabled: bool) -> Vec<FirewallRule> {
+    let mut rules = Vec::new();
+
+    for iface in interfaces.iter().filter(|iface| iface.enabled && is_wan_interface(iface)) {
+        if iface.block_private_networks {
+            for cidr in PRIVATE_IPV4_NETWORKS {
+                rules.extend(system_block_rules(
+                    iface,
+                    "private",
+                    cidr,
+                    "Block private networks",
+                ));
+            }
+            if ipv6_enabled {
+                for cidr in PRIVATE_IPV6_NETWORKS {
+                    rules.extend(system_block_rules(
+                        iface,
+                        "private",
+                        cidr,
+                        "Block private networks",
+                    ));
+                }
+            }
+        }
+
+        if iface.block_bogon_networks {
+            for cidr in BOGON_IPV4_NETWORKS {
+                rules.extend(system_block_rules(
+                    iface,
+                    "bogon",
+                    cidr,
+                    "Block bogon networks",
+                ));
+            }
+            if ipv6_enabled {
+                for cidr in BOGON_IPV6_NETWORKS {
+                    rules.extend(system_block_rules(
+                        iface,
+                        "bogon",
+                        cidr,
+                        "Block bogon networks",
+                    ));
+                }
+            }
+        }
+    }
+
+    rules
+}
+
+fn is_wan_interface(iface: &Interface) -> bool {
+    iface.wan_mode.is_some() || iface.gateway.is_some()
+}
+
+fn system_block_rules(
+    iface: &Interface,
+    rule_kind: &str,
+    cidr: &str,
+    description: &str,
+) -> Vec<FirewallRule> {
+    vec![
+        system_block_rule(
+            iface,
+            rule_kind,
+            cidr,
+            description,
+            FirewallDirection::Input,
+        ),
+        system_block_rule(
+            iface,
+            rule_kind,
+            cidr,
+            description,
+            FirewallDirection::Forward,
+        ),
+    ]
+}
+
+fn system_block_rule(
+    iface: &Interface,
+    rule_kind: &str,
+    cidr: &str,
+    description: &str,
+    direction: FirewallDirection,
+) -> FirewallRule {
+    FirewallRule {
+        id: stable_system_rule_id(&iface.name, rule_kind, cidr, &direction),
+        description: Some(format!("{description} on {}", iface.name)),
+        priority: -200,
+        source: Some(cidr.to_string()),
+        destination: None,
+        protocol: None,
+        source_port: None,
+        destination_port: None,
+        ip_family: if cidr.contains(':') {
+            FirewallAddressFamily::Ipv6
+        } else {
+            FirewallAddressFamily::Ipv4
+        },
+        action: Action::Drop,
+        direction,
+        interface: Some(iface.name.clone()),
+        log: false,
+        enabled: true,
+        schedule: None,
+        state_limits: FirewallStateLimits::default(),
+    }
+}
+
+fn stable_system_rule_id(iface: &str, rule_kind: &str, cidr: &str, direction: &FirewallDirection) -> Uuid {
+    let key = format!("system:{iface}:{rule_kind}:{cidr}:{direction:?}");
+    let mut first = DefaultHasher::new();
+    key.hash(&mut first);
+    let mut second = DefaultHasher::new();
+    "dayshield".hash(&mut second);
+    key.hash(&mut second);
+
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&first.finish().to_be_bytes());
+    bytes[8..].copy_from_slice(&second.finish().to_be_bytes());
+    Uuid::from_bytes(bytes)
 }
 
 /// Generate a complete nftables ruleset with optional captive portal gates.
@@ -163,10 +305,36 @@ pub fn generate_ruleset_with_captive(
     captive_portal: Option<&CaptivePortalConfig>,
     captive_sessions: &[CaptivePortalSession],
 ) -> String {
+    generate_ruleset_with_captive_and_interfaces(
+        rules,
+        nat_config,
+        aliases,
+        firewall_settings,
+        resolved_url_tables,
+        ipv6_enabled,
+        captive_portal,
+        captive_sessions,
+        &[],
+    )
+}
+
+pub fn generate_ruleset_with_captive_and_interfaces(
+    rules: &[FirewallRule],
+    nat_config: Option<&NatConfig>,
+    aliases: &[FirewallAlias],
+    firewall_settings: Option<&FirewallSettings>,
+    resolved_url_tables: &HashMap<String, Vec<String>>,
+    ipv6_enabled: bool,
+    captive_portal: Option<&CaptivePortalConfig>,
+    captive_sessions: &[CaptivePortalSession],
+    interfaces: &[Interface],
+) -> String {
     let settings = firewall_settings.cloned().unwrap_or_default();
+    let system_rules = system_firewall_rules(interfaces, ipv6_enabled);
     // Only emit rules that are enabled and whose schedule (if any) is currently active.
-    let mut sorted: Vec<&FirewallRule> = rules
+    let mut sorted: Vec<&FirewallRule> = system_rules
         .iter()
+        .chain(rules.iter())
         .filter(|r| {
             r.enabled
                 && is_schedule_active(r.schedule.as_ref())
@@ -447,6 +615,7 @@ pub async fn apply_rules(
         ipv6_enabled,
         None,
         &[],
+        &[],
     )
     .await
 }
@@ -460,11 +629,12 @@ pub async fn apply_rules_with_captive(
     ipv6_enabled: bool,
     captive_portal: Option<&CaptivePortalConfig>,
     captive_sessions: &[CaptivePortalSession],
+    interfaces: &[Interface],
 ) -> Result<(), NftError> {
     // Resolve URL-table aliases (fetch + cache).
     let resolved_url_tables = resolve_url_tables(aliases).await;
 
-    let ruleset = generate_ruleset_with_captive(
+    let ruleset = generate_ruleset_with_captive_and_interfaces(
         rules,
         nat_config,
         aliases,
@@ -473,6 +643,7 @@ pub async fn apply_rules_with_captive(
         ipv6_enabled,
         captive_portal,
         captive_sessions,
+        interfaces,
     );
 
     // Unique temp file name based on milliseconds since UNIX epoch.

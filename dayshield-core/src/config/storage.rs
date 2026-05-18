@@ -426,6 +426,13 @@ impl ConfigStore {
                     anyhow::bail!("{msg}");
                 }
             }
+            let is_wan = iface.wan_mode.is_some() || iface.gateway.is_some();
+            if !is_wan && (iface.block_private_networks || iface.block_bogon_networks) {
+                anyhow::bail!(
+                    "Interface {:?} private/bogon network blocking can only be enabled on WAN-designated interfaces",
+                    iface.name
+                );
+            }
             if let Some(mtu) = iface.mtu {
                 if !is_valid_mtu(mtu) {
                     anyhow::bail!(

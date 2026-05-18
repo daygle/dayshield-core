@@ -665,6 +665,7 @@ pub async fn apply_current_ruleset_nft(config_store: &ConfigStore) -> Result<(),
             .unwrap_or(false),
         cfg.captive_portal.as_ref(),
         &active_sessions,
+        &cfg.interfaces,
     )
     .await
 }

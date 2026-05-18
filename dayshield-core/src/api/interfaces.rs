@@ -186,6 +186,8 @@ pub struct InterfaceResponse {
     pub ipv6_address: Option<String>,
     pub ipv6_prefix: Option<u8>,
     pub gateway: Option<String>,
+    pub block_private_networks: bool,
+    pub block_bogon_networks: bool,
 }
 
 impl InterfaceResponse {
@@ -278,6 +280,8 @@ impl InterfaceResponse {
             ipv6_address,
             ipv6_prefix,
             gateway: iface.gateway.clone(),
+            block_private_networks: iface.block_private_networks,
+            block_bogon_networks: iface.block_bogon_networks,
         }
     }
 
@@ -351,6 +355,10 @@ pub struct InterfaceRequest {
     pub ipv6_address: Option<String>,
     pub ipv6_prefix: Option<u8>,
     pub gateway: Option<String>,
+    #[serde(default)]
+    pub block_private_networks: bool,
+    #[serde(default)]
+    pub block_bogon_networks: bool,
 }
 
 impl InterfaceRequest {
@@ -442,6 +450,8 @@ impl InterfaceRequest {
             pppoe_username: self.pppoe_username,
             pppoe_password: self.pppoe_password,
             gateway: self.gateway,
+            block_private_networks: self.block_private_networks,
+            block_bogon_networks: self.block_bogon_networks,
         }
     }
 }
@@ -629,6 +639,14 @@ pub async fn create_interface(
         if let Err(msg) = ensure_ipv6_allowed(gateway, ipv6_enabled, "interface gateway") {
             return Err(InterfaceError::ApplyFailed(msg));
         }
+    }
+
+    let is_wan_designated = iface.wan_mode.is_some() || iface.gateway.is_some();
+    if !is_wan_designated && (iface.block_private_networks || iface.block_bogon_networks) {
+        return Err(InterfaceError::ApplyFailed(
+            "private/bogon network blocking can only be enabled on WAN-designated interfaces"
+                .to_string(),
+        ));
     }
 
     // ia_pd_hint_len is only valid on WAN DHCPv6 interfaces.

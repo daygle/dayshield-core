@@ -850,6 +850,7 @@ impl AiRuntime {
                 .unwrap_or(false),
             config.captive_portal.as_ref(),
             &captive_sessions,
+            &config.interfaces,
         )
         .await
         .context("failed to apply AI-enforced temporary block rules")?;

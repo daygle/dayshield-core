@@ -54,8 +54,19 @@ pub async fn list_rules(
         .config_store
         .load_firewall_rules()
         .map_err(NftError::StorageError)?;
+    let cfg = state.config_store.load().map_err(NftError::StorageError)?;
+    let ipv6_enabled = cfg
+        .system_settings
+        .as_ref()
+        .map(|settings| settings.ipv6_enabled)
+        .unwrap_or(false);
+    let system_rules = crate::engine::nftables::system_firewall_rules(&cfg.interfaces, ipv6_enabled);
 
-    info!(count = rules.len(), "firewall: loaded rules from storage");
+    info!(
+        count = rules.len(),
+        system_count = system_rules.len(),
+        "firewall: loaded rules from storage"
+    );
 
     // Sync the in-memory cache.
     {
@@ -63,7 +74,25 @@ pub async fn list_rules(
         *fw = rules.clone();
     }
 
-    Ok(Json(rules))
+    let mut response = Vec::with_capacity(system_rules.len() + rules.len());
+    for rule in system_rules {
+        let mut value = serde_json::to_value(rule)
+            .map_err(|e| NftError::GenerateFailed(e.to_string()))?;
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("system".to_string(), serde_json::Value::Bool(true));
+        }
+        response.push(value);
+    }
+    for rule in rules {
+        let mut value = serde_json::to_value(rule)
+            .map_err(|e| NftError::GenerateFailed(e.to_string()))?;
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("system".to_string(), serde_json::Value::Bool(false));
+        }
+        response.push(value);
+    }
+
+    Ok(Json(response))
 }
 
 /// Handler: return current global firewall settings.

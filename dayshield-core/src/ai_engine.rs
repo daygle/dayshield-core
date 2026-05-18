@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     net::IpAddr,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -100,7 +100,7 @@ pub enum FeedbackKind {
 }
 
 impl FeedbackKind {
-    fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "false_positive" => Some(Self::FalsePositive),
             "confirmed_malicious" => Some(Self::ConfirmedMalicious),
@@ -379,6 +379,11 @@ impl AiRuntime {
         self.store.get_by_id(id)
     }
 
+    pub async fn update_model_config(&self, config: &AiEngineConfig) -> Result<()> {
+        let mut model = self.model.lock().await;
+        model.apply_config(config)
+    }
+
     pub async fn unblock_ip(&self, state: &Arc<AppState>, ip: IpAddr) -> Result<bool> {
         let removed = {
             let mut blocks = self.active_blocks.lock().await;
@@ -558,25 +563,6 @@ impl AiRuntime {
             None => return Ok(None),
         };
 
-        if let Some(label) = Some(feedback.label()) {
-            let history = self.gather_history_features(state, &event.src_ip, state.config_store.load_ai_engine_config()?.escalation_window_seconds).await?;
-            let features = AiModel::build_feature_vector(
-                event.signature.as_deref(),
-                event.alert_severity,
-                None,
-                &event.protocol,
-                &event.src_ip,
-                &event.dst_ip,
-                event.src_port,
-                event.dst_port,
-                event.action.as_deref(),
-                None,
-                &history,
-            ).0;
-            let mut model = self.model.lock().await;
-            model.train_on_feedback(&features, label)?;
-        }
-
         event.feedback = Some(feedback.as_str().to_string());
         event.feedback_at = Some(now_unix_secs());
         event.label = Some(feedback.label());
@@ -668,8 +654,7 @@ impl AiRuntime {
         let mut events = self.store.list_recent(2000)?;
         events.sort_by_key(|event| event.timestamp);
 
-        let mut model = self.model.lock().await;
-        model.reset_to_default_weights();
+        let mut samples = Vec::new();
 
         for event in events.iter().filter(|event| event.label.is_some()) {
             let label = event.label.unwrap();
@@ -687,8 +672,11 @@ impl AiRuntime {
                 None,
                 &history,
             ).0;
-            model.train_on_feedback(&features, label)?;
+            samples.push((features, label));
         }
+
+        let mut model = self.model.lock().await;
+        model.retrain_from_feedback(&samples)?;
 
         Ok(())
     }
@@ -991,10 +979,6 @@ impl ThreatEventStore {
         }
         Ok(count)
     }
-}
-
-pub fn default_ai_store_path(config_dir: &Path) -> PathBuf {
-    config_dir.join("ai_engine").join("threat_events.db")
 }
 
 #[cfg(test)]

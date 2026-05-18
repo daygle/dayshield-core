@@ -249,8 +249,19 @@ impl RulesetManager {
         let idx = rulesets.iter().position(|r| r.id == id)
             .with_context(|| format!("ruleset '{id}' is not installed"))?;
 
-        if rulesets[idx].local_path.is_none() {
+        let rules_path = rulesets[idx]
+            .local_path
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.store.rules_file(id));
+
+        if !rules_path.exists() {
             bail!("ruleset '{id}' has no local rules file; try installing it first");
+        }
+
+        let local_path = rules_path.to_string_lossy().into_owned();
+        if rulesets[idx].local_path.as_deref() != Some(local_path.as_str()) {
+            rulesets[idx].local_path = Some(local_path);
         }
 
         rulesets[idx].enabled = true;

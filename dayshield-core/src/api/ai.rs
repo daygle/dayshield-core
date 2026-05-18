@@ -103,11 +103,8 @@ pub async fn submit_feedback(
     Path(id): Path<String>,
     Json(req): Json<FeedbackRequest>,
 ) -> Result<impl IntoResponse, AiApiError> {
-    let feedback = match req.feedback.as_str() {
-        "false_positive" => crate::ai_engine::FeedbackKind::FalsePositive,
-        "confirmed_malicious" => crate::ai_engine::FeedbackKind::ConfirmedMalicious,
-        _ => return Err(AiApiError::BadRequest(format!("invalid feedback value: {}", req.feedback))),
-    };
+    let feedback = crate::ai_engine::FeedbackKind::parse(req.feedback.as_str())
+        .ok_or_else(|| AiApiError::BadRequest(format!("invalid feedback value: {}", req.feedback)))?;
 
     let event = state.ai_runtime.apply_feedback(&state, &id, feedback).await?;
     match event {
@@ -133,5 +130,6 @@ pub async fn update_config(
         .map_err(|e| AiApiError::BadRequest(e))?;
 
     state.config_store.save_ai_engine_config(config.clone())?;
+    state.ai_runtime.update_model_config(&config).await?;
     Ok(Json(config))
 }

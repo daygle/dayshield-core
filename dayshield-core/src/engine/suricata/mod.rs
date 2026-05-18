@@ -11,7 +11,6 @@
 //! |---------------------|------------------------------------------------------|
 //! | [`generate_config`] | Build a complete `suricata.yaml` string.            |
 //! | [`apply_config`]    | Write `suricata.yaml` to disk and reload Suricata.  |
-//! | [`update_rules`]    | Run `suricata-update` to refresh rule sets.         |
 //! | [`reload`]          | Send `SIGUSR2` to reload rules without packet loss. |
 
 use std::path::Path;
@@ -258,12 +257,14 @@ pub async fn apply_config(config: &SuricataConfig) -> Result<()> {
         Ok(managed) => {
             for rs in managed.iter().filter(|r| r.enabled) {
                 if let Some(path) = &rs.local_path {
-                    effective_config.rule_sources.push(crate::config::models::RuleSource {
-                        name: rs.id.clone(),
-                        enabled: true,
-                        url: None,
-                        path: Some(path.clone()),
-                    });
+                    effective_config
+                        .rule_sources
+                        .push(crate::config::models::RuleSource {
+                            name: rs.id.clone(),
+                            enabled: true,
+                            url: None,
+                            path: Some(path.clone()),
+                        });
                 }
             }
         }
@@ -296,27 +297,6 @@ pub async fn apply_config(config: &SuricataConfig) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Download and install the latest Suricata rule sets.
-///
-/// Shells out to `suricata-update` and then reloads the rule engine via
-/// [`reload`].
-pub async fn update_rules() -> Result<()> {
-    info!("suricata: running suricata-update");
-
-    let out = Command::new("suricata-update")
-        .output()
-        .await
-        .context("failed to spawn suricata-update")?;
-
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        anyhow::bail!("suricata-update failed: {stderr}");
-    }
-
-    info!("suricata: suricata-update completed; reloading rules");
-    reload().await
 }
 
 /// Reload the Suricata rule engine without dropping network packets.
@@ -378,8 +358,7 @@ fn write_config_atomic(path: &str, content: &str) -> Result<()> {
     std::fs::write(&tmp, content)
         .with_context(|| format!("failed to write temporary file {tmp}"))?;
 
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("failed to rename {tmp} to {path}"))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("failed to rename {tmp} to {path}"))?;
 
     Ok(())
 }
@@ -430,7 +409,10 @@ mod tests {
     fn generate_config_contains_home_net() {
         let cfg = base_config();
         let out = generate_config(&cfg);
-        assert!(out.contains("HOME_NET: \"[192.168.1.0/24]\""), "should contain HOME_NET");
+        assert!(
+            out.contains("HOME_NET: \"[192.168.1.0/24]\""),
+            "should contain HOME_NET"
+        );
     }
 
     #[test]
@@ -514,7 +496,10 @@ mod tests {
         });
         let out = generate_config(&cfg);
         assert!(out.contains("  - /etc/suricata/rules/local.rules"));
-        assert!(!out.contains("  - suricata.rules"), "should not include default when local rules are set");
+        assert!(
+            !out.contains("  - suricata.rules"),
+            "should not include default when local rules are set"
+        );
     }
 
     #[test]

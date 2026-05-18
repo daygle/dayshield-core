@@ -9,7 +9,10 @@
 //! rotated regularly by logrotate, so this is acceptable for a 1-second
 //! polling interval.
 
-use tokio::fs;
+use tokio::{
+    fs::File,
+    io::{AsyncBufReadExt, BufReader},
+};
 use tracing::warn;
 
 use crate::metrics::SuricataMetrics;
@@ -35,26 +38,9 @@ pub fn count_alerts(content: &str, now_secs: u64) -> (u64, u64) {
     let cutoff_5min = now_secs.saturating_sub(300);
 
     for line in content.lines() {
-        // Fast pre-filter to avoid JSON parsing every line.
-        if !line.contains("\"alert\"") {
+        let Some(ts_secs) = alert_timestamp_secs(line) else {
             continue;
-        }
-
-        let record: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
         };
-
-        if record.get("event_type").and_then(|v| v.as_str()) != Some("alert") {
-            continue;
-        }
-
-        let ts_str = match record.get("timestamp").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => continue,
-        };
-
-        let ts_secs = parse_eve_timestamp(ts_str);
 
         if ts_secs >= cutoff_5min {
             last_5min += 1;
@@ -65,6 +51,21 @@ pub fn count_alerts(content: &str, now_secs: u64) -> (u64, u64) {
     }
 
     (last_minute, last_5min)
+}
+
+fn alert_timestamp_secs(line: &str) -> Option<u64> {
+    // Fast pre-filter to avoid JSON parsing every line.
+    if !line.contains("\"alert\"") {
+        return None;
+    }
+
+    let record: serde_json::Value = serde_json::from_str(line).ok()?;
+    if record.get("event_type").and_then(|v| v.as_str()) != Some("alert") {
+        return None;
+    }
+
+    let ts_str = record.get("timestamp").and_then(|v| v.as_str())?;
+    Some(parse_eve_timestamp(ts_str))
 }
 
 /// Parse an EVE JSON timestamp string (ISO 8601 / RFC 3339) into a Unix
@@ -87,7 +88,8 @@ pub fn parse_eve_timestamp(ts: &str) -> u64 {
     };
 
     chrono::DateTime::parse_from_rfc3339(&normalised)
-        .map(|dt| dt.timestamp() as u64)
+        .ok()
+        .and_then(|dt| u64::try_from(dt.timestamp()).ok())
         .unwrap_or(0)
 }
 
@@ -97,15 +99,41 @@ pub fn parse_eve_timestamp(ts: &str) -> u64 {
 
 /// Collect [`SuricataMetrics`] by scanning the EVE JSON log.
 pub async fn collect_suricata(now_secs: u64) -> SuricataMetrics {
-    let content = match fs::read_to_string(EVE_JSON_PATH).await {
-        Ok(c) => c,
+    let file = match File::open(EVE_JSON_PATH).await {
+        Ok(file) => file,
         Err(e) => {
             warn!(error = %e, "metrics/suricata: cannot read eve.json, reporting zeros");
             return SuricataMetrics::default();
         }
     };
 
-    let (last_minute, last_5min) = count_alerts(&content, now_secs);
+    let mut last_minute: u64 = 0;
+    let mut last_5min: u64 = 0;
+    let cutoff_1min = now_secs.saturating_sub(60);
+    let cutoff_5min = now_secs.saturating_sub(300);
+    let mut lines = BufReader::new(file).lines();
+
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => {
+                let Some(ts_secs) = alert_timestamp_secs(&line) else {
+                    continue;
+                };
+                if ts_secs >= cutoff_5min {
+                    last_5min += 1;
+                }
+                if ts_secs >= cutoff_1min {
+                    last_minute += 1;
+                }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                warn!(error = %e, "metrics/suricata: failed while reading eve.json");
+                return SuricataMetrics::default();
+            }
+        }
+    }
+
     SuricataMetrics {
         alerts_last_minute: last_minute,
         alerts_last_5min: last_5min,

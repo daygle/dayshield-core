@@ -12,6 +12,19 @@
 			],
 			"isBackground": false,
 			"group": "build"
+		},
+		{
+			"label": "validate-core-cargo-fmt-check",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"fmt",
+				"--all",
+				"--",
+				"--check"
+			],
+			"isBackground": false,
+			"group": "build"
 		}
 	]
 }

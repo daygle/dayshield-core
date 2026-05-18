@@ -1879,6 +1879,19 @@ pub struct RuleSource {
 /// - `eve_log_path` must be non-empty when `eve_log_enabled` is `true`.
 /// - `stats_log_path` must be non-empty when `stats_log_enabled` is `true`.
 pub fn validate_suricata_config(config: &SuricataConfig) -> Result<(), String> {
+    if !matches!(config.mode.as_str(), "ids" | "ips") {
+        return Err(format!(
+            "mode {:?} is invalid (expected \"ids\" or \"ips\")",
+            config.mode
+        ));
+    }
+
+    for iface in &config.interfaces {
+        if !is_valid_interface_name(iface) {
+            return Err(format!("interface {:?} is not a valid interface name", iface));
+        }
+    }
+
     for cidr in config.home_nets.iter().chain(config.external_nets.iter()) {
         if !is_valid_cidr(cidr) {
             return Err(format!("invalid CIDR in home_nets/external_nets: {cidr}"));
@@ -1889,6 +1902,34 @@ pub fn validate_suricata_config(config: &SuricataConfig) -> Result<(), String> {
     }
     if config.stats_log_enabled && config.stats_log_path.is_empty() {
         return Err("stats_log_path must not be empty when stats_log_enabled is true".into());
+    }
+    for source in &config.rule_sources {
+        if source.name.trim().is_empty() {
+            return Err("rule source name must not be empty".into());
+        }
+
+        match (source.url.as_deref(), source.path.as_deref()) {
+            (Some(url), None) if validate_url(url) => {}
+            (Some(url), None) => {
+                return Err(format!("rule source URL {:?} is not valid", url));
+            }
+            (None, Some(path)) if !path.trim().is_empty() => {}
+            (None, Some(_)) => {
+                return Err("rule source path must not be empty".into());
+            }
+            (None, None) => {
+                return Err(format!(
+                    "rule source {:?} must have either a URL or a local path",
+                    source.name
+                ));
+            }
+            (Some(_), Some(_)) => {
+                return Err(format!(
+                    "rule source {:?} must not set both URL and local path",
+                    source.name
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -3009,14 +3050,19 @@ pub fn validate_ai_engine_config(config: &AiEngineConfig) -> Result<(), String> 
     if config.automatic_blocking && !config.enabled {
         return Err("automatic_blocking cannot be enabled when ai_engine is disabled".to_string());
     }
-    if !(0.0..=1.0).contains(&config.risk_score_block_threshold) {
+    if !config.risk_score_block_threshold.is_finite()
+        || !(0.0..=1.0).contains(&config.risk_score_block_threshold)
+    {
         return Err("risk_score_block_threshold must be between 0.0 and 1.0".to_string());
     }
     if config.escalation_window_seconds == 0 {
         return Err("escalation_window_seconds must be greater than 0".to_string());
     }
-    if config.model_learning_rate <= 0.0 {
-        return Err("model_learning_rate must be greater than 0".to_string());
+    if !config.model_learning_rate.is_finite()
+        || config.model_learning_rate <= 0.0
+        || config.model_learning_rate > 1.0
+    {
+        return Err("model_learning_rate must be greater than 0.0 and no more than 1.0".to_string());
     }
     Ok(())
 }

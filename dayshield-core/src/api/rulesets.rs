@@ -321,7 +321,14 @@ pub async fn enable_ruleset(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, RulesetError> {
     let manager = make_manager(&state);
-    let result = manager.enable(&id).await?;
+    let result = manager.enable(&id).await.map_err(|err| {
+        let message = err.to_string();
+        if message.contains("has no local rules file") {
+            RulesetError::ValidationFailed(message)
+        } else {
+            RulesetError::OperationFailed(err)
+        }
+    })?;
 
     Ok(Json(serde_json::json!({
         "success": true,

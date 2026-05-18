@@ -10,19 +10,23 @@
 //! | GET    | `/interfaces/{name}/suricata`     | Get Suricata config scoped to interface   |
 //! | POST   | `/interfaces/{name}/suricata`     | Update Suricata config for interface      |
 
-use std::sync::Arc;
+use std::{collections::VecDeque, sync::Arc};
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
 };
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncBufReadExt;
 use tracing::{info, warn};
 
 use crate::{
-    config::models::{ensure_ipv6_allowed, is_valid_cidr, SuricataConfig},
+    config::models::{
+        ensure_ipv6_allowed, is_valid_cidr, is_valid_interface_name, validate_suricata_config,
+        validate_url, SuricataConfig,
+    },
     engine::suricata::apply_config,
     state::AppState,
 };
@@ -140,6 +144,11 @@ pub struct SuricataAlertResponse {
     pub action: String,
 }
 
+#[derive(Deserialize)]
+pub struct ListAlertsQuery {
+    pub limit: Option<usize>,
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -184,6 +193,78 @@ fn is_blocked_suricata_ruleset_url(url: &str) -> bool {
     u.contains("suricata-7.0") || u.contains("/suricata-7/") || u.contains("suricata-7.")
 }
 
+const DEFAULT_ALERT_LIMIT: usize = 100;
+const MAX_ALERT_LIMIT: usize = 1_000;
+
+fn json_u16(value: &serde_json::Value, key: &str) -> u16 {
+    value
+        .get(key)
+        .and_then(|p| p.as_u64())
+        .and_then(|p| u16::try_from(p).ok())
+        .unwrap_or(0)
+}
+
+fn parse_alert_line(line: &str) -> Option<SuricataAlertResponse> {
+    if !line.contains("\"alert\"") {
+        return None;
+    }
+
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    if v.get("event_type")?.as_str()? != "alert" {
+        return None;
+    }
+
+    let alert = v.get("alert")?;
+    let severity = map_severity(alert.get("severity").and_then(|s| s.as_u64()).unwrap_or(4));
+
+    Some(SuricataAlertResponse {
+        id: 0,
+        timestamp: v
+            .get("timestamp")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string(),
+        interface: v
+            .get("in_iface")
+            .or_else(|| v.get("interface"))
+            .and_then(|i| i.as_str())
+            .map(|s| s.to_string()),
+        src_ip: v
+            .get("src_ip")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string(),
+        src_port: json_u16(&v, "src_port"),
+        dst_ip: v
+            .get("dest_ip")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string(),
+        dst_port: json_u16(&v, "dest_port"),
+        protocol: v
+            .get("proto")
+            .and_then(|p| p.as_str())
+            .unwrap_or("")
+            .to_string(),
+        signature: alert
+            .get("signature")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string(),
+        category: alert
+            .get("category")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string(),
+        severity: severity.to_string(),
+        action: alert
+            .get("action")
+            .and_then(|a| a.as_str())
+            .unwrap_or("alert")
+            .to_string(),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // GET /suricata/config
 // ---------------------------------------------------------------------------
@@ -224,13 +305,50 @@ pub async fn update_config(
         .unwrap_or_else(default_suricata_cfg);
 
     // Apply only the fields that were supplied.
-    if let Some(v) = req.enabled    { cfg.enabled  = v; }
-    if let Some(v) = req.interfaces { cfg.interfaces = v; }
-    if let Some(v) = req.mode       { cfg.mode      = v; }
-    if let Some(v) = req.home_net   { cfg.home_nets = v; }
-    if let Some(v) = req.external_net { cfg.external_nets = v; }
+    if let Some(v) = req.enabled {
+        cfg.enabled = v;
+    }
+    if let Some(v) = req.interfaces {
+        cfg.interfaces = v;
+    }
+    if let Some(v) = req.mode {
+        cfg.mode = v.trim().to_ascii_lowercase();
+    }
+    if let Some(v) = req.home_net {
+        cfg.home_nets = v;
+    }
+    if let Some(v) = req.external_net {
+        cfg.external_nets = v;
+    }
+
+    cfg.interfaces = cfg
+        .interfaces
+        .into_iter()
+        .map(|iface| iface.trim().to_string())
+        .filter(|iface| !iface.is_empty())
+        .collect();
+    let mut seen_interfaces = std::collections::HashSet::new();
+    cfg.interfaces
+        .retain(|iface| seen_interfaces.insert(iface.clone()));
+    cfg.home_nets = cfg
+        .home_nets
+        .into_iter()
+        .map(|cidr| cidr.trim().to_string())
+        .filter(|cidr| !cidr.is_empty())
+        .collect();
+    cfg.external_nets = cfg
+        .external_nets
+        .into_iter()
+        .map(|cidr| cidr.trim().to_string())
+        .filter(|cidr| !cidr.is_empty())
+        .collect();
 
     // --- Validation --------------------------------------------------------
+
+    if let Err(msg) = validate_suricata_config(&cfg) {
+        warn!(error = %msg, "suricata: invalid config");
+        return Err(SuricataError::ValidationFailed(msg));
+    }
 
     let ipv6_enabled = state
         .config_store
@@ -328,26 +446,43 @@ pub async fn create_ruleset(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateRulesetRequest>,
 ) -> Result<impl IntoResponse, SuricataError> {
+    let name = req.name.trim().to_string();
+    let url = req
+        .url
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty());
+    let path = req
+        .path
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty());
+
     // Validate inputs
-    if req.name.trim().is_empty() {
+    if name.is_empty() {
         return Err(SuricataError::ValidationFailed(
             "ruleset name must not be empty".into(),
         ));
     }
-    if req.url.is_none() && req.path.is_none() {
+    if url.is_none() && path.is_none() {
         return Err(SuricataError::ValidationFailed(
             "either 'url' or 'path' must be provided".into(),
         ));
     }
-    if req.url.is_some() && req.path.is_some() {
+    if url.is_some() && path.is_some() {
         return Err(SuricataError::ValidationFailed(
             "only one of 'url' or 'path' should be provided".into(),
         ));
     }
-    if let Some(url) = req.url.as_deref() {
+    if let Some(url) = url.as_deref() {
+        if !validate_url(url) {
+            return Err(SuricataError::ValidationFailed(format!(
+                "ruleset URL {:?} is not a valid HTTP/HTTPS URL",
+                url
+            )));
+        }
         if is_blocked_suricata_ruleset_url(url) {
             return Err(SuricataError::ValidationFailed(
-                "Suricata 7.x ruleset feeds are not supported on this appliance (Suricata 6.x)".into(),
+                "Suricata 7.x ruleset feeds are not supported on this appliance (Suricata 6.x)"
+                    .into(),
             ));
         }
     }
@@ -359,10 +494,10 @@ pub async fn create_ruleset(
         .unwrap_or_else(default_suricata_cfg);
 
     let rule_source = crate::config::models::RuleSource {
-        name: req.name,
+        name,
         enabled: req.enabled.unwrap_or(true),
-        url: req.url,
-        path: req.path,
+        url,
+        path,
     };
 
     cfg.rule_sources.push(rule_source.clone());
@@ -387,10 +522,13 @@ pub async fn create_ruleset(
         last_updated: None,
     };
 
-    Ok((StatusCode::CREATED, Json(serde_json::json!({
-        "success": true,
-        "data": response
-    }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "success": true,
+            "data": response
+        })),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -427,7 +565,11 @@ pub async fn update_ruleset(
     let response = SuricataRulesetResponse {
         id,
         name: rs.name.clone(),
-        source: rs.url.clone().or_else(|| rs.path.clone()).unwrap_or_default(),
+        source: rs
+            .url
+            .clone()
+            .or_else(|| rs.path.clone())
+            .unwrap_or_default(),
         enabled: rs.enabled,
         last_updated: None,
     };
@@ -442,12 +584,13 @@ pub async fn update_ruleset(
 // GET /suricata/alerts
 // ---------------------------------------------------------------------------
 
-/// Return up to 100 recent alerts parsed from the EVE JSON log file.
+/// Return recent alerts parsed from the EVE JSON log file.
 ///
 /// Returns an empty array if the log file does not exist or Suricata is not
 /// configured with EVE logging enabled.
 pub async fn list_alerts(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<ListAlertsQuery>,
 ) -> Result<impl IntoResponse, SuricataError> {
     let cfg = state
         .config_store
@@ -461,8 +604,13 @@ pub async fn list_alerts(
         "/var/log/suricata/eve.json".to_string()
     };
 
-    let content = match tokio::fs::read_to_string(&log_path).await {
-        Ok(c) => c,
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_ALERT_LIMIT)
+        .clamp(1, MAX_ALERT_LIMIT);
+
+    let file = match tokio::fs::File::open(&log_path).await {
+        Ok(file) => file,
         Err(_) => {
             return Ok(Json(serde_json::json!({
                 "success": true,
@@ -471,75 +619,21 @@ pub async fn list_alerts(
         }
     };
 
-    let mut alerts: Vec<SuricataAlertResponse> = content
-        .lines()
-        .filter_map(|line| {
-            let v: serde_json::Value = serde_json::from_str(line).ok()?;
-            if v.get("event_type")?.as_str()? != "alert" {
-                return None;
-            }
-            let alert = v.get("alert")?;
-            let severity = map_severity(
-                alert.get("severity").and_then(|s| s.as_u64()).unwrap_or(4),
-            );
-            Some(SuricataAlertResponse {
-                id: 0, // assigned below
-                timestamp: v
-                    .get("timestamp")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                interface: v
-                    .get("in_iface")
-                    .or_else(|| v.get("interface"))
-                    .and_then(|i| i.as_str())
-                    .map(|s| s.to_string()),
-                src_ip: v
-                    .get("src_ip")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                src_port: v
-                    .get("src_port")
-                    .and_then(|p| p.as_u64())
-                    .unwrap_or(0) as u16,
-                dst_ip: v
-                    .get("dest_ip")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                dst_port: v
-                    .get("dest_port")
-                    .and_then(|p| p.as_u64())
-                    .unwrap_or(0) as u16,
-                protocol: v
-                    .get("proto")
-                    .and_then(|p| p.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                signature: alert
-                    .get("signature")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                category: alert
-                    .get("category")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                severity: severity.to_string(),
-                action: alert
-                    .get("action")
-                    .and_then(|a| a.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            })
-        })
-        .collect();
+    let mut lines = tokio::io::BufReader::new(file).lines();
+    let mut alerts: VecDeque<SuricataAlertResponse> = VecDeque::with_capacity(limit);
 
-    // Take the last 100 entries and assign sequential IDs.
-    let start = alerts.len().saturating_sub(100);
-    let mut result: Vec<SuricataAlertResponse> = alerts.drain(start..).collect();
+    while let Some(line) = lines.next_line().await.map_err(|e| {
+        SuricataError::StorageError(anyhow::anyhow!("failed to read {log_path}: {e}"))
+    })? {
+        if let Some(alert) = parse_alert_line(&line) {
+            alerts.push_back(alert);
+            if alerts.len() > limit {
+                alerts.pop_front();
+            }
+        }
+    }
+
+    let mut result: Vec<SuricataAlertResponse> = alerts.into_iter().collect();
     for (i, a) in result.iter_mut().enumerate() {
         a.id = i;
     }
@@ -561,6 +655,13 @@ pub async fn get_interface_suricata_config(
     State(state): State<Arc<AppState>>,
     Path(interface_name): Path<String>,
 ) -> Result<impl IntoResponse, SuricataError> {
+    if !is_valid_interface_name(&interface_name) {
+        return Err(SuricataError::ValidationFailed(format!(
+            "interface {:?} is not a valid interface name",
+            interface_name
+        )));
+    }
+
     let cfg = state
         .config_store
         .load_suricata_config()
@@ -600,6 +701,13 @@ pub async fn update_interface_suricata_config(
     Path(interface_name): Path<String>,
     Json(req): Json<UpdateInterfaceSuricataRequest>,
 ) -> Result<impl IntoResponse, SuricataError> {
+    if !is_valid_interface_name(&interface_name) {
+        return Err(SuricataError::ValidationFailed(format!(
+            "interface {:?} is not a valid interface name",
+            interface_name
+        )));
+    }
+
     let mut cfg = state
         .config_store
         .load_suricata_config()

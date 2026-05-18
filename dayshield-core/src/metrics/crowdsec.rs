@@ -68,7 +68,8 @@ pub fn count_decisions(body: &str, now_secs: u64) -> (u64, u64) {
 /// Returns 0 on failure.
 pub fn parse_crowdsec_timestamp(ts: &str) -> u64 {
     chrono::DateTime::parse_from_rfc3339(ts)
-        .map(|dt| dt.timestamp() as u64)
+        .ok()
+        .and_then(|dt| u64::try_from(dt.timestamp()).ok())
         .unwrap_or(0)
 }
 
@@ -86,7 +87,7 @@ const DEFAULT_API_KEY: &str = "";
 /// `lapi_url` should be something like `"http://127.0.0.1:8080"`.
 /// `api_key`  is the bouncer API key used for authentication.
 pub async fn collect_crowdsec(lapi_url: &str, api_key: &str, now_secs: u64) -> CrowdSecMetrics {
-    let url = format!("{}/v1/decisions", lapi_url);
+    let url = format!("{}/v1/decisions", lapi_url.trim_end_matches('/'));
 
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
@@ -99,12 +100,7 @@ pub async fn collect_crowdsec(lapi_url: &str, api_key: &str, now_secs: u64) -> C
         }
     };
 
-    let resp = match client
-        .get(&url)
-        .header("X-Api-Key", api_key)
-        .send()
-        .await
-    {
+    let resp = match client.get(&url).header("X-Api-Key", api_key).send().await {
         Ok(r) => r,
         Err(e) => {
             warn!(error = %e, "metrics/crowdsec: LAPI request failed");

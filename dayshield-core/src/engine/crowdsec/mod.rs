@@ -27,7 +27,7 @@ use tokio::process::Command;
 use tracing::{debug, info, warn};
 
 use crate::{
-    config::models::{CrowdSecConfig, CrowdSecDecision},
+    config::models::{validate_ip_or_cidr, CrowdSecConfig, CrowdSecDecision},
     state::AppState,
 };
 
@@ -55,8 +55,8 @@ struct LapiDecision {
 
 /// HTTP client for the CrowdSec Local API.
 pub struct CrowdSecClient {
-    pub lapi_url: String,
-    pub api_key: String,
+    lapi_url: String,
+    api_key: String,
     http: reqwest::Client,
 }
 
@@ -81,10 +81,7 @@ impl CrowdSecClient {
     /// Returns an error if the HTTP request fails or the LAPI returns a
     /// non-2xx status code.
     pub async fn fetch_decisions(&self) -> Result<Vec<CrowdSecDecision>> {
-        let url = format!(
-            "{}/v1/decisions",
-            self.lapi_url.trim_end_matches('/')
-        );
+        let url = format!("{}/v1/decisions", self.lapi_url.trim_end_matches('/'));
 
         debug!(url = %url, "crowdsec: fetching decisions from LAPI");
 
@@ -163,23 +160,20 @@ pub fn generate_ban_set_nft(alias_name: &str, decisions: &[CrowdSecDecision]) ->
     ));
 
     // Flush current elements so stale bans are removed.
-    out.push_str(&format!(
-        "flush set inet dayshield_crowdsec {alias_name}\n"
-    ));
-    out.push_str(&format!(
-        "flush set inet dayshield_crowdsec {v6_name}\n"
-    ));
+    out.push_str(&format!("flush set inet dayshield_crowdsec {alias_name}\n"));
+    out.push_str(&format!("flush set inet dayshield_crowdsec {v6_name}\n"));
 
-    // Split ban decisions by address family.
+    // Split valid ban decisions by address family. Invalid values are skipped
+    // so one bad LAPI item cannot break the whole nftables update.
     let ban_decisions: Vec<&str> = decisions
         .iter()
         .filter(|d| d.type_.eq_ignore_ascii_case("ban"))
         .map(|d| d.value.as_str())
+        .filter(|value| validate_ip_or_cidr(value))
         .collect();
 
-    let (bans_v4, bans_v6): (Vec<&str>, Vec<&str>) = ban_decisions
-        .into_iter()
-        .partition(|v| is_ipv4_value(v));
+    let (bans_v4, bans_v6): (Vec<&str>, Vec<&str>) =
+        ban_decisions.into_iter().partition(|v| is_ipv4_value(v));
 
     if !bans_v4.is_empty() {
         let elements = bans_v4.join(", ");
@@ -240,15 +234,18 @@ pub async fn update_ban_set(alias_name: &str, decisions: &[CrowdSecDecision]) ->
         "crowdsec: applying ban set via nft"
     );
 
-    let out = Command::new("nft")
-        .args(["-f", &tmp])
+    let _ = Command::new("nft")
+        .args(["delete", "table", "inet", "dayshield_crowdsec"])
         .output()
-        .await
-        .context("failed to spawn nft")?;
+        .await;
+
+    let output_result = Command::new("nft").args(["-f", &tmp]).output().await;
 
     if let Err(e) = std::fs::remove_file(&tmp) {
         debug!(path = %tmp, error = %e, "crowdsec: failed to remove nft temp file");
     }
+
+    let out = output_result.context("failed to spawn nft")?;
 
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -348,7 +345,9 @@ mod tests {
     fn ban_set_nft_single_ban_ipv6() {
         let decisions = vec![make_decision(2, "2001:db8::1", "ban")];
         let out = generate_ban_set_nft("crowdsec_bans", &decisions);
-        assert!(out.contains("add element inet dayshield_crowdsec crowdsec_bans_v6 { 2001:db8::1 }"));
+        assert!(
+            out.contains("add element inet dayshield_crowdsec crowdsec_bans_v6 { 2001:db8::1 }")
+        );
         // No v4 element line since there are no IPv4 bans.
         assert!(!out.contains("add element inet dayshield_crowdsec crowdsec_bans {"));
     }
@@ -370,7 +369,9 @@ mod tests {
     fn ban_set_nft_ipv6_cidr() {
         let decisions = vec![make_decision(5, "2001:db8::/32", "ban")];
         let out = generate_ban_set_nft("crowdsec_bans", &decisions);
-        assert!(out.contains("add element inet dayshield_crowdsec crowdsec_bans_v6 { 2001:db8::/32 }"));
+        assert!(
+            out.contains("add element inet dayshield_crowdsec crowdsec_bans_v6 { 2001:db8::/32 }")
+        );
     }
 
     #[test]

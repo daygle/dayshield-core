@@ -1,9 +1,17 @@
-use std::{fs, io::Write, net::IpAddr, path::{Path, PathBuf}};
+use std::{
+    fs,
+    io::Write,
+    net::IpAddr,
+    path::{Path, PathBuf},
+};
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::{config::models::AiEngineConfig, logs::LogEvent};
+use crate::config::models::AiEngineConfig;
+
+const FEATURE_COUNT: usize = 27;
+const DEFAULT_MODEL_LEARNING_RATE: f64 = 0.25;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct AiModelState {
@@ -96,65 +104,16 @@ impl AiModel {
         ))
     }
 
-    pub async fn predict_event(&self, event: &LogEvent, history: &AiContextFeatures) -> Result<(f64, Vec<String>)> {
-        match event {
-            LogEvent::SuricataAlert {
-                signature,
-                severity,
-                category,
-                proto,
-                src_ip,
-                dest_ip,
-                src_port,
-                dest_port,
-                ..
-            } => self
-                .predict_suricata_alert(
-                    signature,
-                    *severity,
-                    category.as_deref(),
-                    proto,
-                    src_ip,
-                    dest_ip,
-                    *src_port,
-                    *dest_port,
-                    history,
-                )
-                .await,
-            LogEvent::FirewallEvent {
-                action,
-                proto,
-                src_ip,
-                dest_ip,
-                sport,
-                dport,
-                iface,
-                ..
-            } => self
-                .predict_firewall_event(
-                    action,
-                    proto,
-                    src_ip,
-                    dest_ip,
-                    Some(*sport).filter(|port| *port != 0),
-                    Some(*dport).filter(|port| *port != 0),
-                    iface,
-                    history,
-                )
-                .await,
-            _ => Ok((0.0, vec!["Unsupported event type for AI scoring".to_string()])),
-        }
-    }
-
-    pub fn train_on_feedback(&mut self, features: &[f64], label: f64) -> Result<()> {
+    pub fn retrain_from_feedback(&mut self, samples: &[(Vec<f64>, f64)]) -> Result<()> {
         if !self.training_enabled {
             return Ok(());
         }
-        self.inner.train_on_feedback(features, label)
+        self.inner.retrain_from_feedback(samples)
     }
 
-    pub fn reset_to_default_weights(&mut self) {
-        self.inner.reset_to_default_weights();
+    pub fn apply_config(&mut self, config: &AiEngineConfig) -> Result<()> {
+        self.training_enabled = config.training_enabled;
+        self.inner.set_learning_rate(config.model_learning_rate)
     }
 
     pub fn build_feature_vector(
@@ -331,8 +290,15 @@ impl LocalLogisticModel {
             .ok()
             .and_then(|raw| serde_json::from_str::<AiModelState>(&raw).ok());
 
-        let weights = state.as_ref().map(|s| s.weights.clone()).unwrap_or_else(Self::default_weights);
-        let lr = state.as_ref().map(|s| s.learning_rate).unwrap_or(learning_rate);
+        let default_weights = Self::default_weights();
+        let weights = state
+            .as_ref()
+            .map(|s| s.weights.clone())
+            .filter(|weights| {
+                weights.len() == FEATURE_COUNT && weights.iter().all(|weight| weight.is_finite())
+            })
+            .unwrap_or(default_weights);
+        let lr = Self::sanitize_learning_rate(learning_rate);
 
         let model = Self {
             weights,
@@ -433,18 +399,59 @@ impl LocalLogisticModel {
         (score, reasons)
     }
 
-    fn train_on_feedback(&mut self, features: &[f64], label: f64) -> Result<()> {
+    fn retrain_from_feedback(&mut self, samples: &[(Vec<f64>, f64)]) -> Result<()> {
+        self.reset_to_default_weights();
+        for (features, label) in samples {
+            self.apply_feedback_update(features, *label)?;
+        }
+        self.save()
+    }
+
+    fn apply_feedback_update(&mut self, features: &[f64], label: f64) -> Result<()> {
+        ensure!(
+            (0.0..=1.0).contains(&label) && label.is_finite(),
+            "feedback label must be between 0.0 and 1.0"
+        );
+        ensure!(
+            features.len() == self.weights.len(),
+            "feature vector length {} does not match model weight length {}",
+            features.len(),
+            self.weights.len()
+        );
+        ensure!(
+            features.iter().all(|feature| feature.is_finite()),
+            "feature vector contains non-finite values"
+        );
+
         let prediction = self.predict(features);
         let error = label - prediction;
         for (weight, feature) in self.weights.iter_mut().zip(features.iter()) {
             *weight += self.learning_rate * error * feature;
         }
-        self.save()
+        Ok(())
     }
 
     fn predict(&self, features: &[f64]) -> f64 {
+        debug_assert_eq!(features.len(), self.weights.len());
         let raw: f64 = self.weights.iter().zip(features.iter()).map(|(w, f)| w * f).sum();
         1.0 / (1.0 + (-raw).exp())
+    }
+
+    fn set_learning_rate(&mut self, learning_rate: f64) -> Result<()> {
+        ensure!(
+            learning_rate.is_finite() && learning_rate > 0.0 && learning_rate <= 1.0,
+            "model_learning_rate must be greater than 0.0 and no more than 1.0"
+        );
+        self.learning_rate = learning_rate;
+        self.save()
+    }
+
+    fn sanitize_learning_rate(learning_rate: f64) -> f64 {
+        if learning_rate.is_finite() && learning_rate > 0.0 && learning_rate <= 1.0 {
+            learning_rate
+        } else {
+            DEFAULT_MODEL_LEARNING_RATE
+        }
     }
 
     fn save(&self) -> Result<()> {
@@ -464,7 +471,7 @@ impl LocalLogisticModel {
         Ok(())
     }
 
-    pub fn reset_to_default_weights(&mut self) {
+    fn reset_to_default_weights(&mut self) {
         self.weights = Self::default_weights();
     }
 }
@@ -473,15 +480,16 @@ impl LocalLogisticModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     use crate::config::models::{validate_ai_engine_config, AiEngineConfig};
+    use tempfile::tempdir;
 
     #[test]
     fn ai_model_new_uses_local_runtime() {
         let config = AiEngineConfig::default();
+        let dir = tempdir().unwrap();
         // Constructing AiModel must succeed with the default (local-only) config.
-        let model = AiModel::new(Path::new("/tmp"), &config);
+        let model = AiModel::new(dir.path(), &config);
         assert!(model.training_enabled);
     }
 
@@ -511,16 +519,50 @@ mod tests {
     }
 
     #[test]
+    fn invalid_learning_rate_rejected() {
+        let too_high = AiEngineConfig {
+            model_learning_rate: 1.25,
+            ..AiEngineConfig::default()
+        };
+        assert!(validate_ai_engine_config(&too_high).is_err());
+
+        let not_finite = AiEngineConfig {
+            model_learning_rate: f64::NAN,
+            ..AiEngineConfig::default()
+        };
+        assert!(validate_ai_engine_config(&not_finite).is_err());
+    }
+
+    #[test]
+    fn ai_model_apply_config_updates_runtime_training_controls() {
+        let dir = tempdir().unwrap();
+        let config = AiEngineConfig::default();
+        let mut model = AiModel::new(dir.path(), &config);
+
+        let next = AiEngineConfig {
+            training_enabled: false,
+            model_learning_rate: 0.1,
+            ..config
+        };
+
+        model.apply_config(&next).unwrap();
+
+        assert!(!model.training_enabled);
+        assert_eq!(model.inner.learning_rate, 0.1);
+    }
+
+    #[test]
     fn suricata_model_scores_severity_correctly() {
-        let model = LocalLogisticModel::new(Path::new("."), 0.25);
+        let dir = tempdir().unwrap();
+        let model = LocalLogisticModel::new(dir.path(), 0.25);
         let history = AiContextFeatures::default();
         let (score, reasons) = model.predict_suricata_alert(
-            "ET SYNC Scan",
+            "ET MALWARE Scan",
             1,
-            Some("Scan"),
+            Some("Malware"),
             "TCP",
-            "203.0.113.1",
-            "10.0.0.1",
+            "8.8.8.8",
+            "1.1.1.1",
             Some(443),
             Some(80),
             &history,
@@ -532,7 +574,8 @@ mod tests {
 
     #[test]
     fn firewall_model_applies_drop_and_port_features() {
-        let model = LocalLogisticModel::new(Path::new("."), 0.25);
+        let dir = tempdir().unwrap();
+        let model = LocalLogisticModel::new(dir.path(), 0.25);
         let history = AiContextFeatures::default();
         let (score, reasons) = model.predict_firewall_event(
             "DROP",

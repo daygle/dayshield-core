@@ -11,10 +11,12 @@
 //!
 //! # Safe update flow
 //!
-//! 1. Download to a temp file (`suricata.rules.tmp`).
+//! 1. Download to a temp file (`original.rules.tmp`).
 //! 2. Validate basic structure (must contain at least one non-comment line).
-//! 3. Atomically rename the temp file over the live file.
-//! 4. On any failure the existing live file is left untouched.
+//! 3. Atomically rename the temp file over the downloaded source copy.
+//! 4. Generate `suricata.rules` from that source copy and the disabled-rule
+//!    list.
+//! 5. On any failure the existing live file is left untouched.
 //!
 //! # Suricata integration
 //!
@@ -90,12 +92,15 @@ impl RulesetManager {
         // Mark as installing (in memory only; we persist after success/failure).
         let idx = rulesets.iter().position(|r| r.id == id);
 
-        let rules_path = self.store.rules_file(id);
+        let source_rules_path = self.store.source_rules_file(id);
+        let effective_rules_path = self.store.rules_file(id);
 
         // Perform the download + install.
-        match self.download_and_install(&source, &rules_path).await {
+        match self.download_and_install(&source, &source_rules_path).await {
             Ok(version) => {
-                let local_path = rules_path.to_string_lossy().into_owned();
+                self.regenerate_effective_rules(id)?;
+
+                let local_path = effective_rules_path.to_string_lossy().into_owned();
                 let now = Utc::now();
 
                 let ruleset = InstalledRuleset {
@@ -123,7 +128,11 @@ impl RulesetManager {
 
                 self.store.save(&rulesets)?;
                 info!(id, "rulesets: install complete");
-                Ok(rulesets.iter().find(|r| r.id == id).cloned().unwrap_or(ruleset))
+                Ok(rulesets
+                    .iter()
+                    .find(|r| r.id == id)
+                    .cloned()
+                    .unwrap_or(ruleset))
             }
             Err(e) => {
                 warn!(id, error = %e, "rulesets: install failed");
@@ -163,7 +172,9 @@ impl RulesetManager {
     /// when applicable) and compares ETags / Last-Modified values.
     pub async fn check_update(&self, id: &str) -> Result<InstalledRuleset> {
         let mut rulesets = self.store.load()?;
-        let idx = rulesets.iter().position(|r| r.id == id)
+        let idx = rulesets
+            .iter()
+            .position(|r| r.id == id)
             .with_context(|| format!("ruleset '{id}' is not installed"))?;
 
         let source_url = rulesets[idx].source_url.clone();
@@ -246,7 +257,9 @@ impl RulesetManager {
     /// Enable an installed ruleset so Suricata includes it in its rule set.
     pub async fn enable(&self, id: &str) -> Result<InstalledRuleset> {
         let mut rulesets = self.store.load()?;
-        let idx = rulesets.iter().position(|r| r.id == id)
+        let idx = rulesets
+            .iter()
+            .position(|r| r.id == id)
             .with_context(|| format!("ruleset '{id}' is not installed"))?;
 
         let rules_path = rulesets[idx]
@@ -254,6 +267,10 @@ impl RulesetManager {
             .as_ref()
             .map(PathBuf::from)
             .unwrap_or_else(|| self.store.rules_file(id));
+
+        if !rules_path.exists() {
+            self.regenerate_effective_rules(id)?;
+        }
 
         if !rules_path.exists() {
             bail!("ruleset '{id}' has no local rules file; try installing it first");
@@ -279,7 +296,9 @@ impl RulesetManager {
     /// Disable an installed ruleset so Suricata no longer includes it.
     pub async fn disable(&self, id: &str) -> Result<InstalledRuleset> {
         let mut rulesets = self.store.load()?;
-        let idx = rulesets.iter().position(|r| r.id == id)
+        let idx = rulesets
+            .iter()
+            .position(|r| r.id == id)
             .with_context(|| format!("ruleset '{id}' is not installed"))?;
 
         rulesets[idx].enabled = false;
@@ -376,21 +395,23 @@ impl RulesetManager {
         let url_lower = source.url.to_lowercase();
         if url_lower.ends_with(".tar.gz") || url_lower.ends_with(".tgz") {
             // Extract .rules files from tar.gz, concatenate into combined file.
-            install_from_targz(&bytes, &tmp_dest)
-                .context("failed to extract rules from tar.gz")?;
+            install_from_targz(&bytes, &tmp_dest).context("failed to extract rules from tar.gz")?;
         } else {
             // Plain .rules file – write directly.
-            std::fs::write(&tmp_dest, &bytes)
-                .context("failed to write rules file")?;
+            std::fs::write(&tmp_dest, &bytes).context("failed to write rules file")?;
         }
 
         // Basic validation: must contain at least one non-comment, non-blank line.
-        validate_rules_file(&tmp_dest)
-            .context("downloaded rules file failed validation")?;
+        validate_rules_file(&tmp_dest).context("downloaded rules file failed validation")?;
 
         // Atomic rename.
-        std::fs::rename(&tmp_dest, dest)
-            .with_context(|| format!("failed to rename {} to {}", tmp_dest.display(), dest.display()))?;
+        std::fs::rename(&tmp_dest, dest).with_context(|| {
+            format!(
+                "failed to rename {} to {}",
+                tmp_dest.display(),
+                dest.display()
+            )
+        })?;
 
         Ok(version)
     }
@@ -402,13 +423,12 @@ impl RulesetManager {
     /// generated `suricata.yaml`.
     /// List all rules in a ruleset with their enabled/disabled state.
     pub fn list_rules(&self, id: &str) -> Result<Vec<crate::rules::models::Rule>> {
-        let rules_path = self.store.rules_file(id);
+        let rules_path = self.rules_file_for_listing(id);
         if !rules_path.exists() {
             bail!("ruleset '{}' rules file not found", id);
         }
 
-        let content = std::fs::read_to_string(&rules_path)
-            .context("failed to read rules file")?;
+        let content = std::fs::read_to_string(&rules_path).context("failed to read rules file")?;
 
         let disabled = self.load_disabled_rules(id)?;
         let disabled_set: std::collections::HashSet<_> = disabled.ids.into_iter().collect();
@@ -426,69 +446,91 @@ impl RulesetManager {
 
         let content = std::fs::read_to_string(&disabled_path)
             .context("failed to read disabled-rules.json")?;
-        let disabled = serde_json::from_str(&content)
-            .context("failed to parse disabled-rules.json")?;
+        let disabled =
+            serde_json::from_str(&content).context("failed to parse disabled-rules.json")?;
         Ok(disabled)
     }
 
     /// Save the set of disabled rule IDs for a ruleset.
-    pub fn save_disabled_rules(&self, id: &str, disabled: &crate::rules::models::DisabledRules) -> Result<()> {
+    pub fn save_disabled_rules(
+        &self,
+        id: &str,
+        disabled: &crate::rules::models::DisabledRules,
+    ) -> Result<()> {
         let disabled_path = self.store.ruleset_dir(id).join("disabled-rules.json");
         std::fs::create_dir_all(disabled_path.parent().unwrap())?;
         let json = serde_json::to_string_pretty(disabled)?;
-        std::fs::write(&disabled_path, json)
-            .context("failed to write disabled-rules.json")?;
+        std::fs::write(&disabled_path, json).context("failed to write disabled-rules.json")?;
         Ok(())
     }
 
     /// Regenerate the effective rules file, filtering out disabled rules.
-    /// This updates the main rules file that Suricata uses.
+    /// This updates only the generated file that Suricata uses. The downloaded
+    /// source copy remains unchanged so rule toggles are reversible.
     pub fn regenerate_effective_rules(&self, id: &str) -> Result<()> {
-        let rules_path = self.store.rules_file(id);
-        if !rules_path.exists() {
+        let source_path = self.ensure_source_rules_file(id)?;
+        if !source_path.exists() {
             return Ok(());
         }
+        let effective_path = self.store.rules_file(id);
 
-        // Read the original rules file
-        let original_content = std::fs::read_to_string(&rules_path)
-            .context("failed to read rules file")?;
+        let original_content =
+            std::fs::read_to_string(&source_path).context("failed to read rules file")?;
 
         // Load disabled rules
         let disabled = self.load_disabled_rules(id)?;
         let disabled_set: std::collections::HashSet<_> = disabled.ids.into_iter().collect();
 
-        // Filter rules: keep only those that are not disabled
-        let filtered_lines: Vec<&str> = original_content
-            .lines()
-            .filter(|line| {
-                let trimmed = line.trim();
-                
-                // Always keep empty lines, comments, and file headers
-                if trimmed.is_empty() || trimmed.starts_with('#') {
-                    return true;
-                }
-
-                // Check if this rule is disabled
-                if let Some(sid_start) = trimmed.find("sid:") {
-                    let after_sid = &trimmed[sid_start + 4..];
-                    if let Some(sid_end) = after_sid.find(|c| !char::is_numeric(c)) {
-                        let rule_id = &after_sid[..sid_end];
-                        if disabled_set.contains(rule_id) {
-                            return false; // Exclude this disabled rule
-                        }
-                    }
-                }
-
-                true
-            })
-            .collect();
-
-        // Write the filtered content back
-        let filtered_content = filtered_lines.join("\n");
-        std::fs::write(&rules_path, filtered_content)
+        let filtered_content = filter_disabled_rules(&original_content, &disabled_set);
+        let tmp_path = effective_path.with_extension("rules.tmp");
+        std::fs::write(&tmp_path, filtered_content)
             .context("failed to write filtered rules file")?;
+        std::fs::rename(&tmp_path, &effective_path).with_context(|| {
+            format!(
+                "failed to rename {} to {}",
+                tmp_path.display(),
+                effective_path.display()
+            )
+        })?;
 
         Ok(())
+    }
+
+    fn rules_file_for_listing(&self, id: &str) -> PathBuf {
+        let source_path = self.store.source_rules_file(id);
+        if source_path.exists() {
+            source_path
+        } else {
+            self.store.rules_file(id)
+        }
+    }
+
+    fn ensure_source_rules_file(&self, id: &str) -> Result<PathBuf> {
+        let source_path = self.store.source_rules_file(id);
+        if source_path.exists() {
+            return Ok(source_path);
+        }
+
+        // Migration path for installs made before original/effective files
+        // were split. This cannot restore rules already filtered out, but it
+        // preserves the current installed file as the new source for future
+        // reversible edits.
+        let legacy_path = self.store.rules_file(id);
+        if legacy_path.exists() {
+            if let Some(parent) = source_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            std::fs::copy(&legacy_path, &source_path).with_context(|| {
+                format!(
+                    "failed to copy legacy rules file {} to {}",
+                    legacy_path.display(),
+                    source_path.display()
+                )
+            })?;
+        }
+
+        Ok(source_path)
     }
 
     pub async fn apply_suricata_config(&self) -> Result<()> {
@@ -521,12 +563,15 @@ impl RulesetManager {
 
 /// Parse individual rules from a rules file content.
 /// Returns rules with enabled flag based on disabled_set.
-fn parse_rules(content: &str, disabled_set: &std::collections::HashSet<String>) -> Vec<crate::rules::models::Rule> {
+fn parse_rules(
+    content: &str,
+    disabled_set: &std::collections::HashSet<String>,
+) -> Vec<crate::rules::models::Rule> {
     let mut rules = Vec::new();
 
     for line in content.lines() {
         let trimmed = line.trim();
-        
+
         // Skip empty lines and comments
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
@@ -536,37 +581,77 @@ fn parse_rules(content: &str, disabled_set: &std::collections::HashSet<String>) 
         // Format: action proto src_ip src_port -> dst_ip dst_port (options...)
         if let Some((action, rest)) = trimmed.split_once(' ') {
             // Extract rule ID from the options section
-            if let Some(sid_start) = rest.find("sid:") {
-                let after_sid = &rest[sid_start + 4..];
-                if let Some(sid_end) = after_sid.find(|c| !char::is_numeric(c)) {
-                    let rule_id = after_sid[..sid_end].to_string();
-                    let is_enabled = !disabled_set.contains(&rule_id);
+            if let Some(rule_id) = extract_sid(rest) {
+                let is_enabled = !disabled_set.contains(&rule_id);
 
-                    // Extract signature/message from msg: field
-                    let signature = if let Some(msg_start) = rest.find("msg:\"") {
-                        let after_msg = &rest[msg_start + 5..];
-                        if let Some(msg_end) = after_msg.find('"') {
-                            after_msg[..msg_end].to_string()
-                        } else {
-                            rule_id.clone()
-                        }
+                // Extract signature/message from msg: field
+                let signature = if let Some(msg_start) = rest.find("msg:\"") {
+                    let after_msg = &rest[msg_start + 5..];
+                    if let Some(msg_end) = after_msg.find('"') {
+                        after_msg[..msg_end].to_string()
                     } else {
                         rule_id.clone()
-                    };
+                    }
+                } else {
+                    rule_id.clone()
+                };
 
-                    rules.push(crate::rules::models::Rule {
-                        id: rule_id,
-                        action: action.to_string(),
-                        signature,
-                        enabled: is_enabled,
-                        raw: trimmed.to_string(),
-                    });
-                }
+                rules.push(crate::rules::models::Rule {
+                    id: rule_id.clone(),
+                    action: action.to_string(),
+                    signature,
+                    enabled: is_enabled,
+                    raw: trimmed.to_string(),
+                });
             }
         }
     }
 
     rules
+}
+
+fn filter_disabled_rules(
+    content: &str,
+    disabled_set: &std::collections::HashSet<String>,
+) -> String {
+    let mut out = String::new();
+
+    for line in content.lines() {
+        if should_keep_rule_line(line, disabled_set) {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+
+    if !content.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+
+    out
+}
+
+fn should_keep_rule_line(line: &str, disabled_set: &std::collections::HashSet<String>) -> bool {
+    let trimmed = line.trim();
+
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return true;
+    }
+
+    extract_sid(trimmed)
+        .map(|sid| !disabled_set.contains(&sid))
+        .unwrap_or(true)
+}
+
+fn extract_sid(rule: &str) -> Option<String> {
+    let sid_start = rule.find("sid:")?;
+    let after_sid = &rule[sid_start + 4..];
+    let sid_end = after_sid
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(after_sid.len());
+    if sid_end == 0 {
+        return None;
+    }
+    Some(after_sid[..sid_end].to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -631,13 +716,19 @@ fn install_from_targz(data: &[u8], dest: &Path) -> Result<()> {
             continue;
         }
 
-        let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
-        writeln!(outfile, "# --- {fname} ---")
-            .context("failed to write rules header")?;
+        let fname = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
+        writeln!(outfile, "# --- {fname} ---").context("failed to write rules header")?;
 
         let mut buf = Vec::new();
-        entry.read_to_end(&mut buf).context("failed to read tar entry")?;
-        outfile.write_all(&buf).context("failed to write rules body")?;
+        entry
+            .read_to_end(&mut buf)
+            .context("failed to read tar entry")?;
+        outfile
+            .write_all(&buf)
+            .context("failed to write rules body")?;
 
         // Ensure each file ends with a newline.
         if buf.last() != Some(&b'\n') {
@@ -678,7 +769,6 @@ fn validate_rules_file(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules::models::RulesetStatus;
     use tempfile::TempDir;
 
     // -------------------------------------------------------------------
@@ -708,8 +798,14 @@ mod tests {
     #[test]
     fn extract_rules_from_targz() {
         let data = make_targz(&[
-            ("emerging-malware.rules", "alert tcp any any -> any any (msg:\"test\"; sid:1;)\n"),
-            ("emerging-scan.rules", "alert tcp any any -> any any (msg:\"scan\"; sid:2;)\n"),
+            (
+                "emerging-malware.rules",
+                "alert tcp any any -> any any (msg:\"test\"; sid:1;)\n",
+            ),
+            (
+                "emerging-scan.rules",
+                "alert tcp any any -> any any (msg:\"scan\"; sid:2;)\n",
+            ),
             ("not-rules.txt", "ignored"),
         ]);
 
@@ -743,7 +839,11 @@ mod tests {
     fn validate_passes_with_rule_content() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.rules");
-        std::fs::write(&path, "alert tcp any any -> any any (msg:\"test\"; sid:1;)\n").unwrap();
+        std::fs::write(
+            &path,
+            "alert tcp any any -> any any (msg:\"test\"; sid:1;)\n",
+        )
+        .unwrap();
         assert!(validate_rules_file(&path).is_ok());
     }
 
@@ -770,10 +870,7 @@ mod tests {
     #[test]
     fn version_prefers_etag_over_last_modified() {
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::ETAG,
-            "\"abc123\"".parse().unwrap(),
-        );
+        headers.insert(reqwest::header::ETAG, "\"abc123\"".parse().unwrap());
         headers.insert(
             reqwest::header::LAST_MODIFIED,
             "Wed, 01 Jan 2025 00:00:00 GMT".parse().unwrap(),
@@ -801,6 +898,82 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
+    // disabled-rule regeneration
+    // -------------------------------------------------------------------
+
+    fn sample_rules() -> &'static str {
+        "# header\n\
+alert tcp any any -> any any (msg:\"one\"; sid:1;)\n\
+alert tcp any any -> any any (msg:\"two\"; sid:2;)\n"
+    }
+
+    #[test]
+    fn regenerate_effective_rules_preserves_original_and_restores_rules() {
+        let config_dir = TempDir::new().unwrap();
+        let rulesets_dir = TempDir::new().unwrap();
+        let manager = RulesetManager::with_dirs(config_dir.path(), rulesets_dir.path());
+        let source_path = manager.store.source_rules_file("et-open");
+        std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        std::fs::write(&source_path, sample_rules()).unwrap();
+
+        manager
+            .save_disabled_rules(
+                "et-open",
+                &crate::rules::models::DisabledRules {
+                    ids: vec!["2".to_string()],
+                },
+            )
+            .unwrap();
+        manager.regenerate_effective_rules("et-open").unwrap();
+
+        let original = std::fs::read_to_string(&source_path).unwrap();
+        let effective = std::fs::read_to_string(manager.store.rules_file("et-open")).unwrap();
+        assert!(original.contains("sid:2"));
+        assert!(effective.contains("sid:1"));
+        assert!(!effective.contains("sid:2"));
+
+        manager
+            .save_disabled_rules("et-open", &crate::rules::models::DisabledRules::default())
+            .unwrap();
+        manager.regenerate_effective_rules("et-open").unwrap();
+
+        let effective = std::fs::read_to_string(manager.store.rules_file("et-open")).unwrap();
+        assert!(effective.contains("sid:1"));
+        assert!(effective.contains("sid:2"));
+
+        let listed = manager.list_rules("et-open").unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().all(|rule| rule.enabled));
+    }
+
+    #[test]
+    fn regenerate_effective_rules_migrates_legacy_single_file_install() {
+        let config_dir = TempDir::new().unwrap();
+        let rulesets_dir = TempDir::new().unwrap();
+        let manager = RulesetManager::with_dirs(config_dir.path(), rulesets_dir.path());
+        let effective_path = manager.store.rules_file("legacy");
+        std::fs::create_dir_all(effective_path.parent().unwrap()).unwrap();
+        std::fs::write(&effective_path, sample_rules()).unwrap();
+
+        manager
+            .save_disabled_rules(
+                "legacy",
+                &crate::rules::models::DisabledRules {
+                    ids: vec!["1".to_string()],
+                },
+            )
+            .unwrap();
+        manager.regenerate_effective_rules("legacy").unwrap();
+
+        let source = std::fs::read_to_string(manager.store.source_rules_file("legacy")).unwrap();
+        let effective = std::fs::read_to_string(effective_path).unwrap();
+        assert!(source.contains("sid:1"));
+        assert!(source.contains("sid:2"));
+        assert!(!effective.contains("sid:1"));
+        assert!(effective.contains("sid:2"));
+    }
+
+    // -------------------------------------------------------------------
     // find_source
     // -------------------------------------------------------------------
 
@@ -825,9 +998,17 @@ mod tests {
 
     #[test]
     fn blocked_url_detection_matches_suricata_7_feeds() {
-        assert!(is_blocked_suricata_ruleset_url("https://rules.emergingthreats.net/open/suricata-7.0/emerging.rules.tar.gz"));
-        assert!(is_blocked_suricata_ruleset_url("https://example.com/suricata-7.1/foo.rules"));
-        assert!(!is_blocked_suricata_ruleset_url("https://rules.emergingthreats.net/open/suricata-6.0/emerging.rules.tar.gz"));
-        assert!(!is_blocked_suricata_ruleset_url("https://openinfosecfoundation.org/rules/trafficid/trafficid.rules"));
+        assert!(is_blocked_suricata_ruleset_url(
+            "https://rules.emergingthreats.net/open/suricata-7.0/emerging.rules.tar.gz"
+        ));
+        assert!(is_blocked_suricata_ruleset_url(
+            "https://example.com/suricata-7.1/foo.rules"
+        ));
+        assert!(!is_blocked_suricata_ruleset_url(
+            "https://rules.emergingthreats.net/open/suricata-6.0/emerging.rules.tar.gz"
+        ));
+        assert!(!is_blocked_suricata_ruleset_url(
+            "https://openinfosecfoundation.org/rules/trafficid/trafficid.rules"
+        ));
     }
 }

@@ -5,8 +5,9 @@
 //! /var/lib/dayshield/rulesets/installed.json
 //! ```
 //!
-//! Downloaded rule files live under:
+//! Downloaded and generated rule files live under:
 //! ```text
+//! /var/lib/dayshield/rulesets/<id>/original.rules
 //! /var/lib/dayshield/rulesets/<id>/suricata.rules
 //! ```
 
@@ -54,9 +55,21 @@ impl RulesetStore {
         self.base_dir.join(id)
     }
 
-    /// Return the path to the combined `.rules` file for a given ruleset id.
-    pub fn rules_file(&self, id: &str) -> PathBuf {
+    /// Return the immutable downloaded `.rules` file for a given ruleset id.
+    pub fn source_rules_file(&self, id: &str) -> PathBuf {
+        self.ruleset_dir(id).join("original.rules")
+    }
+
+    /// Return the generated `.rules` file Suricata reads for a given ruleset id.
+    pub fn effective_rules_file(&self, id: &str) -> PathBuf {
         self.ruleset_dir(id).join("suricata.rules")
+    }
+
+    /// Return the generated `.rules` file for a given ruleset id.
+    ///
+    /// Kept as the public compatibility helper for existing callers.
+    pub fn rules_file(&self, id: &str) -> PathBuf {
+        self.effective_rules_file(id)
     }
 
     /// Load all installed rulesets from disk.
@@ -91,7 +104,8 @@ impl RulesetStore {
                 .with_context(|| format!("failed to create directory {}", parent.display()))?;
         }
 
-        let json = serde_json::to_string_pretty(rulesets).context("failed to serialise rulesets")?;
+        let json =
+            serde_json::to_string_pretty(rulesets).context("failed to serialise rulesets")?;
 
         // Atomic write via temp file + rename.
         let tmp = path.with_extension("json.tmp");
@@ -167,7 +181,9 @@ mod tests {
         // Write once.
         store.save(&[make_ruleset("et-open")]).unwrap();
         // Overwrite with different data.
-        store.save(&[make_ruleset("et-open"), make_ruleset("oisf-trafficid")]).unwrap();
+        store
+            .save(&[make_ruleset("et-open"), make_ruleset("oisf-trafficid")])
+            .unwrap();
 
         let loaded = store.load().unwrap();
         assert_eq!(loaded.len(), 2);
@@ -176,7 +192,18 @@ mod tests {
     #[test]
     fn ruleset_dir_and_rules_file_paths() {
         let store = RulesetStore::with_dir("/tmp/rulesets");
-        assert_eq!(store.ruleset_dir("et-open"), PathBuf::from("/tmp/rulesets/et-open"));
+        assert_eq!(
+            store.ruleset_dir("et-open"),
+            PathBuf::from("/tmp/rulesets/et-open")
+        );
+        assert_eq!(
+            store.source_rules_file("et-open"),
+            PathBuf::from("/tmp/rulesets/et-open/original.rules")
+        );
+        assert_eq!(
+            store.effective_rules_file("et-open"),
+            PathBuf::from("/tmp/rulesets/et-open/suricata.rules")
+        );
         assert_eq!(
             store.rules_file("et-open"),
             PathBuf::from("/tmp/rulesets/et-open/suricata.rules")

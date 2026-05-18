@@ -228,7 +228,8 @@ pub async fn list_installed(
     State(_state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, RulesetError> {
     let rulesets = RulesetStore::new().load().unwrap_or_default();
-    let response: Vec<InstalledRulesetResponse> = rulesets.iter().map(ruleset_to_response).collect();
+    let response: Vec<InstalledRulesetResponse> =
+        rulesets.iter().map(ruleset_to_response).collect();
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -383,13 +384,16 @@ pub async fn list_ruleset_rules(
 ) -> Result<impl IntoResponse, RulesetError> {
     let manager = make_manager(&state);
     let rules = manager.list_rules(&id)?;
-    
-    let response: Vec<RuleResponse> = rules.iter().map(|r| RuleResponse {
-        id: r.id.clone(),
-        action: r.action.clone(),
-        signature: r.signature.clone(),
-        enabled: r.enabled,
-    }).collect();
+
+    let response: Vec<RuleResponse> = rules
+        .iter()
+        .map(|r| RuleResponse {
+            id: r.id.clone(),
+            action: r.action.clone(),
+            signature: r.signature.clone(),
+            enabled: r.enabled,
+        })
+        .collect();
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -408,20 +412,21 @@ pub async fn update_disabled_rules(
     Json(req): Json<UpdateDisabledRulesRequest>,
 ) -> Result<impl IntoResponse, RulesetError> {
     let manager = make_manager(&state);
-    
+
     // Validate ruleset exists
     let rulesets = RulesetStore::new().load().unwrap_or_default();
-    let _ruleset = rulesets.iter()
+    let _ruleset = rulesets
+        .iter()
         .find(|r| r.id == id)
         .ok_or_else(|| RulesetError::NotFound(format!("Ruleset '{}' not found", id)))?;
-    
+
     // Save disabled rules
     let disabled = crate::rules::models::DisabledRules { ids: req.ids };
     manager.save_disabled_rules(&id, &disabled)?;
-    
+
     // Regenerate rules file to filter out disabled rules
     manager.regenerate_effective_rules(&id)?;
-    
+
     // Regenerate Suricata config to apply changes
     manager.apply_suricata_config().await?;
 

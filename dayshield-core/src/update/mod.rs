@@ -40,6 +40,7 @@ const ROOTFS_GRUB_SCRIPT: &str = "/etc/grub.d/09_dayshield_ab";
 const ROOTFS_GRUB_ENTRY_PREFIX: &str = "dayshield-";
 const ROOTFS_ISO_UPGRADE_MARKER: &str = "rootfs-iso-upgrade.json";
 const ROOTFS_BOOT_CONFIRM_DELAY_SECS: u64 = 90;
+const UPDATE_HTTP_USER_AGENT: &str = concat!("dayshield-core/", env!("CARGO_PKG_VERSION"));
 /// GitHub Releases repository: https://github.com/daygle/dayshield-core
 /// Artifacts are attached to releases as: core-v1.2.3.tar.zst, ui-v1.2.3.tar.zst, etc.
 const DEFAULT_REGISTRY_URL: &str = "https://api.github.com/repos/daygle/dayshield-core";
@@ -1618,7 +1619,7 @@ async fn query_github_repo_manifest(
             ACCEPT,
             HeaderValue::from_static("application/vnd.github.raw+json"),
         )
-        .header(USER_AGENT, HeaderValue::from_static("dayshield-core/1.0"))
+        .header(USER_AGENT, HeaderValue::from_static(UPDATE_HTTP_USER_AGENT))
         .header(
             HeaderName::from_static("x-github-api-version"),
             HeaderValue::from_static("2022-11-28"),
@@ -1677,7 +1678,7 @@ async fn query_github_releases(
     let mut request = client
         .get(&releases_url)
         .header(ACCEPT, HeaderValue::from_static("application/vnd.github+json"))
-        .header(USER_AGENT, HeaderValue::from_static("dayshield-core/1.0"))
+        .header(USER_AGENT, HeaderValue::from_static(UPDATE_HTTP_USER_AGENT))
         .header(HeaderName::from_static("x-github-api-version"), HeaderValue::from_static("2022-11-28"));
 
     if let Ok(token) = env::var("DAYSHIELD_GITHUB_TOKEN").or_else(|_| env::var("GITHUB_TOKEN")).or_else(|_| env::var("GH_TOKEN")) {

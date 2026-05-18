@@ -1093,6 +1093,8 @@ mod tests {
             pppoe_username: None,
             pppoe_password: None,
             gateway: None,
+            block_private_networks: false,
+            block_bogon_networks: false,
         }
     }
 

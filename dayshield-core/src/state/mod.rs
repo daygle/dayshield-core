@@ -97,10 +97,12 @@ impl AppState {
             .to_path_buf();
 
         let config = config_store.load_ai_engine_config().unwrap_or_default();
+        let firewall_rules = config_store.load_firewall_rules().unwrap_or_default();
+        let interfaces = config_store.load_interfaces().unwrap_or_default();
         let state = Self {
             services: RwLock::new(services),
-            interfaces: RwLock::new(vec![]),
-            firewall_rules: RwLock::new(vec![]),
+            interfaces: RwLock::new(interfaces),
+            firewall_rules: RwLock::new(firewall_rules),
             crowdsec_decisions: RwLock::new(vec![]),
             config_store,
             metrics_buffer: RwLock::new(MetricsBuffer::default()),
@@ -125,6 +127,9 @@ impl AppState {
             .to_path_buf();
         let config = state.config_store.load_ai_engine_config().unwrap_or_default();
         state.ai_runtime = AiRuntime::new(&config_dir, config);
+        state.interfaces = RwLock::new(state.config_store.load_interfaces().unwrap_or_default());
+        state.firewall_rules =
+            RwLock::new(state.config_store.load_firewall_rules().unwrap_or_default());
         (state, rx)
     }
 

@@ -118,6 +118,12 @@ struct VersionedConfig {
 /// Each arm of the `match` applies one incremental migration step.  Future
 /// schema changes should add a new arm here and bump [`CURRENT_SCHEMA_VERSION`].
 fn migrate_config(config: SystemConfig, from_version: u32) -> Result<SystemConfig> {
+    if from_version > CURRENT_SCHEMA_VERSION {
+        anyhow::bail!(
+            "Unknown schema version {from_version}; cannot migrate to {CURRENT_SCHEMA_VERSION}"
+        );
+    }
+
     let mut version = from_version;
 
     while version < CURRENT_SCHEMA_VERSION {
@@ -300,9 +306,10 @@ impl ConfigStore {
     pub fn validate(&self, config: &SystemConfig) -> Result<()> {
         use crate::config::models::{
             ensure_ipv6_allowed,
-            is_valid_cidr, is_valid_domain, is_valid_interface_name, is_valid_ip,
-            is_valid_ipv4_addr, is_valid_ipv4_range, is_valid_mac, is_valid_mss, is_valid_mtu, is_valid_port,
-            is_valid_vlan_id, Ipv6Mode,
+            is_valid_cidr, is_valid_cidr_or_addr, is_valid_domain, is_valid_interface_name, is_valid_ip,
+            is_valid_ipv4_addr, is_valid_ipv4_range, is_valid_mac, is_valid_mss, is_valid_mtu,
+            is_valid_port, is_valid_vlan_id, validate_firewall_rule, validate_firewall_settings,
+            Ipv6Mode,
         };
 
         let interface_names: std::collections::HashSet<&str> =
@@ -499,92 +506,13 @@ impl ConfigStore {
             }
         }
 
-        // Firewall rules must have a non-negative priority.
+        // Firewall rules and settings.
         for rule in &config.firewall_rules {
-            if rule.priority < 0 {
-                anyhow::bail!(
-                    "Firewall rule {} has negative priority {}",
-                    rule.id,
-                    rule.priority
-                );
-            }
-            if matches!(rule.ip_family, crate::config::models::FirewallAddressFamily::Ipv6)
-                && !ipv6_enabled
-            {
-                anyhow::bail!(
-                    "Firewall rule {} uses IPv6 family but system ipv6Enabled is false",
-                    rule.id
-                );
-            }
-            if matches!(rule.protocol.as_ref(), Some(crate::config::models::Protocol::Icmpv6))
-                && !ipv6_enabled
-            {
-                anyhow::bail!(
-                    "Firewall rule {} uses ICMPv6 but system ipv6Enabled is false",
-                    rule.id
-                );
-            }
-            if matches!(rule.protocol.as_ref(), Some(crate::config::models::Protocol::Icmpv6))
-                && matches!(rule.ip_family, crate::config::models::FirewallAddressFamily::Ipv4)
-            {
-                anyhow::bail!(
-                    "Firewall rule {} uses ICMPv6 but ip_family is ipv4",
-                    rule.id
-                );
-            }
-            if matches!(rule.protocol.as_ref(), Some(crate::config::models::Protocol::Icmp))
-                && matches!(rule.ip_family, crate::config::models::FirewallAddressFamily::Ipv6)
-            {
-                anyhow::bail!(
-                    "Firewall rule {} uses ICMP but ip_family is ipv6",
-                    rule.id
-                );
-            }
-            if let Some(src) = &rule.source {
-                if let Err(msg) = ensure_ipv6_allowed(
-                    src,
-                    ipv6_enabled,
-                    &format!("Firewall rule {} source", rule.id),
-                ) {
-                    anyhow::bail!("{msg}");
-                }
-            }
-            if let Some(dst) = &rule.destination {
-                if let Err(msg) = ensure_ipv6_allowed(
-                    dst,
-                    ipv6_enabled,
-                    &format!("Firewall rule {} destination", rule.id),
-                ) {
-                    anyhow::bail!("{msg}");
-                }
-            }
-            for (label, value) in [
-                ("max_states", rule.state_limits.max_states),
-                ("max_source_nodes", rule.state_limits.max_source_nodes),
-                ("max_source_states", rule.state_limits.max_source_states),
-                ("max_source_connections", rule.state_limits.max_source_connections),
-                ("max_new_connections", rule.state_limits.max_new_connections),
-                (
-                    "max_new_connections_seconds",
-                    rule.state_limits.max_new_connections_seconds,
-                ),
-                (
-                    "max_new_connections_per_source",
-                    rule.state_limits.max_new_connections_per_source,
-                ),
-                (
-                    "max_new_connections_per_source_seconds",
-                    rule.state_limits.max_new_connections_per_source_seconds,
-                ),
-            ] {
-                if value == Some(0) {
-                    anyhow::bail!("Firewall rule {} {} must be greater than 0", rule.id, label);
-                }
-            }
+            validate_firewall_rule(rule, ipv6_enabled).map_err(anyhow::Error::msg)?;
         }
 
-        // Firewall global settings validation.
         if let Some(settings) = &config.firewall_settings {
+            validate_firewall_settings(settings, ipv6_enabled).map_err(anyhow::Error::msg)?;
             if settings.syn_flood_rate == 0 {
                 anyhow::bail!("Firewall syn_flood_rate must be greater than 0");
             }
@@ -603,9 +531,9 @@ impl ConfigStore {
                 }
             }
             for src in &settings.management_allowed_sources {
-                if !is_valid_cidr(src) {
+                if !is_valid_cidr_or_addr(src) {
                     anyhow::bail!(
-                        "Firewall management_allowed_sources contains invalid CIDR {:?}",
+                        "Firewall management_allowed_sources contains invalid IP/CIDR {:?}",
                         src
                     );
                 }
@@ -1755,6 +1683,8 @@ mod tests {
             pppoe_username: None,
             pppoe_password: None,
             gateway: None,
+            block_private_networks: false,
+            block_bogon_networks: false,
         }
     }
 
@@ -1886,6 +1816,8 @@ mod tests {
             pppoe_username: None,
             pppoe_password: None,
             gateway: None,
+            block_private_networks: false,
+            block_bogon_networks: false,
         });
         assert!(store.validate(&cfg).is_err());
 
@@ -1920,6 +1852,8 @@ mod tests {
             pppoe_username: None,
             pppoe_password: None,
             gateway: None,
+            block_private_networks: false,
+            block_bogon_networks: false,
         });
         assert!(store.validate(&cfg).is_err());
 
@@ -1954,6 +1888,8 @@ mod tests {
             pppoe_username: None,
             pppoe_password: None,
             gateway: None,
+            block_private_networks: false,
+            block_bogon_networks: false,
         });
         assert!(store.validate(&cfg).is_err());
 
@@ -1988,6 +1924,8 @@ mod tests {
             pppoe_username: None,
             pppoe_password: None,
             gateway: None,
+            block_private_networks: false,
+            block_bogon_networks: false,
         });
         assert!(store.validate(&cfg).is_err());
 
@@ -2022,6 +1960,8 @@ mod tests {
             pppoe_username: None,
             pppoe_password: None,
             gateway: None,
+            block_private_networks: false,
+            block_bogon_networks: false,
         });
         assert!(store.validate(&cfg).is_err());
 
@@ -2057,6 +1997,8 @@ mod tests {
             pppoe_username: None,
             pppoe_password: None,
             gateway: None,
+            block_private_networks: false,
+            block_bogon_networks: false,
         });
         assert!(store.validate(&cfg).is_ok());
 
@@ -2179,6 +2121,35 @@ mod tests {
 
         let result = store.save_firewall_rules(vec![bad_rule]);
         assert!(result.is_err(), "negative priority must be rejected");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_firewall_rules_accepts_bare_ip_addresses() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut rule = make_rule("allow-single-host");
+        rule.source = Some("192.168.1.10".into());
+        rule.destination = Some("10.0.0.5".into());
+
+        assert!(store.save_firewall_rules(vec![rule]).is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_firewall_rules_rejects_ports_without_tcp_or_udp() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut rule = make_rule("bad-port-rule");
+        rule.destination_port = Some(443);
+        rule.protocol = None;
+
+        let result = store.save_firewall_rules(vec![rule]);
+        assert!(result.is_err(), "ports must require tcp or udp protocol");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

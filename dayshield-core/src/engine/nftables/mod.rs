@@ -25,7 +25,7 @@ use crate::config::models::{
     Action, AddressFamily, AliasType, FirewallAddressFamily, FirewallAlias, FirewallChainPolicy,
     CaptivePortalConfig, CaptivePortalSession, FirewallDirection, FirewallRule, FirewallSchedule,
     FirewallSettings, FirewallStateLimits, Interface, LogPosition, NatConfig, NatProtocol,
-    NatRuleType, OutboundMode, Protocol,
+    NatRuleType, OutboundMode, Protocol, is_valid_cidr, is_valid_ip,
 };
 
 const DEFAULT_BLOCK_LOG_RATE_PER_SECOND: u32 = 10;
@@ -646,12 +646,7 @@ pub async fn apply_rules_with_captive(
         interfaces,
     );
 
-    // Unique temp file name based on milliseconds since UNIX epoch.
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let tmp_path = std::env::temp_dir().join(format!("dayshield-nft-{}.conf", ts));
+    let tmp_path = std::env::temp_dir().join(format!("dayshield-nft-{}.conf", Uuid::new_v4()));
 
     debug!(path = %tmp_path.display(), "nftables: writing ruleset to temp file");
 
@@ -738,7 +733,7 @@ const ALIAS_CACHE_DIR: &str = "/var/lib/dayshield/aliases";
 fn parse_url_table_entries(text: &str) -> Vec<String> {
     text.lines()
         .map(|l| l.split('#').next().unwrap_or("").trim().to_string())
-        .filter(|l| !l.is_empty())
+        .filter(|l| !l.is_empty() && (is_valid_ip(l) || is_valid_cidr(l)))
         .collect()
 }
 
@@ -1119,12 +1114,12 @@ fn firewall_rule_uses_ipv6(rule: &FirewallRule) -> bool {
         return matches!(rule.ip_family, FirewallAddressFamily::Ipv6)
             || rule.source.as_deref().map_or(false, |value| value.contains(':'))
             || rule.destination.as_deref().map_or(false, |value| value.contains(':'))
-            || matches!(rule.protocol, Some(Protocol::Icmpv6));
+            || matches!(rule.protocol.as_ref(), Some(Protocol::Icmpv6));
     }
 
     rule.source.as_deref().map_or(false, |value| value.contains(':'))
         || rule.destination.as_deref().map_or(false, |value| value.contains(':'))
-        || matches!(rule.protocol, Some(Protocol::Icmpv6))
+        || matches!(rule.protocol.as_ref(), Some(Protocol::Icmpv6))
 }
 
 /// Translate a single [`FirewallRule`] into an nftables rule statement.
@@ -1200,8 +1195,11 @@ fn format_rule(rule: &FirewallRule, chain: FilterChain, log_position: &LogPositi
         }
     }
 
-    // Optional log statement before the verdict.
-    if rule.log && matches!(log_position, LogPosition::Before) {
+    // Optional log statement before the verdict. A log-only action must emit a
+    // log and then continue evaluating later rules instead of accepting.
+    if matches!(rule.action, Action::Log)
+        || (rule.log && matches!(log_position, LogPosition::Before))
+    {
         parts.push(format!("log prefix \"dayshield[{}]: \"", rule.id));
     }
 
@@ -1210,16 +1208,17 @@ fn format_rule(rule: &FirewallRule, chain: FilterChain, log_position: &LogPositi
 
     // Verdict.
     let action = match rule.action {
-        Action::Accept => "accept",
-        Action::Drop => "drop",
-        Action::Reject => "reject",
+        Action::Accept => Some("accept"),
+        Action::Drop => Some("drop"),
+        Action::Reject => Some("reject"),
         // Jump without a target chain is invalid nftables syntax; treat as drop
         // until a target-chain field is added to FirewallRule.
-        Action::Jump => "drop",
-        // Log-only: emit a log statement and then accept (continue).
-        Action::Log => "accept",
+        Action::Jump => Some("drop"),
+        Action::Log => None,
     };
-    parts.push(action.to_string());
+    if let Some(action) = action {
+        parts.push(action.to_string());
+    }
 
     parts.join(" ")
 }
@@ -1240,6 +1239,49 @@ fn rule_targets_chain(rule: &FirewallRule, chain: FilterChain) -> bool {
         FirewallDirection::Forward => chain == FilterChain::Forward,
         FirewallDirection::Output => chain == FilterChain::Output,
         FirewallDirection::Both => chain == FilterChain::Input || chain == FilterChain::Output,
+    }
+}
+
+fn push_nat_protocol_and_ports(
+    parts: &mut Vec<String>,
+    protocol: &NatProtocol,
+    source_port: Option<u16>,
+    destination_port: Option<u16>,
+) {
+    let has_ports = source_port.is_some() || destination_port.is_some();
+    match protocol {
+        NatProtocol::Tcp => {
+            if let Some(port) = source_port {
+                parts.push(format!("tcp sport {}", port));
+            }
+            if let Some(port) = destination_port {
+                parts.push(format!("tcp dport {}", port));
+            }
+            if !has_ports {
+                parts.push("meta l4proto tcp".to_string());
+            }
+        }
+        NatProtocol::Udp => {
+            if let Some(port) = source_port {
+                parts.push(format!("udp sport {}", port));
+            }
+            if let Some(port) = destination_port {
+                parts.push(format!("udp dport {}", port));
+            }
+            if !has_ports {
+                parts.push("meta l4proto udp".to_string());
+            }
+        }
+        NatProtocol::TcpUdp => {
+            parts.push("meta l4proto { tcp, udp }".to_string());
+            if let Some(port) = source_port {
+                parts.push(format!("th sport {}", port));
+            }
+            if let Some(port) = destination_port {
+                parts.push(format!("th dport {}", port));
+            }
+        }
+        NatProtocol::Any => {}
     }
 }
 
@@ -1331,7 +1373,6 @@ fn is_schedule_active(schedule: Option<&FirewallSchedule>) -> bool {
 /// rule that matches the translated destination so the packet is not silently
 /// dropped.
 fn format_dnat_forward_accept(nat: &crate::config::models::NatRule) -> Option<String> {
-    use crate::config::models::NatProtocol;
     let translation = nat.translation.as_ref()?;
     let addr = translation.address.as_deref()?;
 
@@ -1348,24 +1389,7 @@ fn format_dnat_forward_accept(nat: &crate::config::models::NatRule) -> Option<St
     // Match the translated port (falls back to the original destination port
     // when no port translation is configured).
     let effective_port = translation.port.or(nat.destination_port);
-    match nat.protocol {
-        NatProtocol::Tcp => {
-            if let Some(p) = effective_port {
-                parts.push(format!("tcp dport {}", p));
-            }
-        }
-        NatProtocol::Udp => {
-            if let Some(p) = effective_port {
-                parts.push(format!("udp dport {}", p));
-            }
-        }
-        NatProtocol::TcpUdp => {
-            if let Some(p) = effective_port {
-                parts.push(format!("{{ tcp, udp }} dport {}", p));
-            }
-        }
-        NatProtocol::Any => {}
-    }
+    push_nat_protocol_and_ports(&mut parts, &nat.protocol, None, effective_port);
 
     parts.push("accept".to_string());
     Some(parts.join(" "))
@@ -1388,25 +1412,12 @@ fn format_nat_prerouting(nat: &crate::config::models::NatRule) -> Option<String>
             if let Some(dst) = &nat.destination {
                 parts.push(format!("{} daddr {}", nft_ip_keyword(&nat.address_family), dst));
             }
-            // Protocol + destination port.
-            match nat.protocol {
-                NatProtocol::Tcp => {
-                    if let Some(dport) = nat.destination_port {
-                        parts.push(format!("tcp dport {}", dport));
-                    }
-                }
-                NatProtocol::Udp => {
-                    if let Some(dport) = nat.destination_port {
-                        parts.push(format!("udp dport {}", dport));
-                    }
-                }
-                NatProtocol::TcpUdp => {
-                    if let Some(dport) = nat.destination_port {
-                        parts.push(format!("{{ tcp, udp }} dport {}", dport));
-                    }
-                }
-                NatProtocol::Any => {}
-            }
+            push_nat_protocol_and_ports(
+                &mut parts,
+                &nat.protocol,
+                nat.source_port,
+                nat.destination_port,
+            );
             // Translation target.
             let translation = nat.translation.as_ref()?;
             let addr = translation.address.as_deref()?;
@@ -1426,9 +1437,18 @@ fn format_nat_postrouting(nat: &crate::config::models::NatRule) -> Option<String
             if let Some(src) = &nat.source {
                 parts.push(format!("{} saddr {}", nft_ip_keyword(&nat.address_family), src));
             }
+            if let Some(dst) = &nat.destination {
+                parts.push(format!("{} daddr {}", nft_ip_keyword(&nat.address_family), dst));
+            }
             if let Some(iface) = &nat.interface {
                 parts.push(format!("oifname \"{}\"", iface));
             }
+            push_nat_protocol_and_ports(
+                &mut parts,
+                &nat.protocol,
+                nat.source_port,
+                nat.destination_port,
+            );
             parts.push("masquerade".to_string());
             Some(parts.join(" "))
         }
@@ -1437,9 +1457,18 @@ fn format_nat_postrouting(nat: &crate::config::models::NatRule) -> Option<String
             if let Some(src) = &nat.source {
                 parts.push(format!("{} saddr {}", nft_ip_keyword(&nat.address_family), src));
             }
+            if let Some(dst) = &nat.destination {
+                parts.push(format!("{} daddr {}", nft_ip_keyword(&nat.address_family), dst));
+            }
             if let Some(iface) = &nat.interface {
                 parts.push(format!("oifname \"{}\"", iface));
             }
+            push_nat_protocol_and_ports(
+                &mut parts,
+                &nat.protocol,
+                nat.source_port,
+                nat.destination_port,
+            );
             let translation = nat.translation.as_ref()?;
             let addr = translation.address.as_deref()?;
             parts.push(format_nat_target("snat", addr, translation.port, translation.port_end));
@@ -1906,8 +1935,8 @@ mod tests {
             .nth(1)
             .and_then(|section| section.split("\n    }\n\n    chain output").next())
             .unwrap_or_default();
-        assert!(rs.contains("ip saddr 192.168.1.0/24 accept"));
-        assert!(!forward_section.contains("ip saddr 192.168.1.0/24 accept"));
+        assert!(rs.contains("ip saddr 192.168.1.0/24"));
+        assert!(!forward_section.contains("ip saddr 192.168.1.0/24"));
     }
 
     #[test]
@@ -1942,13 +1971,29 @@ mod tests {
     }
 
     #[test]
+    fn log_action_logs_without_accepting() {
+        let rule = FirewallRule {
+            action: Action::Log,
+            ..base_rule(0, Action::Log)
+        };
+        let rs = generate_ruleset(&[rule], None, &[], None, &HashMap::new());
+        let log_line = rs
+            .lines()
+            .find(|line| line.contains("log prefix \"dayshield["))
+            .expect("log-only rule must emit a log line");
+        assert!(!log_line.contains(" accept"));
+        assert!(!log_line.contains(" drop"));
+        assert!(!log_line.contains(" reject"));
+    }
+
+    #[test]
     fn interface_binding_adds_iif() {
         let rule = FirewallRule {
             interface: Some("eth0".into()),
             ..base_rule(0, Action::Accept)
         };
         let rs = generate_ruleset(&[rule], None, &[], None, &HashMap::new());
-        assert!(rs.contains("iif \"eth0\""));
+        assert!(rs.contains("iifname \"eth0\""));
     }
 
     #[test]
@@ -2031,13 +2076,13 @@ mod tests {
         assert!(rs.contains("ip saddr 192.168.0.0/24"), "source address missing");
         assert!(rs.contains("masquerade"), "masquerade missing");
         // Auto rule must NOT appear in manual mode.
-        let postrouting_start = rs.find("chain postrouting").unwrap();
-        let postrouting_body = &rs[postrouting_start..];
-        // The oifname from the user rule must be present but auto-masquerade line
-        // should not appear as a standalone "oifname eth0 masquerade" without src.
-        let auto_line = "oifname \"eth0\" masquerade";
-        // Manual mode: no bare auto masquerade line.
-        assert!(!postrouting_body.contains(auto_line), "auto masquerade must not appear in manual mode");
+        let has_bare_auto_line = rs
+            .lines()
+            .any(|line| line.trim() == "oifname \"eth0\" masquerade");
+        assert!(
+            !has_bare_auto_line,
+            "auto masquerade must not appear in manual mode"
+        );
     }
 
     #[test]
@@ -2066,6 +2111,21 @@ mod tests {
         assert!(rs.contains("chain prerouting"), "prerouting chain missing");
         assert!(rs.contains("ip daddr 203.0.113.1/32"), "dst addr missing");
         assert!(rs.contains("dnat to 10.0.0.1:8080"), "dnat target missing");
+    }
+
+    #[test]
+    fn tcp_udp_nat_uses_transport_header_port_match() {
+        let mut rule = dnat_rule("203.0.113.1/32", "10.0.0.1", Some(53));
+        rule.protocol = NatProtocol::TcpUdp;
+        let nat = NatConfig {
+            outbound_mode: OutboundMode::Manual,
+            wan_interfaces: vec![],
+            rules: vec![rule],
+            nat_reflection: false,
+        };
+        let rs = generate_ruleset(&[], Some(&nat), &[], None, &HashMap::new());
+        assert!(rs.contains("meta l4proto { tcp, udp } th dport 53"));
+        assert!(!rs.contains("{ tcp, udp } dport"));
     }
 
     #[test]

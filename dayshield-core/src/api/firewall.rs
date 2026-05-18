@@ -31,7 +31,8 @@ use uuid::Uuid;
 
 use crate::{
     config::models::{
-        ensure_ipv6_allowed, is_valid_cidr, is_valid_interface_name, is_valid_port, Action,
+        ensure_ipv6_allowed, is_valid_cidr_or_addr, is_valid_interface_name, is_valid_port,
+        validate_firewall_rule, validate_firewall_schedule, validate_firewall_settings, Action,
         FirewallAddressFamily, FirewallDirection, FirewallRule, FirewallSchedule,
         FirewallSettings, FirewallStateLimits, Protocol,
     },
@@ -131,13 +132,13 @@ pub async fn update_settings(
         }
     }
     for src in &settings.management_allowed_sources {
-        if !is_valid_cidr(src) {
+        if !is_valid_cidr_or_addr(src) {
             return Err(NftError::ValidationFailed(format!(
-                "invalid management source CIDR: {}",
+                "invalid management source IP/CIDR: {}",
                 src
             )));
         }
-        if let Err(msg) = ensure_ipv6_allowed(src, ipv6_enabled, "management source CIDR") {
+        if let Err(msg) = ensure_ipv6_allowed(src, ipv6_enabled, "management source IP/CIDR") {
             return Err(NftError::ValidationFailed(msg));
         }
     }
@@ -161,13 +162,41 @@ pub async fn update_settings(
             "syn_flood_burst must be greater than 0".into(),
         ));
     }
+    validate_firewall_settings(&settings, ipv6_enabled).map_err(NftError::ValidationFailed)?;
+
+    let previous_settings = state
+        .config_store
+        .load_firewall_settings()
+        .map_err(NftError::StorageError)?;
 
     state
         .config_store
         .save_firewall_settings(settings.clone())
         .map_err(NftError::StorageError)?;
 
-    crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await?;
+    if let Err(apply_err) = crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await {
+        warn!(
+            error = %apply_err,
+            "firewall: nftables apply failed after settings save; rolling back settings"
+        );
+        if let Err(rollback_err) = state
+            .config_store
+            .save_firewall_settings(previous_settings)
+        {
+            warn!(
+                error = %rollback_err,
+                "firewall: failed to restore previous firewall settings after apply failure"
+            );
+        } else if let Err(reapply_err) =
+            crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await
+        {
+            warn!(
+                error = %reapply_err,
+                "firewall: failed to reapply previous settings after rollback"
+            );
+        }
+        return Err(apply_err);
+    }
 
     Ok(Json(settings))
 }
@@ -201,6 +230,18 @@ fn default_true() -> bool { true }
 fn default_direction() -> FirewallDirection { FirewallDirection::Forward }
 
 fn validate_rule_request(req: &CreateRuleRequest, ipv6_enabled: bool) -> Result<(), NftError> {
+    if req.priority < 0 {
+        return Err(NftError::ValidationFailed(
+            "priority must be greater than or equal to 0".into(),
+        ));
+    }
+
+    if matches!(req.action, Action::Jump) {
+        return Err(NftError::ValidationFailed(
+            "jump action requires a target chain and is not supported yet".into(),
+        ));
+    }
+
     if matches!(req.ip_family, FirewallAddressFamily::Ipv6) && !ipv6_enabled {
         return Err(NftError::ValidationFailed(
             "IPv6 firewall rules require system ipv6Enabled".into(),
@@ -228,11 +269,11 @@ fn validate_rule_request(req: &CreateRuleRequest, ipv6_enabled: bool) -> Result<
     }
 
     if let Some(src) = &req.source {
-        if !is_valid_cidr(src) {
-            warn!(src = %src, "firewall: invalid source CIDR");
-            return Err(NftError::ValidationFailed(format!("invalid source CIDR: {src}")));
+        if !is_valid_cidr_or_addr(src) {
+            warn!(src = %src, "firewall: invalid source IP/CIDR");
+            return Err(NftError::ValidationFailed(format!("invalid source IP/CIDR: {src}")));
         }
-        if let Err(msg) = ensure_ipv6_allowed(src, ipv6_enabled, "firewall source CIDR") {
+        if let Err(msg) = ensure_ipv6_allowed(src, ipv6_enabled, "firewall source IP/CIDR") {
             return Err(NftError::ValidationFailed(msg));
         }
         if src.contains(':') && matches!(req.ip_family, FirewallAddressFamily::Ipv4) {
@@ -248,11 +289,11 @@ fn validate_rule_request(req: &CreateRuleRequest, ipv6_enabled: bool) -> Result<
     }
 
     if let Some(dst) = &req.destination {
-        if !is_valid_cidr(dst) {
-            warn!(dst = %dst, "firewall: invalid destination CIDR");
-            return Err(NftError::ValidationFailed(format!("invalid destination CIDR: {dst}")));
+        if !is_valid_cidr_or_addr(dst) {
+            warn!(dst = %dst, "firewall: invalid destination IP/CIDR");
+            return Err(NftError::ValidationFailed(format!("invalid destination IP/CIDR: {dst}")));
         }
-        if let Err(msg) = ensure_ipv6_allowed(dst, ipv6_enabled, "firewall destination CIDR") {
+        if let Err(msg) = ensure_ipv6_allowed(dst, ipv6_enabled, "firewall destination IP/CIDR") {
             return Err(NftError::ValidationFailed(msg));
         }
         if dst.contains(':') && matches!(req.ip_family, FirewallAddressFamily::Ipv4) {
@@ -265,6 +306,18 @@ fn validate_rule_request(req: &CreateRuleRequest, ipv6_enabled: bool) -> Result<
                 "IPv4 destination cannot use ipFamily=ipv6".into(),
             ));
         }
+    }
+
+    let has_ports = req.source_port.is_some() || req.destination_port.is_some();
+    if has_ports
+        && !matches!(
+            req.protocol.as_ref(),
+            Some(Protocol::Tcp) | Some(Protocol::Udp)
+        )
+    {
+        return Err(NftError::ValidationFailed(
+            "source_port and destination_port require protocol tcp or udp".into(),
+        ));
     }
 
     if let Some(sport) = req.source_port {
@@ -288,6 +341,10 @@ fn validate_rule_request(req: &CreateRuleRequest, ipv6_enabled: bool) -> Result<
             warn!(iface = %iface, "firewall: invalid interface name");
             return Err(NftError::ValidationFailed(format!("invalid interface name: {iface}")));
         }
+    }
+
+    if let Some(schedule) = &req.schedule {
+        validate_firewall_schedule(schedule).map_err(NftError::ValidationFailed)?;
     }
 
     for (label, value) in [
@@ -319,6 +376,57 @@ fn validate_rule_request(req: &CreateRuleRequest, ipv6_enabled: bool) -> Result<
     Ok(())
 }
 
+async fn save_rules_and_apply<F, T>(
+    state: &Arc<AppState>,
+    mutate: F,
+) -> Result<T, NftError>
+where
+    F: FnOnce(&mut Vec<FirewallRule>) -> Result<T, NftError>,
+{
+    let mut cache = state.firewall_rules.write().await;
+    let old_rules = state
+        .config_store
+        .load_firewall_rules()
+        .map_err(NftError::StorageError)?;
+    let mut new_rules = old_rules.clone();
+    let result = mutate(&mut new_rules)?;
+
+    state
+        .config_store
+        .save_firewall_rules(new_rules.clone())
+        .map_err(NftError::StorageError)?;
+    *cache = new_rules;
+
+    if let Err(apply_err) = crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await {
+        warn!(
+            error = %apply_err,
+            "firewall: nftables apply failed after save; rolling back firewall rules"
+        );
+        match state.config_store.save_firewall_rules(old_rules.clone()) {
+            Ok(()) => {
+                *cache = old_rules;
+                if let Err(reapply_err) =
+                    crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await
+                {
+                    warn!(
+                        error = %reapply_err,
+                        "firewall: failed to reapply previous rules after rollback"
+                    );
+                }
+            }
+            Err(rollback_err) => {
+                warn!(
+                    error = %rollback_err,
+                    "firewall: failed to restore previous firewall rules after apply failure"
+                );
+            }
+        }
+        return Err(apply_err);
+    }
+
+    Ok(result)
+}
+
 /// Handler: create a new firewall rule.
 ///
 /// Validates all fields, appends the rule to persistent storage, and
@@ -337,7 +445,7 @@ pub async fn create_rule(
     validate_rule_request(&req, ipv6_enabled)?;
 
     if let Some(src) = &req.source {
-        if !is_valid_cidr(src) {
+        if !is_valid_cidr_or_addr(src) {
             warn!(src = %src, "firewall: invalid source CIDR");
             return Err(NftError::ValidationFailed(format!(
                 "invalid source CIDR: {src}"
@@ -349,7 +457,7 @@ pub async fn create_rule(
     }
 
     if let Some(dst) = &req.destination {
-        if !is_valid_cidr(dst) {
+        if !is_valid_cidr_or_addr(dst) {
             warn!(dst = %dst, "firewall: invalid destination CIDR");
             return Err(NftError::ValidationFailed(format!(
                 "invalid destination CIDR: {dst}"
@@ -413,6 +521,7 @@ pub async fn create_rule(
         schedule: req.schedule,
         state_limits: req.state_limits,
     };
+    validate_firewall_rule(&rule, ipv6_enabled).map_err(NftError::ValidationFailed)?;
 
     info!(
         id = %rule.id,
@@ -421,31 +530,15 @@ pub async fn create_rule(
         "firewall: received create rule request"
     );
 
-    // --- Persist -----------------------------------------------------------
-
-    // Append to in-memory cache and persist atomically.
-    // Hold the write lock across the disk write so that no concurrent reader
-    // can observe the new rule before it has been durably stored.
-    {
-        let mut rules = state.firewall_rules.write().await;
+    let created = save_rules_and_apply(&state, |rules| {
         rules.push(rule.clone());
+        Ok(rule.clone())
+    })
+    .await?;
 
-        if let Err(e) = state.config_store.save_firewall_rules(rules.clone()) {
-            // Roll back the in-memory change before returning the error.
-            rules.pop();
-            return Err(NftError::StorageError(e));
-        }
-    }
+    info!(id = %created.id, "firewall: rule persisted and nftables apply complete");
 
-    info!(id = %rule.id, "firewall: rule persisted");
-
-    // --- Apply -------------------------------------------------------------
-
-    crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await?;
-
-    info!(id = %rule.id, "firewall: nftables engine apply complete");
-
-    Ok((StatusCode::CREATED, Json(rule)))
+    Ok((StatusCode::CREATED, Json(created)))
 }
 
 /// Handler: update an existing firewall rule by UUID.
@@ -467,7 +560,7 @@ pub async fn update_rule(
     validate_rule_request(&req, ipv6_enabled)?;
 
     if let Some(src) = &req.source {
-        if !is_valid_cidr(src) {
+        if !is_valid_cidr_or_addr(src) {
             warn!(src = %src, "firewall: invalid source CIDR");
             return Err(NftError::ValidationFailed(format!("invalid source CIDR: {src}")));
         }
@@ -476,7 +569,7 @@ pub async fn update_rule(
         }
     }
     if let Some(dst) = &req.destination {
-        if !is_valid_cidr(dst) {
+        if !is_valid_cidr_or_addr(dst) {
             warn!(dst = %dst, "firewall: invalid destination CIDR");
             return Err(NftError::ValidationFailed(format!("invalid destination CIDR: {dst}")));
         }
@@ -532,6 +625,7 @@ pub async fn update_rule(
         schedule: req.schedule,
         state_limits: req.state_limits,
     };
+    validate_firewall_rule(&updated, ipv6_enabled).map_err(NftError::ValidationFailed)?;
 
     info!(
         id = %id,
@@ -540,28 +634,17 @@ pub async fn update_rule(
         "firewall: received update rule request"
     );
 
-    // --- Persist -----------------------------------------------------------
-
-    {
-        let mut rules = state.firewall_rules.write().await;
+    let updated = save_rules_and_apply(&state, |rules| {
         let pos = rules
             .iter()
             .position(|r| r.id == id)
             .ok_or_else(|| NftError::NotFound(id.to_string()))?;
         rules[pos] = updated.clone();
-        state
-            .config_store
-            .save_firewall_rules(rules.clone())
-            .map_err(NftError::StorageError)?;
-    }
+        Ok(updated.clone())
+    })
+    .await?;
 
-    info!(id = %id, "firewall: rule updated");
-
-    // --- Apply -------------------------------------------------------------
-
-    crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await?;
-
-    info!(id = %id, "firewall: nftables engine apply complete after update");
+    info!(id = %id, "firewall: rule updated and nftables apply complete");
 
     Ok(Json(updated))
 }
@@ -574,8 +657,7 @@ pub async fn clone_rule(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, NftError> {
-    let cloned = {
-        let mut rules = state.firewall_rules.write().await;
+    let cloned = save_rules_and_apply(&state, |rules| {
         let original = rules
             .iter()
             .find(|rule| rule.id == id)
@@ -589,20 +671,11 @@ pub async fn clone_rule(
             .map(|description| format!("{description} (copy)"));
 
         rules.push(cloned.clone());
+        Ok(cloned)
+    })
+    .await?;
 
-        if let Err(e) = state.config_store.save_firewall_rules(rules.clone()) {
-            rules.pop();
-            return Err(NftError::StorageError(e));
-        }
-
-        cloned
-    };
-
-    info!(source_id = %id, cloned_id = %cloned.id, "firewall: rule cloned");
-
-    crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await?;
-
-    info!(id = %cloned.id, "firewall: nftables engine apply complete after clone");
+    info!(source_id = %id, cloned_id = %cloned.id, "firewall: rule cloned and nftables apply complete");
 
     Ok((StatusCode::CREATED, Json(cloned)))
 }
@@ -627,6 +700,12 @@ pub async fn list_interface_rules(
     State(state): State<Arc<AppState>>,
     Path(interface_name): Path<String>,
 ) -> Result<impl IntoResponse, NftError> {
+    if !is_valid_interface_name(&interface_name) {
+        return Err(NftError::ValidationFailed(format!(
+            "invalid interface name: {interface_name}"
+        )));
+    }
+
     let rules = state
         .config_store
         .load_firewall_rules()
@@ -669,7 +748,7 @@ pub async fn create_interface_rule(
     validate_rule_request(&req, ipv6_enabled)?;
 
     if let Some(src) = &req.source {
-        if !is_valid_cidr(src) {
+        if !is_valid_cidr_or_addr(src) {
             warn!(src = %src, interface = %interface_name, "firewall: invalid source CIDR");
             return Err(NftError::ValidationFailed(format!(
                 "invalid source CIDR: {src}"
@@ -681,7 +760,7 @@ pub async fn create_interface_rule(
     }
 
     if let Some(dst) = &req.destination {
-        if !is_valid_cidr(dst) {
+        if !is_valid_cidr_or_addr(dst) {
             warn!(dst = %dst, interface = %interface_name, "firewall: invalid destination CIDR");
             return Err(NftError::ValidationFailed(format!(
                 "invalid destination CIDR: {dst}"
@@ -746,6 +825,7 @@ pub async fn create_interface_rule(
         schedule: req.schedule,
         state_limits: req.state_limits,
     };
+    validate_firewall_rule(&rule, ipv6_enabled).map_err(NftError::ValidationFailed)?;
 
     info!(
         id = %rule.id,
@@ -755,31 +835,19 @@ pub async fn create_interface_rule(
         "firewall: received create rule request for interface"
     );
 
-    // --- Persist -----------------------------------------------------------
-
-    {
-        let mut rules = state.firewall_rules.write().await;
+    let created = save_rules_and_apply(&state, |rules| {
         rules.push(rule.clone());
-
-        if let Err(e) = state.config_store.save_firewall_rules(rules.clone()) {
-            rules.pop();
-            return Err(NftError::StorageError(e));
-        }
-    }
-
-    info!(id = %rule.id, interface = %interface_name, "firewall: rule persisted");
-
-    // --- Apply -------------------------------------------------------------
-
-    crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await?;
+        Ok(rule.clone())
+    })
+    .await?;
 
     info!(
-        id = %rule.id,
+        id = %created.id,
         interface = %interface_name,
-        "firewall: nftables engine apply complete for interface"
+        "firewall: interface rule persisted and nftables apply complete"
     );
 
-    Ok((StatusCode::CREATED, Json(rule)))
+    Ok((StatusCode::CREATED, Json(created)))
 }
 
 /// Handler: delete a firewall rule for a specific interface.
@@ -792,22 +860,22 @@ pub async fn delete_interface_rule(
     State(state): State<Arc<AppState>>,
     Path((interface_name, rule_id)): Path<(String, Uuid)>,
 ) -> Result<impl IntoResponse, NftError> {
-    {
-        let mut rules = state.firewall_rules.write().await;
+    if !is_valid_interface_name(&interface_name) {
+        return Err(NftError::ValidationFailed(format!(
+            "invalid interface name: {interface_name}"
+        )));
+    }
+
+    save_rules_and_apply(&state, |rules| {
         let pos = rules
             .iter()
-            .position(|r| {
-                r.id == rule_id
-                    && (r.interface.is_none() || r.interface.as_deref() == Some(&interface_name))
-            })
+            .position(|r| r.id == rule_id && r.interface.as_deref() == Some(&interface_name))
             .ok_or_else(|| NftError::NotFound(rule_id.to_string()))?;
 
         rules.remove(pos);
-        state
-            .config_store
-            .save_firewall_rules(rules.clone())
-            .map_err(NftError::StorageError)?;
-    }
+        Ok(())
+    })
+    .await?;
 
     info!(
         id = %rule_id,
@@ -815,12 +883,10 @@ pub async fn delete_interface_rule(
         "firewall: rule deleted"
     );
 
-    crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await?;
-
     info!(
         id = %rule_id,
         interface = %interface_name,
-        "firewall: nftables engine apply complete after delete"
+        "firewall: nftables engine apply complete after interface delete"
     );
 
     Ok(StatusCode::NO_CONTENT)
@@ -835,22 +901,17 @@ pub async fn delete_rule(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, NftError> {
-    {
-        let mut rules = state.firewall_rules.write().await;
+    save_rules_and_apply(&state, |rules| {
         let before = rules.len();
         rules.retain(|r| r.id != id);
         if rules.len() == before {
             return Err(NftError::NotFound(id.to_string()));
         }
-        state
-            .config_store
-            .save_firewall_rules(rules.clone())
-            .map_err(NftError::StorageError)?;
-    }
+        Ok(())
+    })
+    .await?;
 
     info!(id = %id, "firewall: rule deleted");
-
-    crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await?;
 
     info!(id = %id, "firewall: nftables engine apply complete after delete");
 

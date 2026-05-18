@@ -911,6 +911,8 @@ mod tests {
             ipv6_address: None,
             ipv6_prefix: None,
             gateway: None,
+            block_private_networks: false,
+            block_bogon_networks: false,
         };
 
         let iface = req.to_interface();
@@ -943,6 +945,8 @@ mod tests {
             pppoe_username: None,
             pppoe_password: None,
             gateway: None,
+            block_private_networks: false,
+            block_bogon_networks: false,
         };
 
         let resp = InterfaceResponse::from_interface(&iface);

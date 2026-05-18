@@ -108,7 +108,7 @@ pub struct CreateNatRuleRequest {
     pub log: bool,
     #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub auto_firewall_rule: bool,
 }
 
@@ -419,7 +419,7 @@ mod tests {
         Router::new()
             .route("/nat/config", get(get_config).put(put_config))
             .route("/nat/rules", get(list_rules).post(create_rule))
-            .route("/nat/rules/:id", delete(delete_rule).put(update_rule))
+            .route("/nat/rules/{id}", delete(delete_rule).put(update_rule))
             .with_state(state)
     }
 

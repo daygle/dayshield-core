@@ -60,6 +60,8 @@ const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub struct FirewallBackup {
     pub rules: Vec<crate::config::models::FirewallRule>,
     pub aliases: Vec<crate::config::models::FirewallAlias>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<crate::config::models::FirewallSettings>,
 }
 
 /// Combined DNS backup entry (config + host overrides + domain overrides).
@@ -222,6 +224,7 @@ fn serialise_subsystem(
         Subsystem::Firewall => serde_json::to_vec_pretty(&FirewallBackup {
             rules: cfg.firewall_rules.clone(),
             aliases: cfg.firewall_aliases.clone(),
+            settings: cfg.firewall_settings.clone(),
         }),
         Subsystem::Dns => serde_json::to_vec_pretty(&DnsBackup {
             config: cfg.dns.clone(),

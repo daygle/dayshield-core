@@ -204,6 +204,11 @@ fn restore_subsystem(store: &ConfigStore, sub: &Subsystem, bytes: &[u8]) -> Resu
             store
                 .save_firewall_aliases(fw.aliases)
                 .context("failed to save firewall aliases")?;
+            if let Some(settings) = fw.settings {
+                store
+                    .save_firewall_settings(settings)
+                    .context("failed to save firewall settings")?;
+            }
         }
         Subsystem::Dns => {
             let dns: DnsBackup =

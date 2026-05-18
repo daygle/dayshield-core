@@ -6,6 +6,8 @@ use crate::rules::models::CuratedSource;
 
 const ET_OPEN_SURICATA6_RULES_BASE: &str =
     "https://rules.emergingthreats.net/open/suricata-6.0/rules";
+const ET_OPEN_SURICATA6_ARCHIVE: &str =
+    "https://rules.emergingthreats.net/open/suricata-6.0/emerging.rules.tar.gz";
 
 fn et_open_group_source(group_slug: &str) -> CuratedSource {
     let display = group_slug
@@ -102,10 +104,18 @@ pub fn curated_sources() -> Vec<CuratedSource> {
         "tor",
     ];
 
-    let sources: Vec<CuratedSource> = et_open_group_slugs
+    let mut sources: Vec<CuratedSource> = vec![CuratedSource {
+        id: "et-open".to_string(),
+        display_name: "Emerging Threats Open".to_string(),
+        description: "Emerging Threats Open Suricata 6.x combined community ruleset".to_string(),
+        url: ET_OPEN_SURICATA6_ARCHIVE.to_string(),
+        license: "BSD".to_string(),
+        vendor: "Proofpoint / Emerging Threats".to_string(),
+    }];
+
+    sources.extend(et_open_group_slugs
         .into_iter()
-        .map(et_open_group_source)
-        .collect();
+        .map(et_open_group_source));
 
     sources
 }

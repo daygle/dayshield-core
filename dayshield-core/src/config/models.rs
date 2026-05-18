@@ -3,7 +3,7 @@
 //! All structs are serialisable / deserialisable with serde so they can be
 //! written to JSON files on disk and exchanged over the REST API.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -398,6 +398,11 @@ pub fn is_valid_cidr(cidr: &str) -> bool {
     false
 }
 
+/// Return `true` if `value` is a valid IP address or CIDR prefix.
+pub fn is_valid_cidr_or_addr(value: &str) -> bool {
+    is_valid_ip(value) || is_valid_cidr(value)
+}
+
 /// Return `true` if `value` is a valid IPv6 CIDR string.
 pub fn is_valid_ipv6_cidr(value: &str) -> bool {
     if let Some((ip_str, prefix_str)) = value.split_once('/') {
@@ -440,6 +445,10 @@ pub fn ensure_ipv6_allowed(value: &str, ipv6_enabled: bool, context: &str) -> Re
         ));
     }
     Ok(())
+}
+
+fn firewall_value_is_ipv6(value: &str) -> bool {
+    is_valid_ipv6_addr(value) || is_valid_ipv6_cidr(value)
 }
 
 /// Return `true` if `mtu` is within the acceptable range (68–65 535 bytes).
@@ -740,6 +749,253 @@ pub struct FirewallRule {
     pub state_limits: FirewallStateLimits,
 }
 
+/// Validate a firewall schedule before it can affect rule generation.
+pub fn validate_firewall_schedule(schedule: &FirewallSchedule) -> Result<(), String> {
+    for day in &schedule.days {
+        if *day > 6 {
+            return Err(format!("firewall schedule day {} is out of range 0-6", day));
+        }
+    }
+
+    if let Some(time_start) = &schedule.time_start {
+        NaiveTime::parse_from_str(time_start, "%H:%M")
+            .map_err(|_| format!("firewall schedule time_start {:?} must use HH:MM", time_start))?;
+    }
+    if let Some(time_end) = &schedule.time_end {
+        NaiveTime::parse_from_str(time_end, "%H:%M")
+            .map_err(|_| format!("firewall schedule time_end {:?} must use HH:MM", time_end))?;
+    }
+
+    let date_start = if let Some(date_start) = &schedule.date_start {
+        Some(
+            NaiveDate::parse_from_str(date_start, "%Y-%m-%d").map_err(|_| {
+                format!("firewall schedule date_start {:?} must use YYYY-MM-DD", date_start)
+            })?,
+        )
+    } else {
+        None
+    };
+    let date_end = if let Some(date_end) = &schedule.date_end {
+        Some(
+            NaiveDate::parse_from_str(date_end, "%Y-%m-%d").map_err(|_| {
+                format!("firewall schedule date_end {:?} must use YYYY-MM-DD", date_end)
+            })?,
+        )
+    } else {
+        None
+    };
+
+    if let (Some(start), Some(end)) = (date_start, date_end) {
+        if start > end {
+            return Err("firewall schedule date_start must be on or before date_end".into());
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate a user-managed firewall rule against nftables capabilities and
+/// global IPv6 mode.
+pub fn validate_firewall_rule(rule: &FirewallRule, ipv6_enabled: bool) -> Result<(), String> {
+    if rule.priority < 0 {
+        return Err(format!(
+            "Firewall rule {} has negative priority {}",
+            rule.id, rule.priority
+        ));
+    }
+
+    if matches!(rule.action, Action::Jump) {
+        return Err(format!(
+            "Firewall rule {} uses jump action, but target chains are not supported",
+            rule.id
+        ));
+    }
+
+    if matches!(rule.ip_family, FirewallAddressFamily::Ipv6) && !ipv6_enabled {
+        return Err(format!(
+            "Firewall rule {} uses IPv6 family but system ipv6Enabled is false",
+            rule.id
+        ));
+    }
+    if matches!(rule.protocol.as_ref(), Some(Protocol::Icmpv6)) && !ipv6_enabled {
+        return Err(format!(
+            "Firewall rule {} uses ICMPv6 but system ipv6Enabled is false",
+            rule.id
+        ));
+    }
+    if matches!(rule.protocol.as_ref(), Some(Protocol::Icmpv6))
+        && matches!(rule.ip_family, FirewallAddressFamily::Ipv4)
+    {
+        return Err(format!(
+            "Firewall rule {} uses ICMPv6 but ip_family is ipv4",
+            rule.id
+        ));
+    }
+    if matches!(rule.protocol.as_ref(), Some(Protocol::Icmp))
+        && matches!(rule.ip_family, FirewallAddressFamily::Ipv6)
+    {
+        return Err(format!(
+            "Firewall rule {} uses ICMP but ip_family is ipv6",
+            rule.id
+        ));
+    }
+
+    for (label, value) in [("source", &rule.source), ("destination", &rule.destination)] {
+        if let Some(addr) = value {
+            if !is_valid_cidr_or_addr(addr) {
+                return Err(format!(
+                    "Firewall rule {} {} {:?} is not a valid IP address or CIDR",
+                    rule.id, label, addr
+                ));
+            }
+            ensure_ipv6_allowed(
+                addr,
+                ipv6_enabled,
+                &format!("Firewall rule {} {}", rule.id, label),
+            )?;
+
+            if firewall_value_is_ipv6(addr)
+                && matches!(rule.ip_family, FirewallAddressFamily::Ipv4)
+            {
+                return Err(format!(
+                    "Firewall rule {} has IPv6 {} but ip_family is ipv4",
+                    rule.id, label
+                ));
+            }
+            if !firewall_value_is_ipv6(addr)
+                && matches!(rule.ip_family, FirewallAddressFamily::Ipv6)
+            {
+                return Err(format!(
+                    "Firewall rule {} has IPv4 {} but ip_family is ipv6",
+                    rule.id, label
+                ));
+            }
+        }
+    }
+
+    let has_ports = rule.source_port.is_some() || rule.destination_port.is_some();
+    if has_ports
+        && !matches!(
+            rule.protocol.as_ref(),
+            Some(Protocol::Tcp) | Some(Protocol::Udp)
+        )
+    {
+        return Err(format!(
+            "Firewall rule {} can only use ports with tcp or udp protocol",
+            rule.id
+        ));
+    }
+
+    if let Some(port) = rule.source_port {
+        if !is_valid_port(port) {
+            return Err(format!(
+                "Firewall rule {} source_port {} must be 1-65535",
+                rule.id, port
+            ));
+        }
+    }
+    if let Some(port) = rule.destination_port {
+        if !is_valid_port(port) {
+            return Err(format!(
+                "Firewall rule {} destination_port {} must be 1-65535",
+                rule.id, port
+            ));
+        }
+    }
+
+    if let Some(iface) = &rule.interface {
+        if !is_valid_interface_name(iface) {
+            return Err(format!(
+                "Firewall rule {} interface {:?} is not a valid interface name",
+                rule.id, iface
+            ));
+        }
+    }
+
+    for (label, value) in [
+        ("max_states", rule.state_limits.max_states),
+        ("max_source_nodes", rule.state_limits.max_source_nodes),
+        ("max_source_states", rule.state_limits.max_source_states),
+        ("max_source_connections", rule.state_limits.max_source_connections),
+        ("max_new_connections", rule.state_limits.max_new_connections),
+        (
+            "max_new_connections_seconds",
+            rule.state_limits.max_new_connections_seconds,
+        ),
+        (
+            "max_new_connections_per_source",
+            rule.state_limits.max_new_connections_per_source,
+        ),
+        (
+            "max_new_connections_per_source_seconds",
+            rule.state_limits.max_new_connections_per_source_seconds,
+        ),
+    ] {
+        if value == Some(0) {
+            return Err(format!(
+                "Firewall rule {} {} must be greater than 0",
+                rule.id, label
+            ));
+        }
+    }
+
+    if let Some(schedule) = &rule.schedule {
+        validate_firewall_schedule(schedule)?;
+    }
+
+    Ok(())
+}
+
+/// Validate global firewall settings.
+pub fn validate_firewall_settings(
+    settings: &FirewallSettings,
+    ipv6_enabled: bool,
+) -> Result<(), String> {
+    if settings.syn_flood_rate == 0 {
+        return Err("Firewall syn_flood_rate must be greater than 0".into());
+    }
+    if settings.syn_flood_burst == 0 {
+        return Err("Firewall syn_flood_burst must be greater than 0".into());
+    }
+    if settings.management_ports.is_empty() {
+        return Err("Firewall management_ports must contain at least one port".into());
+    }
+    for port in &settings.management_ports {
+        if !is_valid_port(*port) {
+            return Err(format!(
+                "Firewall management_ports contains invalid port {} (must be 1-65535)",
+                port
+            ));
+        }
+    }
+    for src in &settings.management_allowed_sources {
+        if !is_valid_cidr_or_addr(src) {
+            return Err(format!(
+                "Firewall management_allowed_sources contains invalid IP/CIDR {:?}",
+                src
+            ));
+        }
+        ensure_ipv6_allowed(src, ipv6_enabled, "Firewall management_allowed_sources")?;
+    }
+    if let Some(iface) = &settings.management_interface {
+        if iface.is_empty() || !is_valid_interface_name(iface) {
+            return Err(format!(
+                "Firewall management_interface {:?} is not a valid interface name",
+                iface
+            ));
+        }
+    }
+    if let Some(domain) = &settings.management_tls_acme_domain {
+        if !domain.trim().is_empty() && !is_valid_domain(domain) {
+            return Err(format!(
+                "Firewall management_tls_acme_domain {:?} is not a valid domain",
+                domain
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // NAT
 // ---------------------------------------------------------------------------
@@ -962,6 +1218,20 @@ pub fn validate_nat_rule_with_ipv6(rule: &NatRule, ipv6_enabled: bool) -> Result
                 "interface {:?} is not a valid interface name",
                 iface
             ));
+        }
+    }
+    let has_match_ports = rule.source_port.is_some() || rule.destination_port.is_some();
+    if has_match_ports && matches!(&rule.protocol, NatProtocol::Any) {
+        return Err("source_port and destination_port require tcp, udp, or tcp_udp protocol".into());
+    }
+    if let Some(port) = rule.source_port {
+        if port == 0 {
+            return Err("source_port must be non-zero".into());
+        }
+    }
+    if let Some(port) = rule.destination_port {
+        if port == 0 {
+            return Err("destination_port must be non-zero".into());
         }
     }
     // Translation validation.
@@ -2794,9 +3064,12 @@ impl Default for AdminSecuritySettings {
 /// Root configuration object that is persisted to disk and loaded on startup.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SystemConfig {
+    #[serde(default)]
     pub hostname: String,
     pub domain: Option<String>,
+    #[serde(default)]
     pub interfaces: Vec<Interface>,
+    #[serde(default)]
     pub firewall_rules: Vec<FirewallRule>,
     /// Global firewall defaults and management/stateful protections.
     #[serde(default)]
@@ -2808,11 +3081,13 @@ pub struct SystemConfig {
     pub dhcp: Option<DhcpConfig>,
     #[serde(default)]
     pub dhcp6: Option<Dhcp6Config>,
+    #[serde(default)]
     pub vpn_tunnels: Vec<VpnTunnel>,
     /// WireGuard VPN interfaces managed by DayShield.
     #[serde(default)]
     pub wireguard_interfaces: Vec<WireGuardInterface>,
     pub acme: Option<AcmeConfig>,
+    #[serde(default)]
     pub crowdsec_policies: Vec<CrowdsecPolicy>,
     pub suricata: Option<SuricataConfig>,
     /// Named firewall aliases (IP sets, network sets, port sets, URL tables).

@@ -17,6 +17,7 @@ use tokio::{
 use tracing::{info, warn};
 
 use crate::logs::LogEvent;
+use crate::logs::firewall::parse_nftables_message;
 
 // ---------------------------------------------------------------------------
 // Public streaming function
@@ -98,6 +99,25 @@ pub(crate) fn parse_journald_system_line(line: &str) -> Option<LogEvent> {
         None => return None,
     };
 
+    let syslog_identifier = obj.get("SYSLOG_IDENTIFIER").and_then(|v| v.as_str());
+
+    // nftables-tagged events are handled by the dedicated firewall stream.
+    if matches!(syslog_identifier, Some("nftables")) {
+        return None;
+    }
+
+    let timestamp = parse_realtime_timestamp(
+        obj.get("__REALTIME_TIMESTAMP").and_then(|v| v.as_str()),
+    );
+
+    // Some firewall drops are emitted by the kernel logger (SYSLOG_IDENTIFIER=kernel)
+    // while still carrying nftables key=value message format.
+    if matches!(syslog_identifier, Some("kernel")) && looks_like_nftables_message(&message) {
+        if let Some(event) = parse_nftables_message(&message, &timestamp) {
+            return Some(event);
+        }
+    }
+
     // Unit name: prefer _SYSTEMD_UNIT, fall back to SYSLOG_IDENTIFIER.
     let unit = obj
         .get("_SYSTEMD_UNIT")
@@ -106,15 +126,18 @@ pub(crate) fn parse_journald_system_line(line: &str) -> Option<LogEvent> {
         .unwrap_or("unknown")
         .to_string();
 
-    let timestamp = parse_realtime_timestamp(
-        obj.get("__REALTIME_TIMESTAMP").and_then(|v| v.as_str()),
-    );
-
     Some(LogEvent::SystemEvent {
         timestamp,
         unit,
         message,
     })
+}
+
+fn looks_like_nftables_message(message: &str) -> bool {
+    message.contains("IN=")
+        && message.contains("SRC=")
+        && message.contains("DST=")
+        && message.contains("PROTO=")
 }
 
 /// Convert a journald `__REALTIME_TIMESTAMP` (microseconds since epoch) to an
@@ -180,5 +203,32 @@ mod tests {
     #[test]
     fn test_parse_system_line_invalid_json_returns_none() {
         assert!(parse_journald_system_line("not json").is_none());
+    }
+
+    #[test]
+    fn test_parse_system_line_kernel_nft_message_reclassified_to_firewall() {
+        let line = r#"{"__REALTIME_TIMESTAMP":"1705320000000000","SYSLOG_IDENTIFIER":"kernel","MESSAGE":"DEFAULT-BLOCK INPUT IN=ens18 OUT= SRC=192.168.20.2 DST=192.168.20.255 PROTO=UDP SPT=9801 DPT=9801"}"#;
+        let event = parse_journald_system_line(line).expect("should parse");
+        match event {
+            LogEvent::FirewallEvent {
+                action,
+                src_ip,
+                dest_ip,
+                dport,
+                ..
+            } => {
+                assert_eq!(action, "DEFAULT-BLOCK INPUT");
+                assert_eq!(src_ip, "192.168.20.2");
+                assert_eq!(dest_ip, "192.168.20.255");
+                assert_eq!(dport, 9801);
+            }
+            _ => panic!("expected firewall event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_system_line_nftables_identifier_is_ignored() {
+        let line = r#"{"__REALTIME_TIMESTAMP":"1705320000000000","SYSLOG_IDENTIFIER":"nftables","MESSAGE":"DROP IN=eth0 OUT= SRC=192.168.1.1 DST=10.0.0.1 PROTO=TCP SPT=1234 DPT=443"}"#;
+        assert!(parse_journald_system_line(line).is_none());
     }
 }

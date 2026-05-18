@@ -1,4 +1,4 @@
-name: Build and Release Artifacts
+name: Build and Release Core Artifact
 
 on:
   push:
@@ -32,25 +32,11 @@ jobs:
           echo "Version: ${VERSION}"
           echo "Release version: ${RELEASE_VERSION}"
 
-      - name: Checkout all repos
+      - name: Checkout repo
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
           ref: ${{ github.event.inputs.tag || github.ref }}
-
-      - name: Checkout dayshield-ui
-        uses: actions/checkout@v5
-        with:
-          repository: daygle/dayshield-ui
-          path: deps/dayshield-ui
-          ref: main
-
-      - name: Checkout dayshield-rootfs
-        uses: actions/checkout@v5
-        with:
-          repository: daygle/dayshield-rootfs
-          path: deps/dayshield-rootfs
-          ref: main
 
       # Build core binary
       - name: Setup Rust
@@ -82,66 +68,11 @@ jobs:
           tar --zstd -cf core-${{ steps.version.outputs.VERSION }}.tar.zst dayshield-core
           ls -lh core-*.tar.zst
 
-      # Build UI dist
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: deps/dayshield-ui/package-lock.json
-
-      - name: Sync UI package versions from tag
-        run: |
-          set -euo pipefail
-          UI_DIR="deps/dayshield-ui"
-          RELEASE_VERSION="${{ steps.version.outputs.RELEASE_VERSION }}"
-          node -e "const fs=require('fs'); const path=require('path'); const v=process.env.RELEASE_VERSION; const dir=process.env.UI_DIR; const pkgPath=path.join(dir,'package.json'); const lockPath=path.join(dir,'package-lock.json'); const pkg=JSON.parse(fs.readFileSync(pkgPath,'utf8')); pkg.version=v; fs.writeFileSync(pkgPath, JSON.stringify(pkg,null,2)+'\\n'); const lock=JSON.parse(fs.readFileSync(lockPath,'utf8')); lock.version=v; if (lock.packages && lock.packages['']) { lock.packages[''].version=v; } fs.writeFileSync(lockPath, JSON.stringify(lock,null,2)+'\\n'); console.log('package.json version',pkg.version); console.log('package-lock.json version',lock.version);"
-        env:
-          RELEASE_VERSION: ${{ steps.version.outputs.RELEASE_VERSION }}
-          UI_DIR: deps/dayshield-ui
-
-      - name: Build UI
-        env:
-          VITE_GITHUB_RELEASE: ${{ steps.version.outputs.VERSION }}
-        run: |
-          cd deps/dayshield-ui
-          npm ci --no-audit --no-fund
-          npm run build
-
-      - name: Install rootfs build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            mmdebstrap zstd debian-archive-keyring
-
-      - name: Build rootfs artifact
-        run: |
-          set -euo pipefail
-          cp target/x86_64-unknown-linux-musl/release/dayshield-core deps/dayshield-rootfs/dayshield-core
-          sudo make -C deps/dayshield-rootfs rootfs \
-            UI_DIR="${GITHUB_WORKSPACE}/deps/dayshield-ui/dist" \
-            CORE_REPO_DIR="${GITHUB_WORKSPACE}" \
-            UI_REPO_DIR="${GITHUB_WORKSPACE}/deps/dayshield-ui" \
-            ROOTFS_REPO_DIR="${GITHUB_WORKSPACE}/deps/dayshield-rootfs"
-          sudo chown "$(id -u):$(id -g)" deps/dayshield-rootfs/rootfs.tar.zst
-
-      - name: Package rootfs artifact
-        run: |
-          mkdir -p release-artifacts
-          cp deps/dayshield-rootfs/rootfs.tar.zst release-artifacts/rootfs-${{ steps.version.outputs.VERSION }}.tar.zst
-          ls -lh release-artifacts/rootfs-*.tar.zst
-
-      - name: Package UI artifact
-        run: |
-          mkdir -p release-artifacts
-          tar --zstd -cf release-artifacts/ui-${{ steps.version.outputs.VERSION }}.tar.zst -C deps/dayshield-ui dist/
-          ls -lh release-artifacts/ui-*.tar.zst
-
       # Generate checksums
       - name: Generate checksums
         run: |
           cd release-artifacts
-          sha256sum *.tar.zst > checksums.txt
+          sha256sum core-*.tar.zst > checksums.txt
           cat checksums.txt
 
       # Create GitHub Release with artifacts
@@ -151,34 +82,34 @@ jobs:
           tag_name: ${{ steps.version.outputs.VERSION }}
           files: |
             release-artifacts/core-*.tar.zst
-            release-artifacts/ui-*.tar.zst
-            release-artifacts/rootfs-*.tar.zst
             release-artifacts/checksums.txt
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Trigger ISO build workflow
+      - name: Optional manifest update trigger
         env:
-          ISO_DISPATCH_TOKEN: ${{ secrets.ISO_REPO_TOKEN }}
+          MANIFEST_REPO_TOKEN: ${{ secrets.MANIFEST_REPO_TOKEN }}
+          MANIFEST_REPO: daygle/dayshield-updates
         run: |
           set -euo pipefail
-          if [ -z "${ISO_DISPATCH_TOKEN:-}" ]; then
-            echo "ISO_REPO_TOKEN is not set; skipping automatic ISO trigger."
-            echo "Set ISO_REPO_TOKEN in dayshield-core repo secrets with access to daygle/dayshield-iso."
+          if [ -z "${MANIFEST_REPO_TOKEN:-}" ]; then
+            echo "MANIFEST_REPO_TOKEN is not set; skipping manifest dispatch."
+            echo "Update central manifest manually or add MANIFEST_REPO_TOKEN with access to ${MANIFEST_REPO}."
             exit 0
           fi
 
           curl -sSf -X POST \
             -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${ISO_DISPATCH_TOKEN}" \
-            https://api.github.com/repos/daygle/dayshield-iso/dispatches \
+            -H "Authorization: Bearer ${MANIFEST_REPO_TOKEN}" \
+            "https://api.github.com/repos/${MANIFEST_REPO}/dispatches" \
             -d @- <<EOF
           {
-            "event_type": "build-iso-from-release",
+            "event_type": "component-release-published",
             "client_payload": {
-              "tag": "${{ steps.version.outputs.VERSION }}",
-              "core_repo": "${{ github.repository }}"
+              "component": "core",
+              "repo": "${{ github.repository }}",
+              "tag": "${{ steps.version.outputs.VERSION }}"
             }
           }
           EOF

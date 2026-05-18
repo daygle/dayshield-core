@@ -15,6 +15,7 @@ This supports **Option B**:
 1. **Component build/publish pipelines**
    - `dayshield-core`, `dayshield-ui`, `dayshield-rootfs` can publish independently
    - each component artifact has its own version/tag cadence
+   - in this repo, `.github/workflows/release-artifacts.yml` publishes only `core-vX.Y.Z.tar.zst`
 
 2. **Central manifest registry**
    - updater reads `manifest.json` as the primary source of truth
@@ -114,6 +115,7 @@ Git-based mode remains available as fallback.
 - [ ] Publish updated artifact(s) from the component repo(s)
 - [ ] Generate SHA256 checksums
 - [ ] Update central `manifest.json` with latest per-component entries
+  - (`dayshield-core` workflow can optionally dispatch a manifest repo hook when `MANIFEST_REPO_TOKEN` is configured)
 - [ ] Verify `generatedAt` and component metadata
 - [ ] Verify appliance check/apply behavior
 

@@ -8,9 +8,10 @@
 
 ### 1. Enable GitHub Actions (if not already)
 
-In `.github/workflows/release-artifacts.yml` (or your equivalent pipelines):
-- Components can be built/published independently
-- Central `manifest.json` is updated with latest artifact pointers per component
+In this repo, `.github/workflows/release-artifacts.yml` publishes the core artifact only:
+- Triggered by tag pushes (`v*`) or manual dispatch (`tag` input)
+- Produces `core-vX.Y.Z.tar.zst` + `checksums.txt`
+- Does **not** build/publish `ui` or `rootfs`
 
 ### 2. Publish first manifest-backed artifacts
 
@@ -111,7 +112,8 @@ git tag "v1.2.4"
 git push origin "v1.2.4"
 ```
 
-Pipelines update artifacts and publish a new manifest. Appliances auto-discover on next check.
+This repo workflow publishes the core artifact release.
+Then update (or trigger update of) the central manifest so appliances can discover it on the next check.
 
 ## Deployment Options
 

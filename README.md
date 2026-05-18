@@ -80,8 +80,12 @@ cargo test -p -core
 
 ## Releases
 
-DayShield Firewall release artifacts are produced by
+This repo publishes the **core** artifact only via
 `.github/workflows/release-artifacts.yml`.
+
+- Trigger: tag push (`v*`) or manual `workflow_dispatch` with `tag`
+- Release assets from this repo: `core-vX.Y.Z.tar.zst` and `checksums.txt`
+- `dayshield-ui` and `dayshield-rootfs` are released from their own repos/workflows
 
 Release/update model is **manifest-driven (Option B)**:
 

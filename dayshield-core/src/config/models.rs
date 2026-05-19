@@ -2565,6 +2565,7 @@ pub enum DynamicDnsProvider {
     NoIp,
     Dynu,
     FreeDns,
+    Cloudflare,
     Custom,
 }
 
@@ -2698,6 +2699,14 @@ pub fn validate_dynamic_dns_config_with_ipv6(
                 if password.is_empty() {
                     return Err(format!(
                         "dynamic DNS entry {} requires an update token/password for FreeDNS",
+                        entry.id
+                    ));
+                }
+            }
+            DynamicDnsProvider::Cloudflare => {
+                if username.is_empty() || password.is_empty() {
+                    return Err(format!(
+                        "dynamic DNS entry {} requires zone_id (username) and API token/password for Cloudflare",
                         entry.id
                     ));
                 }

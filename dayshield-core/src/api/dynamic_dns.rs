@@ -121,6 +121,22 @@ struct DynamicDnsPersistedStatus {
     pub entries: Vec<DynamicDnsRuntimeEntryStatus>,
 }
 
+#[derive(Debug, Deserialize)]
+struct CloudflareDnsRecord {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CloudflareListResult {
+    result: Vec<CloudflareDnsRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CloudflareWriteResult {
+    success: bool,
+    errors: Vec<serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DynamicDnsStatusResponse {
@@ -408,6 +424,10 @@ async fn apply_entry_update(
     let username = entry.username.as_deref().unwrap_or("").trim();
     let password = entry.password.as_deref().unwrap_or("").trim();
 
+    if matches!(entry.provider, DynamicDnsProvider::Cloudflare) {
+        return apply_cloudflare_update(client, entry, ip).await;
+    }
+
     let mut request = match entry.provider {
         DynamicDnsProvider::DuckDns => {
             let ip_param = if matches!(&entry.address_family, AddressFamily::Ipv6) {
@@ -451,6 +471,7 @@ async fn apply_entry_update(
             );
             client.get(url)
         }
+        DynamicDnsProvider::Cloudflare => unreachable!("cloudflare handled above"),
         DynamicDnsProvider::Custom => {
             let template = entry
                 .update_url
@@ -503,6 +524,125 @@ async fn apply_entry_update(
     } else {
         Ok(truncate_message(body))
     }
+}
+
+async fn apply_cloudflare_update(
+    client: &reqwest::Client,
+    entry: &DynamicDnsEntry,
+    ip: &str,
+) -> Result<String, String> {
+    let zone_id = entry
+        .username
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "cloudflare requires zone_id in username".to_string())?;
+    let token = entry
+        .password
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "cloudflare requires API token in password".to_string())?;
+
+    let record_type = if matches!(&entry.address_family, AddressFamily::Ipv6) {
+        "AAAA"
+    } else {
+        "A"
+    };
+    let hostname = entry.hostname.trim();
+
+    let list_url = format!(
+        "https://api.cloudflare.com/client/v4/zones/{}/dns_records",
+        zone_id
+    );
+    let mut list_url_with_query = reqwest::Url::parse(&list_url)
+        .map_err(|err| format!("cloudflare URL parse failed: {err}"))?;
+    {
+        let mut pairs = list_url_with_query.query_pairs_mut();
+        pairs.append_pair("type", record_type);
+        pairs.append_pair("name", hostname);
+        pairs.append_pair("per_page", "1");
+    }
+
+    let list_response = client
+        .get(list_url_with_query)
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
+        .send()
+        .await
+        .map_err(|err| format!("cloudflare lookup failed: {err}"))?;
+
+    if !list_response.status().is_success() {
+        let code = list_response.status().as_u16();
+        let body = list_response.text().await.unwrap_or_default();
+        let detail = if body.trim().is_empty() {
+            format!("HTTP {}", code)
+        } else {
+            truncate_message(body)
+        };
+        return Err(format!("cloudflare lookup failed: {detail}"));
+    }
+
+    let list_payload = list_response
+        .json::<CloudflareListResult>()
+        .await
+        .map_err(|err| format!("cloudflare lookup decode failed: {err}"))?;
+
+    let mut payload = serde_json::Map::new();
+    payload.insert("type".into(), serde_json::Value::String(record_type.to_string()));
+    payload.insert("name".into(), serde_json::Value::String(hostname.to_string()));
+    payload.insert("content".into(), serde_json::Value::String(ip.to_string()));
+    payload.insert("ttl".into(), serde_json::Value::Number(serde_json::Number::from(120)));
+
+    let (request, action) = if let Some(existing) = list_payload.result.first() {
+        (
+            client
+                .put(format!("{}/{}", list_url, existing.id))
+                .header("Authorization", format!("Bearer {}", token))
+                .header("Content-Type", "application/json")
+                .json(&serde_json::Value::Object(payload)),
+            "updated",
+        )
+    } else {
+        (
+            client
+                .post(&list_url)
+                .header("Authorization", format!("Bearer {}", token))
+                .header("Content-Type", "application/json")
+                .json(&serde_json::Value::Object(payload)),
+            "created",
+        )
+    };
+
+    let write_response = request
+        .send()
+        .await
+        .map_err(|err| format!("cloudflare write failed: {err}"))?;
+
+    if !write_response.status().is_success() {
+        let code = write_response.status().as_u16();
+        let body = write_response.text().await.unwrap_or_default();
+        let detail = if body.trim().is_empty() {
+            format!("HTTP {}", code)
+        } else {
+            truncate_message(body)
+        };
+        return Err(format!("cloudflare write failed: {detail}"));
+    }
+
+    let write_payload = write_response
+        .json::<CloudflareWriteResult>()
+        .await
+        .map_err(|err| format!("cloudflare write decode failed: {err}"))?;
+
+    if !write_payload.success {
+        return Err(format!(
+            "cloudflare write rejected: {}",
+            truncate_message(serde_json::to_string(&write_payload.errors).unwrap_or_default())
+        ));
+    }
+
+    Ok(format!("cloudflare {} {} record", action, record_type))
 }
 
 fn truncate_message(value: String) -> String {

@@ -15,7 +15,7 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
+  build-release:
     runs-on: ubuntu-latest
     steps:
       - name: Determine version

@@ -1,7 +1,7 @@
 //! System log parser - reads journald entries up to info level
 //! (PRIORITY ≤ 6, i.e. emergency through info).
 //!
-//! Like [`crate::logs::firewall`] this module spawns `journalctl` as a child
+//! Like [`crate::live_logs::firewall`] this module spawns `journalctl` as a child
 //! process using `--output=json --follow --priority=warn` (syslog priority 4
 //! and below) to avoid a hard dependency on `libsystemd`.
 //!
@@ -16,8 +16,8 @@ use tokio::{
 };
 use tracing::{info, warn};
 
-use crate::logs::firewall::parse_nftables_message;
-use crate::logs::LogEvent;
+use crate::live_logs::firewall::parse_nftables_message;
+use crate::live_logs::LogEvent;
 
 // ---------------------------------------------------------------------------
 // Public streaming function

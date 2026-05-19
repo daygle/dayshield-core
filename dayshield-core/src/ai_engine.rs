@@ -180,9 +180,9 @@ impl AiRuntime {
     }
 
     async fn start_firewall_scoring(&self, state: Arc<AppState>) -> Result<()> {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::logs::LogEvent>(256);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::live_logs::LogEvent>(256);
         tokio::spawn(async move {
-            crate::logs::firewall::stream_firewall(tx).await;
+            crate::live_logs::firewall::stream_firewall(tx).await;
         });
 
         while let Some(event) = rx.recv().await {
@@ -197,10 +197,10 @@ impl AiRuntime {
     async fn handle_firewall_event(
         &self,
         state: &Arc<AppState>,
-        event: crate::logs::LogEvent,
+        event: crate::live_logs::LogEvent,
     ) -> Result<()> {
         let (timestamp, action, src_ip, dst_ip, protocol, src_port, dst_port, iface) = match event {
-            crate::logs::LogEvent::FirewallEvent {
+            crate::live_logs::LogEvent::FirewallEvent {
                 timestamp,
                 action,
                 src_ip,
@@ -447,9 +447,9 @@ impl AiRuntime {
     }
 
     async fn start_suricata_scoring(&self, state: Arc<AppState>) -> Result<()> {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::logs::LogEvent>(256);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::live_logs::LogEvent>(256);
         tokio::spawn(async move {
-            crate::logs::suricata::stream_suricata(tx).await;
+            crate::live_logs::suricata::stream_suricata(tx).await;
         });
 
         while let Some(event) = rx.recv().await {
@@ -464,7 +464,7 @@ impl AiRuntime {
     async fn handle_suricata_event(
         &self,
         state: &Arc<AppState>,
-        event: crate::logs::LogEvent,
+        event: crate::live_logs::LogEvent,
     ) -> Result<()> {
         let (
             timestamp,
@@ -477,7 +477,7 @@ impl AiRuntime {
             severity,
             category,
         ) = match event {
-            crate::logs::LogEvent::SuricataAlert {
+            crate::live_logs::LogEvent::SuricataAlert {
                 timestamp,
                 src_ip,
                 dest_ip,

@@ -11,7 +11,7 @@
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, warn};
 
-use crate::logs::{tail::FileTailer, LogEvent};
+use crate::live_logs::{tail::FileTailer, LogEvent};
 
 /// Path to the Suricata EVE JSON log file.
 const EVE_JSON_PATH: &str = "/var/log/suricata/eve.json";

@@ -14,7 +14,7 @@ use serde::Deserialize;
 use tokio::process::Command;
 use tracing::warn;
 
-use crate::logs::{
+use crate::live_logs::{
     firewall::parse_journald_firewall_line, suricata::parse_eve_line,
     system::parse_journald_system_line, websocket::logs_websocket, LogEvent,
 };

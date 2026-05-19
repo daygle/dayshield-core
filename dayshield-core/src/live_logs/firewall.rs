@@ -30,7 +30,7 @@ use tokio::{
 };
 use tracing::{info, warn};
 
-use crate::logs::LogEvent;
+use crate::live_logs::LogEvent;
 
 // ---------------------------------------------------------------------------
 // Public streaming function

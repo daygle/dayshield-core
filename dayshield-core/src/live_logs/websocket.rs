@@ -15,7 +15,7 @@ use axum::extract::ws::{Message, WebSocket};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::logs::{
+use crate::live_logs::{
     firewall::stream_firewall, suricata::stream_suricata, system::stream_system, LogEvent,
 };
 
@@ -111,7 +111,7 @@ pub async fn logs_websocket(mut ws: WebSocket) {
 
 #[cfg(test)]
 mod tests {
-    use crate::logs::{suricata::parse_eve_line, LogEvent};
+    use crate::live_logs::{suricata::parse_eve_line, LogEvent};
 
     /// Verify that `LogEvent` variants serialise to JSON with the expected
     /// `"type"` discriminant and field names.

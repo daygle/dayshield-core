@@ -14,7 +14,7 @@ use crate::{
         models::{CrowdSecDecision, FirewallRule, Interface},
         ConfigStore,
     },
-    logs::LogEvent,
+    live_logs::LogEvent,
     metrics::buffer::MetricsBuffer,
     notify::queue::NotifyQueue,
 };

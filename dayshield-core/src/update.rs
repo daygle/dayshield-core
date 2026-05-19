@@ -450,6 +450,7 @@ pub struct ComponentUpdateStatus {
     pub remote_version: Option<String>,
     pub update_available: bool,
     pub rollback_commit: Option<String>,
+    pub rollback_version: Option<String>,
     pub last_applied_commit: Option<String>,
     pub last_applied_version: Option<String>,
     pub last_error: Option<String>,
@@ -2058,13 +2059,13 @@ fn grub_script_content(layout: &RootfsAbLayout) -> String {
         r#"#!/bin/sh
 set -e
 cat <<'EOF'
-menuentry 'DayShield slot A' --id 'dayshield-a' {{
+menuentry 'DayShield Primary System' --id 'dayshield-a' {{
     search --no-floppy --fs-uuid --set=root {boot_uuid}
     linux /dayshield/slot-a/vmlinuz root=UUID={slot_a_uuid} ro quiet splash
     initrd /dayshield/slot-a/initrd.img
 }}
 
-menuentry 'DayShield slot B' --id 'dayshield-b' {{
+menuentry 'DayShield Secondary System' --id 'dayshield-b' {{
     search --no-floppy --fs-uuid --set=root {boot_uuid}
     linux /dayshield/slot-b/vmlinuz root=UUID={slot_b_uuid} ro quiet splash
     initrd /dayshield/slot-b/initrd.img
@@ -2311,6 +2312,7 @@ async fn build_component_status(
             remote_version: saved.and_then(|s| s.remote_version.clone()),
             update_available: saved.map(|s| s.update_available).unwrap_or(false),
             rollback_commit: saved.and_then(|s| s.rollback_commit.clone()),
+            rollback_version: saved.and_then(|s| s.rollback_version.clone()),
             last_applied_commit: None,
             last_applied_version: saved.and_then(|s| s.last_applied_version.clone()),
             last_error: saved.and_then(|s| s.last_error.clone()),
@@ -2333,6 +2335,7 @@ async fn build_component_status(
             current_version: saved.and_then(|s| s.current_version.clone()),
             remote_version: None,
             rollback_commit: saved.and_then(|s| s.rollback_commit.clone()),
+            rollback_version: saved.and_then(|s| s.rollback_version.clone()),
             last_applied_commit: saved.and_then(|s| s.last_applied_commit.clone()),
             last_applied_version: saved.and_then(|s| s.last_applied_version.clone()),
             last_error: saved.and_then(|s| s.last_error.clone()),
@@ -2349,6 +2352,7 @@ async fn build_component_status(
             current_version: saved.and_then(|s| s.current_version.clone()),
             remote_version: None,
             rollback_commit: saved.and_then(|s| s.rollback_commit.clone()),
+            rollback_version: saved.and_then(|s| s.rollback_version.clone()),
             last_applied_commit: saved.and_then(|s| s.last_applied_commit.clone()),
             last_applied_version: saved.and_then(|s| s.last_applied_version.clone()),
             last_error: Some(err.to_string()),
@@ -2558,9 +2562,12 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
                 }
 
                 let comp_state = ensure_component_state(&mut state_file, component);
-                comp_state.remote_version = None;
+                // Do not clear remote_version — preserve the last known value so the
+                // UI can still display it. Only mark as not-updatable and flag the
+                // missing-from-manifest state so the UI can style it appropriately.
                 comp_state.update_available = false;
-                comp_state.last_error = None;
+                comp_state.last_error =
+                    Some("missing from registry manifest".to_string());
                 info!(
                     component = component.as_str(),
                     "updates: component not listed in registry manifest"

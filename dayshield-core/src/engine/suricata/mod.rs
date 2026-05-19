@@ -101,24 +101,28 @@ pub fn generate_config(config: &SuricataConfig) -> String {
     out.push('\n');
 
     // ---------------------------------------------------------------------------
-    // inputs (af-packet capture interfaces)
+    // af-packet capture interfaces
     // ---------------------------------------------------------------------------
-    out.push_str("inputs:\n");
+    out.push_str("af-packet:\n");
     if config.interfaces.is_empty() {
-        // Default: monitor eth0 if no interfaces specified
+        // Default: monitor eth0 if no interfaces are configured.
         out.push_str("  - interface: eth0\n");
-        out.push_str("    af-packet:\n");
-        out.push_str("      use-mmap: yes\n");
-        out.push_str("      tpacket-v3: yes\n");
+        out.push_str("    cluster-id: 99\n");
+        out.push_str("    cluster-type: cluster_flow\n");
+        out.push_str("    defrag: yes\n");
+        out.push_str("    use-mmap: yes\n");
+        out.push_str("    tpacket-v3: yes\n");
     } else {
-        // Generate af-packet entries for each configured interface
+        // Generate af-packet entries for each configured interface.
         for iface in &config.interfaces {
             out.push_str("  - interface: ");
             out.push_str(iface);
             out.push('\n');
-            out.push_str("    af-packet:\n");
-            out.push_str("      use-mmap: yes\n");
-            out.push_str("      tpacket-v3: yes\n");
+            out.push_str("    cluster-id: 99\n");
+            out.push_str("    cluster-type: cluster_flow\n");
+            out.push_str("    defrag: yes\n");
+            out.push_str("    use-mmap: yes\n");
+            out.push_str("    tpacket-v3: yes\n");
         }
     }
     out.push('\n');
@@ -527,7 +531,8 @@ mod tests {
     fn generate_config_default_input_interface_when_none_configured() {
         let cfg = base_config();
         let out = generate_config(&cfg);
-        assert!(out.contains("inputs:\n  - interface: eth0"));
+        assert!(out.contains("af-packet:\n  - interface: eth0"));
+        assert!(out.contains("cluster-id: 99"));
     }
 
     #[test]

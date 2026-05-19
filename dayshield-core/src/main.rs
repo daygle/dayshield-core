@@ -25,6 +25,7 @@ mod backup;
 mod captive_portal;
 mod config;
 mod engine;
+mod honeypot;
 mod live_logs;
 mod logging;
 mod metrics;
@@ -141,6 +142,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Start AI engine background maintenance.
     ai_engine::start_background_tasks(Arc::clone(&app_state)).await;
+
+    // Start low-interaction honeypot listeners.
+    honeypot::start_background_tasks(Arc::clone(&app_state)).await;
 
     // Start captive portal listener and session expiry maintenance.
     captive_portal::start_portal_server(Arc::clone(&app_state));

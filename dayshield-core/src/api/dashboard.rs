@@ -261,11 +261,26 @@ pub struct SecurityStatus {
     pub firewall_state_count: u64,
     pub suricata_alert_rate: f64,
     pub crowdsec_active_decisions: usize,
+    pub honeypot_events_last_24h: usize,
+    pub honeypot_unique_ips: usize,
 }
 
 pub async fn get_security_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let firewall_rule_count = state.firewall_rules.read().await.len();
     let crowdsec_active_decisions = state.crowdsec_decisions.read().await.len();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let honeypot_events_last_24h = state
+        .honeypot_runtime
+        .count_events_since(now.saturating_sub(86_400))
+        .unwrap_or(0);
+    let honeypot_unique_ips = state
+        .honeypot_runtime
+        .source_ips(1000)
+        .map(|ips| ips.len())
+        .unwrap_or(0);
 
     let (firewall_state_count, suricata_alert_rate) = {
         let buf = state.metrics_buffer.read().await;
@@ -282,6 +297,8 @@ pub async fn get_security_status(State(state): State<Arc<AppState>>) -> impl Int
         firewall_state_count,
         suricata_alert_rate,
         crowdsec_active_decisions,
+        honeypot_events_last_24h,
+        honeypot_unique_ips,
     })
 }
 

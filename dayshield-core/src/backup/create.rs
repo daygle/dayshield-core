@@ -235,6 +235,7 @@ fn serialise_subsystem(
         Subsystem::WireGuard => serde_json::to_vec_pretty(&cfg.wireguard_interfaces),
         Subsystem::Suricata => serde_json::to_vec_pretty(&cfg.suricata),
         Subsystem::CrowdSec => serde_json::to_vec_pretty(&cfg.crowdsec),
+        Subsystem::Honeypots => serde_json::to_vec_pretty(&cfg.honeypots),
         Subsystem::Acme => serde_json::to_vec_pretty(&cfg.acme),
         Subsystem::CaptivePortal => serde_json::to_vec_pretty(&cfg.captive_portal),
     }

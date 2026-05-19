@@ -31,6 +31,8 @@ pub enum Subsystem {
     Suricata,
     /// CrowdSec bouncer integration configuration.
     CrowdSec,
+    /// Honeypot listener configuration.
+    Honeypots,
     /// ACME / TLS certificate configuration.
     Acme,
     /// Captive portal configuration.
@@ -73,6 +75,7 @@ impl Subsystem {
             Subsystem::WireGuard,
             Subsystem::Suricata,
             Subsystem::CrowdSec,
+            Subsystem::Honeypots,
             Subsystem::Acme,
             Subsystem::CaptivePortal,
         ]
@@ -88,6 +91,7 @@ impl Subsystem {
             Subsystem::WireGuard => "config/wireguard.json",
             Subsystem::Suricata => "config/suricata.json",
             Subsystem::CrowdSec => "config/crowdsec.json",
+            Subsystem::Honeypots => "config/honeypots.json",
             Subsystem::Acme => "config/acme.json",
             Subsystem::CaptivePortal => "config/captive_portal.json",
         }

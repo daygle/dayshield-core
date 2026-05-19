@@ -31,8 +31,9 @@ use tracing::{debug, info, warn};
 use super::models::{
     AcmeConfig, AdminSecuritySettings, AiEngineConfig, CaptivePortalConfig, CloudflaredConfig,
     CrowdSecConfig, Dhcp6Config, DhcpConfig, DnsConfig, DnsDomainOverride, DnsHostOverride,
-    DotConfig, DynamicDnsConfig, FirewallAlias, FirewallRule, FirewallSettings, Gateway, Interface,
-    NatConfig, NotifyConfig, NtpConfig, SuricataConfig, SystemConfig, WireGuardInterface,
+    DotConfig, DynamicDnsConfig, FirewallAlias, FirewallRule, FirewallSettings, Gateway,
+    HoneypotConfig, Interface, NatConfig, NotifyConfig, NtpConfig, SuricataConfig, SystemConfig,
+    WireGuardInterface,
 };
 
 /// Default path to the configuration directory.
@@ -1107,6 +1108,21 @@ impl ConfigStore {
             }
         }
 
+        // Honeypot config validation.
+        if let Some(honeypots) = &config.honeypots {
+            use crate::config::models::validate_honeypot_config;
+            if let Err(msg) = validate_honeypot_config(honeypots) {
+                anyhow::bail!("Honeypot config is invalid: {msg}");
+            }
+            for listener in &honeypots.listeners {
+                if let Err(msg) =
+                    ensure_ipv6_allowed(&listener.bind_address, ipv6_enabled, "Honeypot listener")
+                {
+                    anyhow::bail!("{msg}");
+                }
+            }
+        }
+
         // DoT config validation.
         if let Some(dot) = &config.dot {
             use crate::config::models::validate_dot_config;
@@ -1432,6 +1448,20 @@ impl ConfigStore {
     pub fn save_ai_engine_config(&self, ai_engine: AiEngineConfig) -> Result<()> {
         let mut config = self.load()?;
         config.ai_engine = Some(ai_engine);
+        self.save_with_rollback(&config)
+    }
+
+    /// Return the honeypot configuration from persisted config.
+    ///
+    /// Returns defaults when no honeypot configuration has been saved yet.
+    pub fn load_honeypot_config(&self) -> Result<HoneypotConfig> {
+        Ok(self.load()?.honeypots.unwrap_or_default())
+    }
+
+    /// Atomically replace the honeypot configuration in persisted config.
+    pub fn save_honeypot_config(&self, honeypots: HoneypotConfig) -> Result<()> {
+        let mut config = self.load()?;
+        config.honeypots = Some(honeypots);
         self.save_with_rollback(&config)
     }
 

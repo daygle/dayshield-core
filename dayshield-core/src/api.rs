@@ -16,6 +16,7 @@ mod dot;
 pub(crate) mod dynamic_dns;
 mod firewall;
 mod gateways;
+mod honeypots;
 mod interfaces;
 mod logs;
 mod metrics;
@@ -106,6 +107,11 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `GET  /crowdsec/config`                               - get CrowdSec bouncer configuration
 /// - `POST /crowdsec/config`                               - update CrowdSec bouncer configuration
 /// - `GET  /crowdsec/decisions`                            - list cached CrowdSec decisions
+/// - `GET  /honeypots/config`                              - get honeypot configuration
+/// - `POST /honeypots/config`                              - update and apply honeypot configuration
+/// - `GET  /honeypots/events`                              - list recent honeypot captures
+/// - `GET  /honeypots/ips`                                 - list source IPs captured by honeypots
+/// - `GET  /honeypots/recommendations`                     - list suggested honeypot templates
 /// - `GET  /acme/config`                                   - get ACME certificate configuration
 /// - `POST /acme/config`                                   - update ACME certificate configuration
 /// - `POST /acme/issue`                                    - trigger certificate issuance / renewal
@@ -362,6 +368,15 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/crowdsec/config", get(crowdsec::get_config))
         .route("/crowdsec/config", post(crowdsec::update_config))
         .route("/crowdsec/decisions", get(crowdsec::get_decisions))
+        // Honeypots
+        .route("/honeypots/config", get(honeypots::get_config))
+        .route("/honeypots/config", post(honeypots::update_config))
+        .route("/honeypots/events", get(honeypots::list_events))
+        .route("/honeypots/ips", get(honeypots::list_source_ips))
+        .route(
+            "/honeypots/recommendations",
+            get(honeypots::recommendations),
+        )
         // WireGuard VPN
         .route("/wireguard/interfaces", get(wireguard::list_interfaces))
         .route("/wireguard/interfaces", post(wireguard::create_interface))

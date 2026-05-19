@@ -256,6 +256,15 @@ fn restore_subsystem(store: &ConfigStore, sub: &Subsystem, bytes: &[u8]) -> Resu
                     .context("failed to save CrowdSec config")?;
             }
         }
+        Subsystem::Honeypots => {
+            let honeypots: Option<crate::config::models::HoneypotConfig> =
+                serde_json::from_slice(bytes).context("failed to parse honeypots.json")?;
+            if let Some(cfg) = honeypots {
+                store
+                    .save_honeypot_config(cfg)
+                    .context("failed to save honeypot config")?;
+            }
+        }
         Subsystem::Acme => {
             let acme: Option<crate::config::models::AcmeConfig> =
                 serde_json::from_slice(bytes).context("failed to parse acme.json")?;

@@ -3120,6 +3120,204 @@ pub fn validate_ai_engine_config(config: &AiEngineConfig) -> Result<(), String> 
     Ok(())
 }
 
+/// Supported low-interaction honeypot protocols.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum HoneypotType {
+    Ssh,
+    Telnet,
+    Http,
+    Ftp,
+    Smtp,
+    Mysql,
+    Rdp,
+    GenericTcp,
+}
+
+impl Default for HoneypotType {
+    fn default() -> Self {
+        HoneypotType::Ssh
+    }
+}
+
+impl HoneypotType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            HoneypotType::Ssh => "ssh",
+            HoneypotType::Telnet => "telnet",
+            HoneypotType::Http => "http",
+            HoneypotType::Ftp => "ftp",
+            HoneypotType::Smtp => "smtp",
+            HoneypotType::Mysql => "mysql",
+            HoneypotType::Rdp => "rdp",
+            HoneypotType::GenericTcp => "generic_tcp",
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            HoneypotType::Ssh => "SSH",
+            HoneypotType::Telnet => "Telnet",
+            HoneypotType::Http => "HTTP",
+            HoneypotType::Ftp => "FTP",
+            HoneypotType::Smtp => "SMTP",
+            HoneypotType::Mysql => "MySQL",
+            HoneypotType::Rdp => "RDP",
+            HoneypotType::GenericTcp => "Generic TCP",
+        }
+    }
+
+    pub fn default_port(&self) -> u16 {
+        match self {
+            HoneypotType::Ssh => 2222,
+            HoneypotType::Telnet => 2323,
+            HoneypotType::Http => 8088,
+            HoneypotType::Ftp => 2121,
+            HoneypotType::Smtp => 2525,
+            HoneypotType::Mysql => 33060,
+            HoneypotType::Rdp => 33890,
+            HoneypotType::GenericTcp => 9000,
+        }
+    }
+}
+
+fn default_honeypot_bind_address() -> String {
+    "0.0.0.0".to_string()
+}
+
+fn default_honeypot_risk_score() -> f64 {
+    0.95
+}
+
+/// One configured low-interaction honeypot listener.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HoneypotListenerConfig {
+    /// Stable UI/API identifier.
+    pub id: String,
+    /// Human-readable listener name.
+    pub name: String,
+    /// Enables this individual listener when global honeypots are enabled.
+    pub enabled: bool,
+    /// Protocol bait presented by the listener.
+    pub honeypot_type: HoneypotType,
+    /// IP address to bind, commonly `0.0.0.0` or a specific interface address.
+    pub bind_address: String,
+    /// TCP port to bind.
+    pub port: u16,
+    /// Score submitted to the AI Threat Engine for each connection.
+    pub risk_score: f64,
+    /// Optional custom banner sent to clients before protocol-specific handling.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub banner: Option<String>,
+}
+
+impl Default for HoneypotListenerConfig {
+    fn default() -> Self {
+        let honeypot_type = HoneypotType::Ssh;
+        Self {
+            id: "ssh-default".to_string(),
+            name: "SSH honeypot".to_string(),
+            enabled: false,
+            port: honeypot_type.default_port(),
+            honeypot_type,
+            bind_address: default_honeypot_bind_address(),
+            risk_score: default_honeypot_risk_score(),
+            banner: None,
+        }
+    }
+}
+
+/// Honeypot subsystem configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HoneypotConfig {
+    /// Master enable for all honeypot listeners.
+    pub enabled: bool,
+    /// Configured listeners.
+    pub listeners: Vec<HoneypotListenerConfig>,
+}
+
+impl Default for HoneypotConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listeners: vec![HoneypotListenerConfig::default()],
+        }
+    }
+}
+
+fn validate_honeypot_listener_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 63
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+pub fn validate_honeypot_config(config: &HoneypotConfig) -> Result<(), String> {
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut seen_bindings = std::collections::HashSet::new();
+    let mut enabled_count = 0usize;
+
+    for listener in &config.listeners {
+        if !validate_honeypot_listener_id(&listener.id) {
+            return Err(format!(
+                "honeypot listener id {:?} is invalid (must be 1-63 chars and contain only [A-Za-z0-9_-])",
+                listener.id
+            ));
+        }
+        if !seen_ids.insert(listener.id.clone()) {
+            return Err(format!("duplicate honeypot listener id {:?}", listener.id));
+        }
+        if listener.name.trim().is_empty() || listener.name.len() > 128 {
+            return Err(format!(
+                "honeypot listener {:?} name must be 1-128 characters",
+                listener.id
+            ));
+        }
+        if !is_valid_ip(&listener.bind_address) {
+            return Err(format!(
+                "honeypot listener {:?} bind_address {:?} is not a valid IP address",
+                listener.id, listener.bind_address
+            ));
+        }
+        if !is_valid_port(listener.port) {
+            return Err(format!(
+                "honeypot listener {:?} port must be between 1 and 65535",
+                listener.id
+            ));
+        }
+        if !listener.risk_score.is_finite() || !(0.0..=1.0).contains(&listener.risk_score) {
+            return Err(format!(
+                "honeypot listener {:?} risk_score must be between 0.0 and 1.0",
+                listener.id
+            ));
+        }
+        if let Some(banner) = &listener.banner {
+            if banner.len() > 1024 {
+                return Err(format!(
+                    "honeypot listener {:?} banner must be at most 1024 bytes",
+                    listener.id
+                ));
+            }
+        }
+        if listener.enabled {
+            enabled_count = enabled_count.saturating_add(1);
+            let binding = format!("{}:{}", listener.bind_address, listener.port);
+            if !seen_bindings.insert(binding.clone()) {
+                return Err(format!("duplicate enabled honeypot binding {binding}"));
+            }
+        }
+    }
+
+    if config.enabled && enabled_count == 0 {
+        return Err("honeypots cannot be enabled without at least one enabled listener".into());
+    }
+
+    Ok(())
+}
+
 /// Administrator account security policy.
 ///
 /// Controls session lifetime, login lockout behaviour, and password complexity
@@ -3222,6 +3420,9 @@ pub struct SystemConfig {
     /// AI threat-engine policy and automatic blocking settings.
     #[serde(default)]
     pub ai_engine: Option<AiEngineConfig>,
+    /// Low-interaction honeypot listeners that feed the AI Threat Engine.
+    #[serde(default)]
+    pub honeypots: Option<HoneypotConfig>,
     /// Named upstream gateways.
     #[serde(default)]
     pub gateways: Vec<Gateway>,

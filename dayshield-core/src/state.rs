@@ -14,6 +14,7 @@ use crate::{
         models::{CrowdSecDecision, FirewallRule, Interface},
         ConfigStore,
     },
+    honeypot::HoneypotRuntime,
     live_logs::LogEvent,
     metrics::buffer::MetricsBuffer,
     notify::queue::NotifyQueue,
@@ -31,6 +32,7 @@ pub const SVC_CROWDSEC: &str = "crowdsec";
 pub const SVC_ACME: &str = "acme";
 pub const SVC_CLOUDFLARED: &str = "cloudflared";
 pub const SVC_CAPTIVE_PORTAL: &str = "captive_portal";
+pub const SVC_HONEYPOT: &str = "honeypot";
 
 /// Shared application state.
 ///
@@ -58,6 +60,8 @@ pub struct AppState {
     pub login_attempts: RwLock<HashMap<String, (u32, Option<u64>)>>,
     /// AI runtime for threat recording and automated blocking.
     pub ai_runtime: AiRuntime,
+    /// Low-interaction honeypot listener runtime.
+    pub honeypot_runtime: HoneypotRuntime,
     /// Broadcast sender for live AI log events.
     pub ai_log_sender: broadcast::Sender<LogEvent>,
 }
@@ -85,6 +89,7 @@ impl AppState {
             SVC_ACME,
             SVC_CLOUDFLARED,
             SVC_CAPTIVE_PORTAL,
+            SVC_HONEYPOT,
         ] {
             services.insert(name.to_string(), false);
         }
@@ -112,6 +117,7 @@ impl AppState {
             notify_queue,
             login_attempts: RwLock::new(HashMap::new()),
             ai_runtime: AiRuntime::new(&config_dir, config),
+            honeypot_runtime: HoneypotRuntime::new(&config_dir),
             ai_log_sender,
         };
         (state, notify_rx)
@@ -138,6 +144,7 @@ impl AppState {
             .load_ai_engine_config()
             .unwrap_or_default();
         state.ai_runtime = AiRuntime::new(&config_dir, config);
+        state.honeypot_runtime = HoneypotRuntime::new(&config_dir);
         state.interfaces = RwLock::new(state.config_store.load_interfaces().unwrap_or_default());
         state.firewall_rules =
             RwLock::new(state.config_store.load_firewall_rules().unwrap_or_default());

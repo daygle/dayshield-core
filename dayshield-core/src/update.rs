@@ -504,6 +504,11 @@ pub struct ArtifactMetadata {
 pub struct RegistryManifest {
     pub components: Vec<ArtifactMetadata>,
     pub generated_at: String,
+    /// When true the manifest only covers the components listed (e.g. a single
+    /// GitHub repo's releases). Missing components should not be flagged as
+    /// errors — they are simply not tracked by this registry source.
+    #[serde(default)]
+    pub partial: bool,
 }
 
 // ============================================================================
@@ -1877,6 +1882,9 @@ async fn query_github_releases(
     Ok(RegistryManifest {
         components,
         generated_at: release.created_at.clone(),
+        // GitHub releases for a single repo only cover that repo's component(s).
+        // Absence of other components is expected, not an error.
+        partial: true,
     })
 }
 
@@ -2552,26 +2560,32 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
                 );
             }
 
-            for component in [
-                RepoComponent::Core,
-                RepoComponent::Ui,
-                RepoComponent::Rootfs,
-            ] {
-                if seen_components.contains(component.as_str()) {
-                    continue;
-                }
+            // Only flag missing components as errors for comprehensive manifests
+            // (manifest.json). When using the GitHub releases fallback (partial=true)
+            // each repo only publishes its own component, so absence of others is
+            // expected and should not surface as an error.
+            if !manifest.partial {
+                for component in [
+                    RepoComponent::Core,
+                    RepoComponent::Ui,
+                    RepoComponent::Rootfs,
+                ] {
+                    if seen_components.contains(component.as_str()) {
+                        continue;
+                    }
 
-                let comp_state = ensure_component_state(&mut state_file, component);
-                // Do not clear remote_version — preserve the last known value so the
-                // UI can still display it. Only mark as not-updatable and flag the
-                // missing-from-manifest state so the UI can style it appropriately.
-                comp_state.update_available = false;
-                comp_state.last_error =
-                    Some("missing from registry manifest".to_string());
-                info!(
-                    component = component.as_str(),
-                    "updates: component not listed in registry manifest"
-                );
+                    let comp_state = ensure_component_state(&mut state_file, component);
+                    // Do not clear remote_version — preserve the last known value so the
+                    // UI can still display it. Only mark as not-updatable and flag the
+                    // missing-from-manifest state so the UI can style it appropriately.
+                    comp_state.update_available = false;
+                    comp_state.last_error =
+                        Some("missing from registry manifest".to_string());
+                    info!(
+                        component = component.as_str(),
+                        "updates: component not listed in registry manifest"
+                    );
+                }
             }
 
             if !seen_components.contains(RepoComponent::Rootfs.as_str()) {
@@ -3842,6 +3856,7 @@ mod tests {
     fn manifest_supports_independent_component_metadata() {
         let manifest = RegistryManifest {
             generated_at: "2026-05-18T00:00:00Z".to_string(),
+            partial: false,
             components: vec![ArtifactMetadata {
                 component: "rootfs".to_string(),
                 version: "2026.05.10".to_string(),

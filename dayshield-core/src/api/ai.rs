@@ -7,7 +7,9 @@ use axum::{
     Json,
 };
 
-use crate::ai_policy::models::{ApplySuggestionRequest, ModeRequest, SetIntentsRequest};
+use crate::ai_policy::models::{
+    ApplySuggestionRequest, AutomationSettings, ModeRequest, SetIntentsRequest,
+};
 use crate::config::models::{validate_ai_engine_config, AiEngineConfig};
 use crate::state::AppState;
 
@@ -185,6 +187,25 @@ pub async fn set_intents(
 ) -> Result<impl IntoResponse, AiApiError> {
     let intents = state.ai_policy_engine.set_intents(req).await?;
     Ok(Json(intents))
+}
+
+/// GET /api/ai/automation_settings
+pub async fn get_automation_settings(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, AiApiError> {
+    Ok(Json(state.ai_policy_engine.get_automation_settings().await))
+}
+
+/// POST /api/ai/automation_settings
+pub async fn set_automation_settings(
+    State(state): State<Arc<AppState>>,
+    Json(settings): Json<AutomationSettings>,
+) -> Result<impl IntoResponse, AiApiError> {
+    let settings = state
+        .ai_policy_engine
+        .set_automation_settings(settings)
+        .await?;
+    Ok(Json(settings))
 }
 
 /// GET /api/ai/mode

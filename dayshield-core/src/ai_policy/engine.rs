@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    net::Ipv4Addr,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -8,7 +9,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use tokio::sync::RwLock;
 use tracing::warn;
 
@@ -18,9 +19,9 @@ use crate::{
         event_classifier::classify_event,
         intent_resolver::{resolve_intent, ResolvedIntent},
         models::{
-            ApplySuggestionRequest, ApplySuggestionResponse, AutomationMode, Decision,
-            DecisionAction, Event, Intent, ModeRequest, RuleAudit, SetIntentsRequest, Suggestion,
-            TrafficCandidate, UndoResponse,
+            ApplySuggestionRequest, ApplySuggestionResponse, AutomationMode, AutomationSettings,
+            Decision, DecisionAction, Event, Intent, ModeRequest, RuleAudit, SetIntentsRequest,
+            Suggestion, TrafficCandidate, UndoResponse,
         },
         rule_auditor::audit_rules,
         rule_suggester::build_suggestion,
@@ -32,6 +33,7 @@ const DEFAULT_SUGGESTIONS_PATH: &str = "/var/lib/dayshield/ai/suggestions.json";
 const DEFAULT_ACTION_LOG_PATH: &str = "/var/log/dayshield/ai_actions.log";
 const DEFAULT_INTENTS_PATH: &str = "/etc/dayshield/intents.json";
 const DEFAULT_MODE_PATH: &str = "/var/lib/dayshield/ai/mode.json";
+const DEFAULT_AUTOMATION_SETTINGS_PATH: &str = "/var/lib/dayshield/ai/automation_settings.json";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct LoggedAction {
@@ -81,12 +83,14 @@ pub struct AiPolicyEngine {
     mode: Arc<RwLock<ModeConfig>>,
     suggestions: Arc<RwLock<Vec<Suggestion>>>,
     intents: Arc<RwLock<Vec<Intent>>>,
+    automation_settings: Arc<RwLock<AutomationSettings>>,
     recent_events: Arc<RwLock<Vec<Event>>>,
     applied_actions: Arc<RwLock<Vec<LoggedAction>>>,
     suggestions_path: PathBuf,
     action_log_path: PathBuf,
     intents_path: PathBuf,
     mode_path: PathBuf,
+    automation_settings_path: PathBuf,
     started: Arc<AtomicBool>,
 }
 
@@ -97,6 +101,7 @@ impl AiPolicyEngine {
             PathBuf::from(DEFAULT_ACTION_LOG_PATH),
             PathBuf::from(DEFAULT_INTENTS_PATH),
             PathBuf::from(DEFAULT_MODE_PATH),
+            PathBuf::from(DEFAULT_AUTOMATION_SETTINGS_PATH),
         )
     }
 
@@ -105,21 +110,27 @@ impl AiPolicyEngine {
         action_log_path: PathBuf,
         intents_path: PathBuf,
         mode_path: PathBuf,
+        automation_settings_path: PathBuf,
     ) -> Self {
         let suggestions = read_json_or_default(&suggestions_path, Vec::<Suggestion>::new());
         let intents = read_json_or_default(&intents_path, Vec::<Intent>::new());
         let mode = read_mode_config_or_default(&mode_path);
+        let automation_settings =
+            read_json_or_default(&automation_settings_path, AutomationSettings::default());
+        let applied_actions = read_json_lines_or_default(&action_log_path);
 
         Self {
             mode: Arc::new(RwLock::new(mode)),
             suggestions: Arc::new(RwLock::new(suggestions)),
             intents: Arc::new(RwLock::new(intents)),
+            automation_settings: Arc::new(RwLock::new(automation_settings)),
             recent_events: Arc::new(RwLock::new(Vec::new())),
-            applied_actions: Arc::new(RwLock::new(Vec::new())),
+            applied_actions: Arc::new(RwLock::new(applied_actions)),
             suggestions_path,
             action_log_path,
             intents_path,
             mode_path,
+            automation_settings_path,
             started: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -196,19 +207,20 @@ impl AiPolicyEngine {
             recent_events.clone()
         };
 
-        let mode = self.get_mode(None).await;
+        let mode = self.mode_for_event(&event).await;
         let intents = self.intents.read().await.clone();
         let classes = classify_event(&event, &recent_events_snapshot);
         let resolved_intent = resolve_intent(&event, &intents);
+        let matched_intent = resolved_intent.is_some();
 
         if !should_generate_suggestion(&event, &classes, resolved_intent.as_ref()) {
             return Ok(());
         }
 
         let mut suggestion = build_suggestion(event.clone(), &classes);
-        if let Some(resolved_intent) = resolved_intent {
-            suggestion.decision.action = resolved_intent.action;
-            suggestion.decision.reason = resolved_intent.reason;
+        if let Some(resolved_intent) = &resolved_intent {
+            suggestion.decision.action = resolved_intent.action.clone();
+            suggestion.decision.reason = resolved_intent.reason.clone();
             suggestion.decision.confidence = resolved_intent.confidence;
         }
 
@@ -219,16 +231,22 @@ impl AiPolicyEngine {
         }
 
         if matches!(mode, AutomationMode::FullAiControl) {
-            let _ = self
-                .apply_suggestion(
-                    state,
-                    ApplySuggestionRequest {
-                        suggestion_id: suggestion.id.clone(),
-                        approve: true,
-                    },
-                    true,
-                )
-                .await?;
+            let settings = self.automation_settings.read().await.clone();
+            if self
+                .can_auto_apply(state, &suggestion, matched_intent, &settings)
+                .await
+            {
+                let _ = self
+                    .apply_suggestion(
+                        state,
+                        ApplySuggestionRequest {
+                            suggestion_id: suggestion.id.clone(),
+                            approve: true,
+                        },
+                        true,
+                    )
+                    .await?;
+            }
         }
 
         Ok(())
@@ -265,6 +283,22 @@ impl AiPolicyEngine {
         Ok(intents.clone())
     }
 
+    pub async fn get_automation_settings(&self) -> AutomationSettings {
+        self.automation_settings.read().await.clone()
+    }
+
+    pub async fn set_automation_settings(
+        &self,
+        mut settings: AutomationSettings,
+    ) -> Result<AutomationSettings> {
+        settings.auto_apply_confidence_threshold =
+            settings.auto_apply_confidence_threshold.min(100);
+        let mut current = self.automation_settings.write().await;
+        *current = settings;
+        persist_json(&self.automation_settings_path, &*current)?;
+        Ok(current.clone())
+    }
+
     pub async fn get_mode(&self, iface: Option<String>) -> AutomationMode {
         let mode = self.mode.read().await;
         iface
@@ -273,12 +307,25 @@ impl AiPolicyEngine {
             .unwrap_or_else(|| mode.default.clone())
     }
 
-    pub async fn set_mode(&self, request: ModeRequest, iface: Option<String>) -> Result<AutomationMode> {
+    async fn mode_for_event(&self, event: &Event) -> AutomationMode {
+        let iface = (!event.iface.trim().is_empty()).then(|| event.iface.clone());
+        self.get_mode(iface).await
+    }
+
+    pub async fn set_mode(
+        &self,
+        request: ModeRequest,
+        iface: Option<String>,
+    ) -> Result<AutomationMode> {
         let mut mode = self.mode.write().await;
 
         let result = if let Some(iface) = iface {
-            mode.per_interface.insert(iface.clone(), request.mode.clone());
-            mode.per_interface.get(&iface).cloned().unwrap_or_else(|| mode.default.clone())
+            mode.per_interface
+                .insert(iface.clone(), request.mode.clone());
+            mode.per_interface
+                .get(&iface)
+                .cloned()
+                .unwrap_or_else(|| mode.default.clone())
         } else {
             mode.default = request.mode.clone();
             mode.default.clone()
@@ -334,29 +381,34 @@ impl AiPolicyEngine {
         decision.action = materialize_action(decision.action.clone());
         suggestion.decision = decision.clone();
 
-        let change = self.apply_to_firewall_rules(state, &suggestion).await?;
-        if let Some(change) = change {
-            {
-                let mut actions = self.applied_actions.write().await;
-                let logged = LoggedAction {
-                    suggestion_id: suggestion.id.clone(),
-                    decision: decision.clone(),
-                    change,
-                };
-                actions.push(logged.clone());
-                append_json_line(&self.action_log_path, &logged)?;
-            }
+        let Some(change) = self.apply_to_firewall_rules(state, &suggestion).await? else {
+            return Ok(ApplySuggestionResponse {
+                applied: false,
+                message: "suggestion did not map to a firewall rule change".to_string(),
+                decision: Some(decision),
+            });
+        };
 
-            let mut suggestions = self.suggestions.write().await;
-            if let Some(existing) = suggestions
-                .iter_mut()
-                .find(|s| s.id == request.suggestion_id)
-            {
-                existing.applied = true;
-                existing.decision = decision.clone();
-            }
-            persist_json(&self.suggestions_path, &*suggestions)?;
+        {
+            let mut actions = self.applied_actions.write().await;
+            let logged = LoggedAction {
+                suggestion_id: suggestion.id.clone(),
+                decision: decision.clone(),
+                change,
+            };
+            actions.push(logged.clone());
+            append_json_line(&self.action_log_path, &logged)?;
         }
+
+        let mut suggestions = self.suggestions.write().await;
+        if let Some(existing) = suggestions
+            .iter_mut()
+            .find(|s| s.id == request.suggestion_id)
+        {
+            existing.applied = true;
+            existing.decision = decision.clone();
+        }
+        persist_json(&self.suggestions_path, &*suggestions)?;
 
         Ok(ApplySuggestionResponse {
             applied: true,
@@ -367,8 +419,8 @@ impl AiPolicyEngine {
 
     pub async fn undo_last_action(&self, state: &Arc<AppState>) -> Result<UndoResponse> {
         let maybe_last = {
-            let mut actions = self.applied_actions.write().await;
-            actions.pop()
+            let actions = self.applied_actions.read().await;
+            actions.last().cloned()
         };
 
         let Some(last) = maybe_last else {
@@ -385,6 +437,12 @@ impl AiPolicyEngine {
         })
         .await?;
 
+        {
+            let mut actions = self.applied_actions.write().await;
+            actions.pop();
+            persist_json_lines(&self.action_log_path, &*actions)?;
+        }
+
         Ok(UndoResponse {
             undone: true,
             message: "last AI action undone".to_string(),
@@ -397,10 +455,33 @@ impl AiPolicyEngine {
         state: &Arc<AppState>,
         suggestion: &Suggestion,
     ) -> Result<Option<AppliedChange>> {
-        self.update_firewall_rules(state, |rules| {
-            Ok(apply_suggestion_to_rules(rules, suggestion))
-        })
-        .await
+        let mut cache = state.firewall_rules.write().await;
+        let old_rules = state
+            .config_store
+            .load_firewall_rules()
+            .context("failed to load firewall rules for AI policy update")?;
+        let mut new_rules = old_rules.clone();
+        let Some(change) = apply_suggestion_to_rules(&mut new_rules, suggestion) else {
+            return Ok(None);
+        };
+
+        state
+            .config_store
+            .save_firewall_rules(new_rules.clone())
+            .context("failed to persist firewall rules for AI policy update")?;
+        *cache = new_rules;
+
+        if let Err(apply_err) =
+            crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await
+        {
+            let _ = state.config_store.save_firewall_rules(old_rules.clone());
+            *cache = old_rules;
+            return Err(anyhow::anyhow!(
+                "failed to apply nftables after AI policy update: {apply_err}"
+            ));
+        }
+
+        Ok(Some(change))
     }
 
     async fn update_firewall_rules<T, F>(&self, state: &Arc<AppState>, mutate: F) -> Result<T>
@@ -432,6 +513,81 @@ impl AiPolicyEngine {
         }
 
         Ok(result)
+    }
+
+    async fn can_auto_apply(
+        &self,
+        state: &Arc<AppState>,
+        suggestion: &Suggestion,
+        matched_intent: bool,
+        settings: &AutomationSettings,
+    ) -> bool {
+        if suggestion.decision.confidence < settings.threshold_fraction() {
+            return false;
+        }
+        if settings.require_intent_match && !matched_intent {
+            return false;
+        }
+        if settings.require_protocol {
+            let protocol = suggestion.event.protocol.trim();
+            if protocol.is_empty() || protocol.eq_ignore_ascii_case("any") {
+                return false;
+            }
+        }
+        if settings.require_destination_port
+            && matches!(
+                suggestion.event.protocol.to_ascii_lowercase().as_str(),
+                "tcp" | "udp"
+            )
+            && suggestion.event.dest_port.is_none()
+        {
+            return false;
+        }
+        if settings.require_ip_family
+            && (suggestion.event.src_ip.parse::<Ipv4Addr>().is_err()
+                || suggestion.event.dest_ip.parse::<Ipv4Addr>().is_err())
+        {
+            return false;
+        }
+        if !settings.allow_edit_rule
+            && matches!(suggestion.decision.action, DecisionAction::EditRule)
+        {
+            return false;
+        }
+        if !settings.allow_remove_rule
+            && matches!(suggestion.decision.action, DecisionAction::RemoveRule)
+        {
+            return false;
+        }
+        if settings.protect_management_interface {
+            let firewall_settings = state
+                .config_store
+                .load_firewall_settings()
+                .unwrap_or_default();
+            if firewall_settings
+                .management_interface
+                .as_deref()
+                .is_some_and(|iface| iface == suggestion.event.iface)
+            {
+                return false;
+            }
+            if suggestion
+                .event
+                .dest_port
+                .is_some_and(|port| firewall_settings.management_ports.contains(&port))
+            {
+                return false;
+            }
+        }
+        if settings.max_auto_apply_per_hour > 0 {
+            let actions = self.applied_actions.read().await;
+            let recent = recent_auto_apply_count(&actions);
+            if recent >= settings.max_auto_apply_per_hour as usize {
+                return false;
+            }
+        }
+
+        true
     }
 }
 
@@ -622,6 +778,20 @@ where
     }
 }
 
+fn read_json_lines_or_default<T>(path: &Path) -> Vec<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|raw| {
+            raw.lines()
+                .filter_map(|line| serde_json::from_str::<T>(line).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn read_mode_config_or_default(path: &Path) -> ModeConfig {
     match std::fs::read_to_string(path) {
         Ok(raw) => serde_json::from_str::<PersistedModeConfig>(&raw)
@@ -660,6 +830,37 @@ fn append_json_line<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     Ok(())
 }
 
+fn persist_json_lines<T: serde::Serialize>(path: &Path, values: &[T]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let tmp = path.with_extension("tmp");
+    let mut raw = String::new();
+    for value in values {
+        raw.push_str(&serde_json::to_string(value)?);
+        raw.push('\n');
+    }
+    std::fs::write(&tmp, raw).with_context(|| format!("failed to write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
+    Ok(())
+}
+
+fn recent_auto_apply_count(actions: &[LoggedAction]) -> usize {
+    let cutoff = Utc::now() - Duration::hours(1);
+    actions
+        .iter()
+        .filter(|action| action.decision.auto_applied)
+        .filter(|action| {
+            chrono::DateTime::parse_from_rfc3339(&action.decision.timestamp)
+                .map(|timestamp| timestamp.with_timezone(&Utc) >= cutoff)
+                .unwrap_or(false)
+        })
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -673,12 +874,15 @@ mod tests {
             dir.path().join("actions.log"),
             dir.path().join("intents.json"),
             dir.path().join("mode.json"),
+            dir.path().join("automation_settings.json"),
         );
         let mode = engine
-            .set_mode(ModeRequest {
-                mode: AutomationMode::SuggestEdits,
-            },
-            None)
+            .set_mode(
+                ModeRequest {
+                    mode: AutomationMode::SuggestEdits,
+                },
+                None,
+            )
             .await
             .unwrap();
         assert!(matches!(mode, AutomationMode::SuggestEdits));
@@ -696,10 +900,14 @@ mod tests {
             dir.path().join("actions.log"),
             dir.path().join("intents.json"),
             dir.path().join("mode.json"),
+            dir.path().join("automation_settings.json"),
         );
 
         // Default mode remains monitor-only until set.
-        assert!(matches!(engine.get_mode(None).await, AutomationMode::MonitorOnly));
+        assert!(matches!(
+            engine.get_mode(None).await,
+            AutomationMode::MonitorOnly
+        ));
 
         let mode = engine
             .set_mode(
@@ -712,7 +920,13 @@ mod tests {
             .unwrap();
 
         assert!(matches!(mode, AutomationMode::FullAiControl));
-        assert!(matches!(engine.get_mode(Some("eth0".to_string())).await, AutomationMode::FullAiControl));
-        assert!(matches!(engine.get_mode(Some("eth1".to_string())).await, AutomationMode::MonitorOnly));
+        assert!(matches!(
+            engine.get_mode(Some("eth0".to_string())).await,
+            AutomationMode::FullAiControl
+        ));
+        assert!(matches!(
+            engine.get_mode(Some("eth1".to_string())).await,
+            AutomationMode::MonitorOnly
+        ));
     }
 }

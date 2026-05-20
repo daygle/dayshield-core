@@ -143,6 +143,42 @@ pub struct ApplySuggestionRequest {
     pub approve: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AutomationSettings {
+    pub auto_apply_confidence_threshold: u8,
+    pub require_intent_match: bool,
+    pub require_protocol: bool,
+    pub require_destination_port: bool,
+    pub require_ip_family: bool,
+    pub max_auto_apply_per_hour: u32,
+    pub allow_edit_rule: bool,
+    pub allow_remove_rule: bool,
+    pub protect_management_interface: bool,
+}
+
+impl Default for AutomationSettings {
+    fn default() -> Self {
+        Self {
+            auto_apply_confidence_threshold: 75,
+            require_intent_match: true,
+            require_protocol: true,
+            require_destination_port: true,
+            require_ip_family: true,
+            max_auto_apply_per_hour: 10,
+            allow_edit_rule: false,
+            allow_remove_rule: false,
+            protect_management_interface: true,
+        }
+    }
+}
+
+impl AutomationSettings {
+    pub fn threshold_fraction(&self) -> f32 {
+        f32::from(self.auto_apply_confidence_threshold.min(100)) / 100.0
+    }
+}
+
 fn default_true() -> bool {
     true
 }

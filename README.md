@@ -1,100 +1,78 @@
-# DayShield Firewall Core
+# DayShield Core
 
-Backend orchestrator for DayShield Firewall.
+`dayshield-core` is the Rust backend for the DayShield appliance. It provides the management API, runtime orchestration, and service integration required to operate the DayShield firewall system.
 
-This workspace contains a single Rust crate at `dayshield-core/` and exposes
-the DayShield Firewall API/UI service. The default bind is `0.0.0.0:8443`.
+## What this repo contains
 
-## Workspace layout
+This repository implements the core service that:
 
-```
-dayshield-core/
-|-- Cargo.toml                # workspace manifest
-|-- rust-toolchain.toml       # pinned Rust toolchain
-`-- dayshield-core/
-    |-- Cargo.toml            # crate manifest
-    `-- src/
-        |-- main.rs           # app entrypoint + HTTP server bind
-        |-- api/              # HTTP routes/handlers
-        |-- auth/             # authentication/session storage
-        |-- backup/           # backup + encryption subsystem
-        |-- engine/           # service engine integration (acme, dns, etc.)
-        |-- logs/             # firewall/suricata/system log APIs
-        |-- nat/              # NAT model + nftables rendering
-        |-- notify/           # SMTP notifications
-        |-- ntp/              # NTP status/apply logic
-        `-- state/            # shared app state
-```
+- exposes the DayShield HTTP API
+- handles authentication and session state
+- manages backup and restore workflows
+- integrates with firewall, DNS, NTP, and notification subsystems
+- collects and serves logs, metrics, and status information
+- delivers the management UI assets in deployed environments
+
+## Why it matters
+
+The core service is the central runtime component of the DayShield appliance. It coordinates the underlying Linux platform and appliance services while providing a stable interface for the UI and automation components.
 
 ## Requirements
 
-- Rust toolchain `1.88.0` (from `rust-toolchain.toml`)
-- Linux userspace tools used by runtime features (nftables, kea, unbound,
-  suricata, chrony, etc.) should be present in target rootfs when those APIs
-  are exercised.
+- Rust toolchain pinned in `rust-toolchain.toml` (currently `1.88.0`)
+- Linux utilities available in the target environment for runtime features:
+  - `nftables`
+  - `unbound`
+  - `suricata`
+  - `chrony` / `ntp`
+  - other platform services required by the appliance
 
 ## Build
 
-Local Rust builds are for development and validation. Production release
-artifacts are built by GitHub Actions from a version tag in `-core`.
-
-From workspace root:
+From the repository root:
 
 ```sh
-cargo check -p -core
-cargo build -p -core
+cargo check -p dayshield-core
+cargo build -p dayshield-core
 ```
 
-Release binary for local testing:
+For an optimized build:
 
 ```sh
-cargo build -p -core --release
+cargo build -p dayshield-core --release
 ```
 
 ## Run
 
-```sh
-cargo run -p -core
-```
-
-On startup the server binds to:
-
-- `http://0.0.0.0:8443` (default)
-
-The management UI is built static assets served by `-core` from
-`/usr/local/share/-ui`.
-
-When building the installed rootfs, the default `-core` service unit
-is configured to expose the management UI on port `8443`.
-
-You can override the bind address with environment variables:
-
-- `_BIND_ADDR` - full listen address, e.g. `127.0.0.1:8443`
-- `_PORT` - listen port on `0.0.0.0`, e.g. `8443`
-
-## Verification (Optional)
+Start the core service locally:
 
 ```sh
-cargo test -p -core
+cargo run -p dayshield-core
 ```
 
-## Releases
+Default listen address:
 
-This repo publishes the **core** artifact only via
-`.github/workflows/release-artifacts.yml`.
+- `0.0.0.0:8443`
 
-- Trigger: tag push (`v*`) or manual `workflow_dispatch` with `tag`
-- Release assets from this repo: `core-vX.Y.Z.tar.zst` and `checksums.txt`
-- `dayshield-ui` and `dayshield-rootfs` are released from their own repos/workflows
+Override the address with environment variables:
 
-Release/update model is **manifest-driven (Option B)**:
+- `_BIND_ADDR` — full listen address, e.g. `127.0.0.1:8443`
+- `_PORT` — bind port on `0.0.0.0`, e.g. `8443`
 
-1. `dayshield-core`, `dayshield-ui`, and `dayshield-rootfs` publish artifacts with
-   independent tags/versions.
-2. A central `manifest.json` is generated/updated with per-component metadata
-   (`version`, `downloadUrl`, `checksumSha256`, optional signature/source fields).
-3. Appliances consume that manifest in registry mode and evaluate updates per
-   component.
+## Test
 
-Compatibility note: the updater still supports a legacy GitHub release fallback,
-but manifest is the primary source of truth.
+Run the crate test suite:
+
+```sh
+cargo test -p dayshield-core
+```
+
+## Release model
+
+`dayshield-core` is released as the standalone backend artifact for the DayShield appliance. Release automation is managed via GitHub Actions and produces versioned core packages consumed by appliance builds.
+
+## Notes
+
+- This repo focuses on core service behavior and API/runtime integration.
+- The UI frontend and appliance root filesystem are maintained in separate repositories.
+- Developers should validate changes with workspace build/test commands and ensure runtime integration compatibility.

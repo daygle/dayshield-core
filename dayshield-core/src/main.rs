@@ -19,6 +19,7 @@ use tracing::{info, warn};
 
 mod ai_engine;
 mod ai_model;
+mod ai_policy;
 mod api;
 mod auth;
 mod backup;
@@ -142,6 +143,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Start AI engine background maintenance.
     ai_engine::start_background_tasks(Arc::clone(&app_state)).await;
+    ai_policy::start_background_tasks(Arc::clone(&app_state)).await;
 
     // Start low-interaction honeypot listeners.
     honeypot::start_background_tasks(Arc::clone(&app_state)).await;

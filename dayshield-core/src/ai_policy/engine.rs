@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -39,9 +40,45 @@ struct LoggedAction {
     change: AppliedChange,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ModeConfig {
+    #[serde(default)]
+    pub default: AutomationMode,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub per_interface: HashMap<String, AutomationMode>,
+}
+
+impl Default for ModeConfig {
+    fn default() -> Self {
+        Self {
+            default: AutomationMode::MonitorOnly,
+            per_interface: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+enum PersistedModeConfig {
+    Global(AutomationMode),
+    Config(ModeConfig),
+}
+
+impl From<PersistedModeConfig> for ModeConfig {
+    fn from(value: PersistedModeConfig) -> Self {
+        match value {
+            PersistedModeConfig::Global(mode) => ModeConfig {
+                default: mode,
+                per_interface: HashMap::new(),
+            },
+            PersistedModeConfig::Config(config) => config,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AiPolicyEngine {
-    mode: Arc<RwLock<AutomationMode>>,
+    mode: Arc<RwLock<ModeConfig>>,
     suggestions: Arc<RwLock<Vec<Suggestion>>>,
     intents: Arc<RwLock<Vec<Intent>>>,
     recent_events: Arc<RwLock<Vec<Event>>>,
@@ -71,7 +108,7 @@ impl AiPolicyEngine {
     ) -> Self {
         let suggestions = read_json_or_default(&suggestions_path, Vec::<Suggestion>::new());
         let intents = read_json_or_default(&intents_path, Vec::<Intent>::new());
-        let mode = read_json_or_default(&mode_path, AutomationMode::MonitorOnly);
+        let mode = read_mode_config_or_default(&mode_path);
 
         Self {
             mode: Arc::new(RwLock::new(mode)),
@@ -159,7 +196,7 @@ impl AiPolicyEngine {
             recent_events.clone()
         };
 
-        let mode = self.get_mode().await;
+        let mode = self.get_mode(None).await;
         let intents = self.intents.read().await.clone();
         let classes = classify_event(&event, &recent_events_snapshot);
         let resolved_intent = resolve_intent(&event, &intents);
@@ -200,7 +237,7 @@ impl AiPolicyEngine {
     pub async fn list_suggestions(&self, state: &Arc<AppState>) -> Result<Vec<Suggestion>> {
         let mut suggestions = self.suggestions.read().await.clone();
         if matches!(
-            self.get_mode().await,
+            self.get_mode(None).await,
             AutomationMode::SuggestEdits | AutomationMode::FullAiControl
         ) {
             let intents = self.intents.read().await.clone();
@@ -228,15 +265,27 @@ impl AiPolicyEngine {
         Ok(intents.clone())
     }
 
-    pub async fn get_mode(&self) -> AutomationMode {
-        self.mode.read().await.clone()
+    pub async fn get_mode(&self, iface: Option<String>) -> AutomationMode {
+        let mode = self.mode.read().await;
+        iface
+            .as_ref()
+            .and_then(|name| mode.per_interface.get(name).cloned())
+            .unwrap_or_else(|| mode.default.clone())
     }
 
-    pub async fn set_mode(&self, request: ModeRequest) -> Result<AutomationMode> {
+    pub async fn set_mode(&self, request: ModeRequest, iface: Option<String>) -> Result<AutomationMode> {
         let mut mode = self.mode.write().await;
-        *mode = request.mode;
+
+        let result = if let Some(iface) = iface {
+            mode.per_interface.insert(iface.clone(), request.mode.clone());
+            mode.per_interface.get(&iface).cloned().unwrap_or_else(|| mode.default.clone())
+        } else {
+            mode.default = request.mode.clone();
+            mode.default.clone()
+        };
+
         persist_json(&self.mode_path, &*mode)?;
-        Ok(mode.clone())
+        Ok(result)
     }
 
     pub async fn apply_suggestion(
@@ -573,6 +622,15 @@ where
     }
 }
 
+fn read_mode_config_or_default(path: &Path) -> ModeConfig {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => serde_json::from_str::<PersistedModeConfig>(&raw)
+            .map(ModeConfig::from)
+            .unwrap_or_default(),
+        Err(_) => ModeConfig::default(),
+    }
+}
+
 fn persist_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -619,13 +677,42 @@ mod tests {
         let mode = engine
             .set_mode(ModeRequest {
                 mode: AutomationMode::SuggestEdits,
-            })
+            },
+            None)
             .await
             .unwrap();
         assert!(matches!(mode, AutomationMode::SuggestEdits));
         assert!(matches!(
-            engine.get_mode().await,
+            engine.get_mode(None).await,
             AutomationMode::SuggestEdits
         ));
+    }
+
+    #[tokio::test]
+    async fn set_and_get_interface_mode() {
+        let dir = tempdir().unwrap();
+        let engine = AiPolicyEngine::with_paths(
+            dir.path().join("suggestions.json"),
+            dir.path().join("actions.log"),
+            dir.path().join("intents.json"),
+            dir.path().join("mode.json"),
+        );
+
+        // Default mode remains monitor-only until set.
+        assert!(matches!(engine.get_mode(None).await, AutomationMode::MonitorOnly));
+
+        let mode = engine
+            .set_mode(
+                ModeRequest {
+                    mode: AutomationMode::FullAiControl,
+                },
+                Some("eth0".to_string()),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(mode, AutomationMode::FullAiControl));
+        assert!(matches!(engine.get_mode(Some("eth0".to_string())).await, AutomationMode::FullAiControl));
+        assert!(matches!(engine.get_mode(Some("eth1".to_string())).await, AutomationMode::MonitorOnly));
     }
 }

@@ -175,7 +175,11 @@ pub fn generate_ruleset_with_ipv6(
     )
 }
 
-pub fn system_firewall_rules(interfaces: &[Interface], ipv6_enabled: bool) -> Vec<FirewallRule> {
+pub fn system_firewall_rules(
+    interfaces: &[Interface],
+    firewall_settings: &FirewallSettings,
+    ipv6_enabled: bool,
+) -> Vec<FirewallRule> {
     let mut rules = Vec::new();
 
     for iface in interfaces
@@ -225,7 +229,41 @@ pub fn system_firewall_rules(interfaces: &[Interface], ipv6_enabled: bool) -> Ve
         }
     }
 
+    if matches!(firewall_settings.input_policy, FirewallChainPolicy::Drop) {
+        rules.push(system_default_block_rule("input"));
+    }
+    if matches!(firewall_settings.forward_policy, FirewallChainPolicy::Drop) {
+        rules.push(system_default_block_rule("forward"));
+    }
+
     rules
+}
+
+fn system_default_block_rule(direction: &str) -> FirewallRule {
+    let chain_direction = if direction == "forward" {
+        FirewallDirection::Forward
+    } else {
+        FirewallDirection::Input
+    };
+
+    FirewallRule {
+        id: stable_system_rule_id("system", "default-block", direction, &chain_direction),
+        description: Some(format!("Default drop policy for {} chain", direction.to_uppercase())),
+        priority: -100,
+        source: None,
+        destination: None,
+        protocol: None,
+        source_port: None,
+        destination_port: None,
+        ip_family: FirewallAddressFamily::Ipv4Ipv6,
+        action: Action::Drop,
+        direction: chain_direction,
+        interface: None,
+        log: false,
+        enabled: true,
+        schedule: None,
+        state_limits: FirewallStateLimits::default(),
+    }
 }
 
 fn is_wan_interface(iface: &Interface) -> bool {

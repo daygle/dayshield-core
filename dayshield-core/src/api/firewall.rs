@@ -64,8 +64,12 @@ pub async fn list_rules(State(state): State<Arc<AppState>>) -> Result<impl IntoR
         .as_ref()
         .map(|settings| settings.ipv6_enabled)
         .unwrap_or(false);
-    let system_rules =
-        crate::engine::nftables::system_firewall_rules(&cfg.interfaces, ipv6_enabled);
+    let firewall_settings = cfg.firewall_settings.unwrap_or_default();
+    let system_rules = crate::engine::nftables::system_firewall_rules(
+        &cfg.interfaces,
+        &firewall_settings,
+        ipv6_enabled,
+    );
 
     info!(
         count = rules.len(),

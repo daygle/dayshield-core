@@ -48,6 +48,11 @@ pub struct FeedbackRequest {
     pub feedback: String,
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct ModeQuery {
+    pub iface: Option<String>,
+}
+
 fn default_limit() -> usize {
     100
 }
@@ -183,16 +188,20 @@ pub async fn set_intents(
 }
 
 /// GET /api/ai/mode
-pub async fn get_mode(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AiApiError> {
-    Ok(Json(state.ai_policy_engine.get_mode().await))
+pub async fn get_mode(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ModeQuery>,
+) -> Result<impl IntoResponse, AiApiError> {
+    Ok(Json(state.ai_policy_engine.get_mode(query.iface).await))
 }
 
 /// POST /api/ai/mode
 pub async fn set_mode(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<ModeQuery>,
     Json(req): Json<ModeRequest>,
 ) -> Result<impl IntoResponse, AiApiError> {
-    let mode = state.ai_policy_engine.set_mode(req).await?;
+    let mode = state.ai_policy_engine.set_mode(req, query.iface).await?;
     Ok(Json(mode))
 }
 

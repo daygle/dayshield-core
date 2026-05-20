@@ -7,6 +7,7 @@ use axum::{
     Json,
 };
 
+use crate::ai_policy::models::{ApplySuggestionRequest, ModeRequest, SetIntentsRequest};
 use crate::config::models::{validate_ai_engine_config, AiEngineConfig};
 use crate::state::AppState;
 
@@ -136,4 +137,62 @@ pub async fn update_config(
     state.config_store.save_ai_engine_config(config.clone())?;
     state.ai_runtime.update_model_config(&config).await?;
     Ok(Json(config))
+}
+
+/// GET /api/ai/suggestions
+pub async fn get_suggestions(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, AiApiError> {
+    let suggestions = state.ai_policy_engine.list_suggestions(&state).await?;
+    Ok(Json(suggestions))
+}
+
+/// POST /api/ai/apply
+pub async fn apply_suggestion(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ApplySuggestionRequest>,
+) -> Result<impl IntoResponse, AiApiError> {
+    let response = state
+        .ai_policy_engine
+        .apply_suggestion(&state, req, false)
+        .await?;
+    Ok(Json(response))
+}
+
+/// GET /api/ai/intents
+pub async fn get_intents(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, AiApiError> {
+    Ok(Json(state.ai_policy_engine.get_intents().await))
+}
+
+/// POST /api/ai/intents
+pub async fn set_intents(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SetIntentsRequest>,
+) -> Result<impl IntoResponse, AiApiError> {
+    let intents = state.ai_policy_engine.set_intents(req).await?;
+    Ok(Json(intents))
+}
+
+/// GET /api/ai/mode
+pub async fn get_mode(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AiApiError> {
+    Ok(Json(state.ai_policy_engine.get_mode().await))
+}
+
+/// POST /api/ai/mode
+pub async fn set_mode(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ModeRequest>,
+) -> Result<impl IntoResponse, AiApiError> {
+    let mode = state.ai_policy_engine.set_mode(req).await?;
+    Ok(Json(mode))
+}
+
+/// POST /api/ai/undo_last_action
+pub async fn undo_last_action(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, AiApiError> {
+    let response = state.ai_policy_engine.undo_last_action(&state).await?;
+    Ok(Json(response))
 }

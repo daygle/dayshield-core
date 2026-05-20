@@ -10,6 +10,7 @@ use tokio::sync::{broadcast, RwLock};
 
 use crate::{
     ai_engine::AiRuntime,
+    ai_policy::engine::AiPolicyEngine,
     config::{
         models::{CrowdSecDecision, FirewallRule, Interface},
         ConfigStore,
@@ -62,6 +63,8 @@ pub struct AppState {
     pub ai_runtime: AiRuntime,
     /// Low-interaction honeypot listener runtime.
     pub honeypot_runtime: HoneypotRuntime,
+    /// Deterministic local-only AI policy automation runtime.
+    pub ai_policy_engine: AiPolicyEngine,
     /// Broadcast sender for live AI log events.
     pub ai_log_sender: broadcast::Sender<LogEvent>,
 }
@@ -118,6 +121,7 @@ impl AppState {
             login_attempts: RwLock::new(HashMap::new()),
             ai_runtime: AiRuntime::new(&config_dir, config),
             honeypot_runtime: HoneypotRuntime::new(&config_dir),
+            ai_policy_engine: AiPolicyEngine::new(),
             ai_log_sender,
         };
         (state, notify_rx)
@@ -145,6 +149,7 @@ impl AppState {
             .unwrap_or_default();
         state.ai_runtime = AiRuntime::new(&config_dir, config);
         state.honeypot_runtime = HoneypotRuntime::new(&config_dir);
+        state.ai_policy_engine = AiPolicyEngine::new();
         state.interfaces = RwLock::new(state.config_store.load_interfaces().unwrap_or_default());
         state.firewall_rules =
             RwLock::new(state.config_store.load_firewall_rules().unwrap_or_default());

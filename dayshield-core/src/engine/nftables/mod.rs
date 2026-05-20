@@ -380,7 +380,7 @@ pub fn generate_ruleset_with_captive_and_interfaces(
     interfaces: &[Interface],
 ) -> String {
     let settings = firewall_settings.cloned().unwrap_or_default();
-    let system_rules = system_firewall_rules(interfaces, ipv6_enabled);
+    let system_rules = system_firewall_rules(interfaces, &settings, ipv6_enabled);
     // Only emit rules that are enabled and whose schedule (if any) is currently active.
     let mut sorted: Vec<&FirewallRule> = system_rules
         .iter()

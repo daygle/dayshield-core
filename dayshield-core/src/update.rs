@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     env, fs,
     path::{Path, PathBuf},
     process::Command as StdCommand,
@@ -40,6 +41,11 @@ const ROOTFS_GRUB_ENTRY_PREFIX: &str = "dayshield-";
 const ROOTFS_ISO_UPGRADE_MARKER: &str = "rootfs-iso-upgrade.json";
 const ROOTFS_BOOT_CONFIRM_DELAY_SECS: u64 = 90;
 const UPDATE_HTTP_USER_AGENT: &str = concat!("dayshield-core/", env!("CARGO_PKG_VERSION"));
+const ALL_REPO_COMPONENTS: [RepoComponent; 3] = [
+    RepoComponent::Core,
+    RepoComponent::Ui,
+    RepoComponent::Rootfs,
+];
 /// GitHub Releases repository: https://github.com/daygle/dayshield-core
 /// Artifacts are attached to releases as: core-v1.2.3.tar.zst, ui-v1.2.3.tar.zst, etc.
 const DEFAULT_REGISTRY_URL: &str = "https://api.github.com/repos/daygle/dayshield-core";
@@ -530,10 +536,6 @@ struct GitHubAsset {
     pub browser_download_url: String,
 }
 
-fn is_github_repo_api_url(url: &str) -> bool {
-    url.contains("api.github.com") && url.contains("/repos/")
-}
-
 fn registry_manifest_url(registry_url: &str) -> String {
     let trimmed = registry_url.trim_end_matches('/');
     if trimmed.ends_with(".json") {
@@ -550,11 +552,34 @@ fn github_contents_manifest_url(github_api_url: &str) -> String {
     )
 }
 
-fn github_repo_slug(github_api_url: &str) -> Option<String> {
-    let rest = github_api_url.split("/repos/").nth(1)?;
+fn github_repo_parts(url: &str) -> Option<(String, String)> {
+    let trimmed = url.trim().trim_end_matches('/');
+    let rest = if let Some(rest) = trimmed.split("api.github.com/repos/").nth(1) {
+        rest
+    } else if let Some(rest) = trimmed.split("github.com/").nth(1) {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
+        rest
+    } else {
+        return None;
+    };
+
     let mut parts = rest.trim_matches('/').split('/');
     let owner = parts.next()?;
-    let repo = parts.next()?;
+    let repo = parts.next()?.trim_end_matches(".git");
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some((owner.to_string(), repo.to_string()))
+}
+
+fn github_repo_api_url(url: &str) -> Option<String> {
+    let (owner, repo) = github_repo_parts(url)?;
+    Some(format!("https://api.github.com/repos/{owner}/{repo}"))
+}
+
+fn github_repo_slug(url: &str) -> Option<String> {
+    let (owner, repo) = github_repo_parts(url)?;
     Some(format!("{owner}/{repo}"))
 }
 
@@ -1639,21 +1664,87 @@ async fn download_artifact(url: &str, destination: &Path) -> Result<()> {
 async fn query_registry(registry_url: &str) -> Result<RegistryManifest> {
     let client = reqwest::Client::new();
 
-    if is_github_repo_api_url(registry_url) {
-        match query_github_repo_manifest(registry_url, &client).await {
+    if let Some(github_api_url) = github_repo_api_url(registry_url) {
+        match query_github_repo_manifest(&github_api_url, &client).await {
             Ok(manifest) => return Ok(manifest),
             Err(err) => {
                 warn!(
                     error = %err,
                     "updates: failed to fetch GitHub manifest.json; falling back to releases/latest"
                 );
-                return query_github_releases(registry_url, &client).await;
+                return query_github_releases(&github_api_url, &client).await;
             }
         }
     }
 
     let manifest_url = registry_manifest_url(registry_url);
     query_registry_manifest_url(&client, &manifest_url).await
+}
+
+async fn query_registry_with_component_fallbacks(
+    settings: &UpdateSettings,
+) -> Result<RegistryManifest> {
+    let mut manifest = query_registry(&settings.registry_url).await?;
+
+    if !manifest.partial {
+        return Ok(manifest);
+    }
+
+    let mut seen_components = manifest
+        .components
+        .iter()
+        .map(|artifact| artifact.component.clone())
+        .collect::<HashSet<_>>();
+
+    for component in ALL_REPO_COMPONENTS {
+        if seen_components.contains(component.as_str()) {
+            continue;
+        }
+
+        let (_, repo_url, _) = component_config(settings, component);
+        let Some(api_url) = github_repo_api_url(&repo_url) else {
+            warn!(
+                component = component.as_str(),
+                repo_url,
+                "updates: component repo URL is not a GitHub repo URL; cannot query release fallback"
+            );
+            continue;
+        };
+
+        match query_registry(&api_url).await {
+            Ok(component_manifest) => {
+                let mut added = 0usize;
+                for artifact in component_manifest
+                    .components
+                    .into_iter()
+                    .filter(|artifact| artifact.component == component.as_str())
+                {
+                    manifest.components.push(artifact);
+                    added += 1;
+                }
+
+                if added == 0 {
+                    warn!(
+                        component = component.as_str(),
+                        repo_url,
+                        "updates: component repo release did not include a matching artifact"
+                    );
+                } else {
+                    seen_components.insert(component.as_str().to_string());
+                }
+            }
+            Err(err) => {
+                warn!(
+                    component = component.as_str(),
+                    repo_url,
+                    error = %err,
+                    "updates: failed to query component repo release fallback"
+                );
+            }
+        }
+    }
+
+    Ok(manifest)
 }
 
 async fn query_registry_manifest_url(
@@ -1735,6 +1826,117 @@ async fn query_github_repo_manifest(
         .with_context(|| format!("failed to parse GitHub manifest from {}", manifest_url))
 }
 
+fn artifact_version_from_name(component: &str, asset_name: &str) -> Option<String> {
+    asset_name
+        .strip_prefix(&format!("{component}-v"))
+        .and_then(|s| s.strip_suffix(".tar.zst"))
+        .map(|s| s.to_string())
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn checksum_from_text(text: &str, filename: &str) -> Option<String> {
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(checksum) = parts.next() else {
+            continue;
+        };
+        if !is_sha256_hex(checksum) {
+            continue;
+        }
+
+        let Some(listed_name) = parts.next() else {
+            return Some(checksum.to_string());
+        };
+        let listed_name = listed_name.trim_start_matches('*').trim_start_matches("./");
+
+        if listed_name == filename || listed_name.ends_with(&format!("/{filename}")) {
+            return Some(checksum.to_string());
+        }
+    }
+
+    None
+}
+
+async fn fetch_github_asset_text(client: &reqwest::Client, asset: &GitHubAsset) -> Result<String> {
+    client
+        .get(&asset.browser_download_url)
+        .header(USER_AGENT, HeaderValue::from_static(UPDATE_HTTP_USER_AGENT))
+        .send()
+        .await
+        .with_context(|| format!("failed to fetch {}", asset.name))?
+        .text()
+        .await
+        .with_context(|| format!("failed to read {}", asset.name))
+}
+
+async fn populate_github_release_checksums(
+    client: &reqwest::Client,
+    release: &GitHubRelease,
+    components: &mut [ArtifactMetadata],
+) {
+    if let Some(checksums_asset) = release.assets.iter().find(|a| a.name == "checksums.txt") {
+        match fetch_github_asset_text(client, checksums_asset).await {
+            Ok(checksums_text) => {
+                for component in components.iter_mut() {
+                    let Some(filename) = component.download_url.rsplit('/').next() else {
+                        continue;
+                    };
+                    if let Some(checksum) = checksum_from_text(&checksums_text, filename) {
+                        component.checksum_sha256 = checksum;
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "updates: failed to fetch checksums.txt from release");
+            }
+        }
+    }
+
+    for component in components.iter_mut() {
+        if !component.checksum_sha256.is_empty() {
+            continue;
+        }
+
+        let Some(artifact_name) = component.download_url.rsplit('/').next() else {
+            continue;
+        };
+        let checksum_name = format!("{artifact_name}.sha256");
+        let Some(checksum_asset) = release.assets.iter().find(|a| a.name == checksum_name) else {
+            warn!(
+                component = %component.component,
+                artifact = artifact_name,
+                "updates: no checksum asset found for GitHub release artifact"
+            );
+            continue;
+        };
+
+        match fetch_github_asset_text(client, checksum_asset).await {
+            Ok(checksum_text) => {
+                if let Some(checksum) = checksum_from_text(&checksum_text, artifact_name) {
+                    component.checksum_sha256 = checksum;
+                } else {
+                    warn!(
+                        component = %component.component,
+                        artifact = artifact_name,
+                        "updates: checksum asset did not contain a SHA-256 for artifact"
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(
+                    component = %component.component,
+                    artifact = artifact_name,
+                    error = %e,
+                    "updates: failed to fetch artifact checksum asset"
+                );
+            }
+        }
+    }
+}
+
 /// Query GitHub Releases API for latest release artifacts (legacy fallback).
 async fn query_github_releases(
     github_api_url: &str,
@@ -1806,19 +2008,16 @@ async fn query_github_releases(
         let asset_opt = release
             .assets
             .iter()
-            .find(|a| a.name.starts_with(comp_name) && a.name.ends_with(".tar.zst"));
+            .find(|a| artifact_version_from_name(comp_name, &a.name).is_some());
 
         if let Some(asset) = asset_opt {
             // Extract version from filename: core-v1.2.3.tar.zst -> 1.2.3
-            let version_str = asset
-                .name
-                .strip_prefix(&format!("{}-v", comp_name))
-                .and_then(|s| s.strip_suffix(".tar.zst"))
-                .unwrap_or("unknown");
+            let version_str = artifact_version_from_name(comp_name, &asset.name)
+                .unwrap_or_else(|| release.tag_name.trim_start_matches('v').to_string());
 
             components.push(ArtifactMetadata {
                 component: comp_name.to_string(),
-                version: version_str.to_string(),
+                version: version_str.clone(),
                 download_url: asset.browser_download_url.clone(),
                 checksum_sha256: String::new(), // Will be populated from checksums.txt if available
                 signature_url: None,
@@ -1843,41 +2042,7 @@ async fn query_github_releases(
         );
     }
 
-    // Try to fetch checksums from release
-    if let Some(checksums_asset) = release.assets.iter().find(|a| a.name == "checksums.txt") {
-        match client
-            .get(&checksums_asset.browser_download_url)
-            .send()
-            .await
-        {
-            Ok(response) => {
-                match response.text().await {
-                    Ok(checksums_text) => {
-                        // Parse checksums.txt format: SHA256 filename
-                        for line in checksums_text.lines() {
-                            let parts: Vec<&str> = line.split_whitespace().collect();
-                            if parts.len() >= 2 {
-                                let checksum = parts[0];
-                                let filename = parts[1];
-
-                                if let Some(comp) = components.iter_mut().find(|c| {
-                                    filename.contains(&c.component) && filename.contains(&c.version)
-                                }) {
-                                    comp.checksum_sha256 = checksum.to_string();
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "updates: failed to parse checksums.txt response");
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, "updates: failed to fetch checksums.txt from release");
-            }
-        }
-    }
+    populate_github_release_checksums(client, &release, &mut components).await;
 
     Ok(RegistryManifest {
         components,
@@ -2491,7 +2656,7 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
     let settings = load_settings(state);
     let mut state_file = load_state(state);
 
-    match query_registry(&settings.registry_url).await {
+    match query_registry_with_component_fallbacks(&settings).await {
         Ok(manifest) => {
             let mut seen_components = std::collections::HashSet::new();
             // Bootstrap tracked current version once for legacy systems that
@@ -2579,8 +2744,7 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
                     // UI can still display it. Only mark as not-updatable and flag the
                     // missing-from-manifest state so the UI can style it appropriately.
                     comp_state.update_available = false;
-                    comp_state.last_error =
-                        Some("missing from registry manifest".to_string());
+                    comp_state.last_error = Some("missing from registry manifest".to_string());
                     info!(
                         component = component.as_str(),
                         "updates: component not listed in registry manifest"
@@ -2620,7 +2784,7 @@ async fn apply_updates_registry(
     save_state(state, &state_file)?;
 
     // Step 1: Query registry for latest versions
-    let manifest = query_registry(&settings.registry_url).await?;
+    let manifest = query_registry_with_component_fallbacks(&settings).await?;
 
     // Step 2: Download all artifacts to staging area
     let staging_dir = PathBuf::from(ARTIFACT_STAGING_DIR);
@@ -3825,7 +3989,10 @@ pub async fn start_update_checker(state: std::sync::Arc<AppState>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{github_repo_slug, registry_manifest_url, ArtifactMetadata, RegistryManifest};
+    use super::{
+        artifact_version_from_name, checksum_from_text, github_repo_api_url, github_repo_slug,
+        registry_manifest_url, ArtifactMetadata, RegistryManifest,
+    };
 
     #[test]
     fn registry_manifest_url_appends_manifest_filename() {
@@ -3849,7 +4016,64 @@ mod tests {
             github_repo_slug("https://api.github.com/repos/daygle/dayshield-core"),
             Some("daygle/dayshield-core".to_string())
         );
+        assert_eq!(
+            github_repo_slug("https://github.com/daygle/dayshield-ui.git"),
+            Some("daygle/dayshield-ui".to_string())
+        );
         assert_eq!(github_repo_slug("https://example.com"), None);
+    }
+
+    #[test]
+    fn github_repo_api_url_normalizes_supported_github_urls() {
+        assert_eq!(
+            github_repo_api_url("https://github.com/daygle/dayshield-ui"),
+            Some("https://api.github.com/repos/daygle/dayshield-ui".to_string())
+        );
+        assert_eq!(
+            github_repo_api_url(
+                "https://api.github.com/repos/daygle/dayshield-rootfs/releases/latest"
+            ),
+            Some("https://api.github.com/repos/daygle/dayshield-rootfs".to_string())
+        );
+    }
+
+    #[test]
+    fn artifact_version_from_name_requires_component_tarball_name() {
+        assert_eq!(
+            artifact_version_from_name("ui", "ui-v1.2.3.tar.zst"),
+            Some("1.2.3".to_string())
+        );
+        assert_eq!(
+            artifact_version_from_name("rootfs", "rootfs-v2026.05.21.tar.zst"),
+            Some("2026.05.21".to_string())
+        );
+        assert_eq!(
+            artifact_version_from_name("ui", "dayshield-ui-v1.2.3.tar.zst"),
+            None
+        );
+    }
+
+    #[test]
+    fn checksum_from_text_supports_checksum_files_and_sidecars() {
+        let checksum = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            checksum_from_text(
+                &format!("{checksum}  ui-v1.2.3.tar.zst\n"),
+                "ui-v1.2.3.tar.zst"
+            ),
+            Some(checksum.to_string())
+        );
+        assert_eq!(
+            checksum_from_text(&format!("{checksum}\n"), "rootfs-v1.2.3.tar.zst"),
+            Some(checksum.to_string())
+        );
+        assert_eq!(
+            checksum_from_text(
+                &format!("{checksum}  core-v1.2.3.tar.zst\n"),
+                "ui-v1.2.3.tar.zst"
+            ),
+            None
+        );
     }
 
     #[test]

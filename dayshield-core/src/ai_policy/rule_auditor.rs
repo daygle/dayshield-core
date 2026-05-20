@@ -30,20 +30,33 @@ pub fn audit_rules(rules: &[FirewallRule], intents: &[Intent], timestamp: &str) 
     }
 
     for intent in intents {
-        if !intent.lan_only {
+        if !(intent.lan_only
+            || intent
+                .condition
+                .traffic_scope
+                .as_deref()
+                .is_some_and(|scope| scope.eq_ignore_ascii_case("lan")))
+        {
             continue;
         }
+        let protocol = intent
+            .condition
+            .protocol
+            .as_deref()
+            .or(intent.protocol.as_deref())
+            .unwrap_or("any");
+        let port = intent.condition.dst_port.or(intent.port);
         let has_lan_restriction = rules.iter().any(|rule| {
             if !matches!(rule.action, Action::Accept) {
                 return false;
             }
-            if rule.destination_port != Some(intent.port) {
+            if port.is_some() && rule.destination_port != port {
                 return false;
             }
             if !matches!(
                 (
                     &rule.protocol,
-                    intent.protocol.to_ascii_lowercase().as_str()
+                    protocol.to_ascii_lowercase().as_str()
                 ),
                 (Some(Protocol::Tcp), "tcp")
                     | (Some(Protocol::Udp), "udp")
@@ -61,8 +74,8 @@ pub fn audit_rules(rules: &[FirewallRule], intents: &[Intent], timestamp: &str) 
                 timestamp: timestamp.to_string(),
                 rule_id: None,
                 finding: format!(
-                    "No explicit LAN-only allow rule found for intent '{}' ({}/{})",
-                    intent.name, intent.protocol, intent.port
+                    "No explicit LAN-only allow rule found for intent '{}'",
+                    intent.name
                 ),
                 recommendation: "Add a scoped allow rule for private IPv4 CIDRs".to_string(),
             });

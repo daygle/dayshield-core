@@ -6,6 +6,10 @@ use crate::ai_policy::{
 };
 
 pub fn build_suggestion(event: Event, classes: &[EventClass]) -> Suggestion {
+    let is_blocked = event.action.eq_ignore_ascii_case("drop")
+        || event.action.eq_ignore_ascii_case("reject")
+        || event.action.eq_ignore_ascii_case("block");
+
     let (action, reason, confidence) = if classes.contains(&EventClass::PortScan) {
         (
             DecisionAction::SuggestDeny,
@@ -25,17 +29,36 @@ pub fn build_suggestion(event: Event, classes: &[EventClass]) -> Suggestion {
             0.65_f32,
         )
     } else if classes.contains(&EventClass::NewService) {
-        (
-            DecisionAction::EditRule,
-            "Traffic hit a new service; suggest tightening an existing rule".to_string(),
-            0.6_f32,
-        )
+        if is_blocked {
+            (
+                DecisionAction::EditRule,
+                "Blocked traffic hit a new service; suggest tightening an existing rule"
+                    .to_string(),
+                0.6_f32,
+            )
+        } else {
+            (
+                DecisionAction::SuggestAllow,
+                "Observed new permitted traffic; suggest creating a scoped allow rule"
+                    .to_string(),
+                0.68_f32,
+            )
+        }
     } else {
-        (
-            DecisionAction::SuggestDeny,
-            "Blocked traffic pattern appears suspicious".to_string(),
-            0.5_f32,
-        )
+        if is_blocked {
+            (
+                DecisionAction::SuggestDeny,
+                "Blocked traffic pattern appears suspicious".to_string(),
+                0.5_f32,
+            )
+        } else {
+            (
+                DecisionAction::SuggestAllow,
+                "Observed permitted traffic without an explicit intent; review whether a scoped allow rule should exist"
+                    .to_string(),
+                0.52_f32,
+            )
+        }
     };
 
     let decision = Decision {

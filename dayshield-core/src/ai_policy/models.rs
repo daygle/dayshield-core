@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -38,6 +39,26 @@ pub struct Event {
     pub iface: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IntentCondition {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iface: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_ip: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dst_ip: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dst_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traffic_scope: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Decision {
     pub action: DecisionAction,
@@ -62,14 +83,49 @@ pub struct Suggestion {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Intent {
+    #[serde(default = "default_intent_id")]
     pub id: String,
     pub name: String,
-    pub protocol: String,
-    pub port: u16,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_desired_action")]
+    pub desired_action: DecisionAction,
+    #[serde(default)]
+    pub condition: IntentCondition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
     #[serde(default)]
     pub lan_only: bool,
     #[serde(default)]
     pub allowed_sources: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrafficCandidate {
+    pub id: String,
+    pub timestamp: String,
+    pub first_seen: String,
+    pub last_seen: String,
+    pub direction: String,
+    pub observed_action: String,
+    pub src_ip: String,
+    pub dst_ip: String,
+    pub protocol: String,
+    pub src_port: Option<u16>,
+    pub dst_port: Option<u16>,
+    pub iface: String,
+    pub observation_count: usize,
+    pub recommended_action: DecisionAction,
+    pub confidence: f32,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_intent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_intent_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +145,14 @@ pub struct ApplySuggestionRequest {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_intent_id() -> String {
+    Uuid::new_v4().to_string()
+}
+
+fn default_desired_action() -> DecisionAction {
+    DecisionAction::Allow
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

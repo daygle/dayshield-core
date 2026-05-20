@@ -147,6 +147,13 @@ pub async fn get_suggestions(
     Ok(Json(suggestions))
 }
 
+/// GET /api/ai/traffic_candidates
+pub async fn get_traffic_candidates(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, AiApiError> {
+    Ok(Json(state.ai_policy_engine.list_traffic_candidates().await))
+}
+
 /// POST /api/ai/apply
 pub async fn apply_suggestion(
     State(state): State<Arc<AppState>>,

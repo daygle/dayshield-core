@@ -15,11 +15,11 @@ use crate::{
     ai_policy::{
         auto_enforcer::{apply_suggestion_to_rules, undo_change, AppliedChange},
         event_classifier::classify_event,
-        intent_resolver::resolve_intent,
+        intent_resolver::{resolve_intent, ResolvedIntent},
         models::{
             ApplySuggestionRequest, ApplySuggestionResponse, AutomationMode, Decision,
             DecisionAction, Event, Intent, ModeRequest, RuleAudit, SetIntentsRequest, Suggestion,
-            UndoResponse,
+            TrafficCandidate, UndoResponse,
         },
         rule_auditor::audit_rules,
         rule_suggester::build_suggestion,
@@ -124,7 +124,11 @@ impl AiPolicyEngine {
                 iface,
             } => Event {
                 timestamp,
-                direction: "inbound".to_string(),
+                direction: if iface.is_empty() {
+                    "outbound".to_string()
+                } else {
+                    "inbound".to_string()
+                },
                 action,
                 src_ip,
                 dest_ip,
@@ -135,12 +139,6 @@ impl AiPolicyEngine {
             },
             _ => return Ok(()),
         };
-
-        if !event.action.eq_ignore_ascii_case("drop")
-            && !event.action.eq_ignore_ascii_case("reject")
-        {
-            return Ok(());
-        }
         if event.src_ip.parse::<std::net::Ipv4Addr>().is_err()
             || event.dest_ip.parse::<std::net::Ipv4Addr>().is_err()
         {
@@ -164,14 +162,17 @@ impl AiPolicyEngine {
         let mode = self.get_mode().await;
         let intents = self.intents.read().await.clone();
         let classes = classify_event(&event, &recent_events_snapshot);
+        let resolved_intent = resolve_intent(&event, &intents);
+
+        if !should_generate_suggestion(&event, &classes, resolved_intent.as_ref()) {
+            return Ok(());
+        }
 
         let mut suggestion = build_suggestion(event.clone(), &classes);
-        if let Some((intent_action, intent_reason, intent_confidence)) =
-            resolve_intent(&event, &intents)
-        {
-            suggestion.decision.action = intent_action;
-            suggestion.decision.reason = intent_reason;
-            suggestion.decision.confidence = intent_confidence;
+        if let Some(resolved_intent) = resolved_intent {
+            suggestion.decision.action = resolved_intent.action;
+            suggestion.decision.reason = resolved_intent.reason;
+            suggestion.decision.confidence = resolved_intent.confidence;
         }
 
         {
@@ -208,6 +209,12 @@ impl AiPolicyEngine {
             append_audit_suggestions(&mut suggestions, audits);
         }
         Ok(suggestions)
+    }
+
+    pub async fn list_traffic_candidates(&self) -> Vec<TrafficCandidate> {
+        let intents = self.intents.read().await.clone();
+        let recent = self.recent_events.read().await.clone();
+        build_traffic_candidates(&recent, &intents)
     }
 
     pub async fn get_intents(&self) -> Vec<Intent> {
@@ -417,6 +424,139 @@ fn materialize_action(action: DecisionAction) -> DecisionAction {
         DecisionAction::SuggestDeny => DecisionAction::Deny,
         other => other,
     }
+}
+
+fn should_generate_suggestion(
+    event: &Event,
+    classes: &[crate::ai_policy::event_classifier::EventClass],
+    resolved_intent: Option<&ResolvedIntent>,
+) -> bool {
+    if resolved_intent.is_some() {
+        return true;
+    }
+
+    if event.action.eq_ignore_ascii_case("drop")
+        || event.action.eq_ignore_ascii_case("reject")
+        || event.action.eq_ignore_ascii_case("block")
+    {
+        return true;
+    }
+
+    classes.contains(&crate::ai_policy::event_classifier::EventClass::PortScan)
+        || classes.contains(&crate::ai_policy::event_classifier::EventClass::RepeatedAttempts)
+        || classes.contains(&crate::ai_policy::event_classifier::EventClass::NewService)
+}
+
+fn build_traffic_candidates(recent: &[Event], intents: &[Intent]) -> Vec<TrafficCandidate> {
+    use sha2::{Digest, Sha256};
+    use std::collections::BTreeMap;
+
+    #[derive(Clone)]
+    struct Aggregate {
+        exemplar: Event,
+        first_seen: String,
+        last_seen: String,
+        count: usize,
+    }
+
+    let mut aggregates: BTreeMap<String, Aggregate> = BTreeMap::new();
+    for event in recent.iter().rev().take(256).cloned() {
+        let key = format!(
+            "{}|{}|{}|{}|{}|{}|{}|{}",
+            event.iface,
+            event.direction,
+            event.action,
+            event.src_ip,
+            event.dest_ip,
+            event.protocol,
+            event.src_port.unwrap_or_default(),
+            event.dest_port.unwrap_or_default()
+        );
+        aggregates
+            .entry(key)
+            .and_modify(|existing| {
+                existing.count += 1;
+                existing.last_seen = event.timestamp.clone();
+            })
+            .or_insert_with(|| Aggregate {
+                exemplar: event.clone(),
+                first_seen: event.timestamp.clone(),
+                last_seen: event.timestamp.clone(),
+                count: 1,
+            });
+    }
+
+    let mut candidates = aggregates
+        .into_values()
+        .map(|aggregate| {
+            let resolved = resolve_intent(&aggregate.exemplar, intents);
+            let (recommended_action, confidence, reason, matched_intent_id, matched_intent_name) =
+                if let Some(resolved) = resolved {
+                    (
+                        resolved.action,
+                        resolved.confidence,
+                        resolved.reason,
+                        Some(resolved.intent_id),
+                        Some(resolved.intent_name),
+                    )
+                } else if aggregate.exemplar.action.eq_ignore_ascii_case("drop")
+                    || aggregate.exemplar.action.eq_ignore_ascii_case("reject")
+                {
+                    (
+                        DecisionAction::SuggestDeny,
+                        0.55,
+                        "Observed blocked traffic without a matching intent".to_string(),
+                        None,
+                        None,
+                    )
+                } else {
+                    (
+                        DecisionAction::SuggestAllow,
+                        0.5,
+                        "Observed permitted traffic without a matching intent".to_string(),
+                        None,
+                        None,
+                    )
+                };
+
+            let mut hasher = Sha256::new();
+            hasher.update(aggregate.exemplar.timestamp.as_bytes());
+            hasher.update(aggregate.exemplar.iface.as_bytes());
+            hasher.update(aggregate.exemplar.src_ip.as_bytes());
+            hasher.update(aggregate.exemplar.dest_ip.as_bytes());
+            hasher.update(aggregate.exemplar.protocol.as_bytes());
+            let id = hasher
+                .finalize()
+                .iter()
+                .take(12)
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>();
+
+            TrafficCandidate {
+                id,
+                timestamp: aggregate.last_seen.clone(),
+                first_seen: aggregate.first_seen,
+                last_seen: aggregate.last_seen,
+                direction: aggregate.exemplar.direction,
+                observed_action: aggregate.exemplar.action,
+                src_ip: aggregate.exemplar.src_ip,
+                dst_ip: aggregate.exemplar.dest_ip,
+                protocol: aggregate.exemplar.protocol,
+                src_port: aggregate.exemplar.src_port,
+                dst_port: aggregate.exemplar.dest_port,
+                iface: aggregate.exemplar.iface,
+                observation_count: aggregate.count,
+                recommended_action,
+                confidence,
+                reason,
+                matched_intent_id,
+                matched_intent_name,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    candidates.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+    candidates
 }
 
 fn now_rfc3339() -> String {

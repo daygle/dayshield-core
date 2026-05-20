@@ -483,6 +483,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/ai/feedback/{id}", post(ai::submit_feedback))
         .route("/api/ai/config", get(ai::get_config))
         .route("/api/ai/config", post(ai::update_config))
+        .route("/api/ai/traffic_candidates", get(ai::get_traffic_candidates))
         .route("/api/ai/suggestions", get(ai::get_suggestions))
         .route("/api/ai/apply", post(ai::apply_suggestion))
         .route("/api/ai/intents", get(ai::get_intents))

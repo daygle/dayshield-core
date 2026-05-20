@@ -375,6 +375,18 @@ pub fn is_valid_domain(domain: &str) -> bool {
     })
 }
 
+/// Return `true` if `domain` is valid for ACME issuance.
+///
+/// Wildcard names such as `*.example.com` are only permitted when DNS-01 is
+/// selected, because HTTP-01 challenge validation cannot be used for wildcard
+/// certificates.
+pub fn is_valid_acme_domain(domain: &str, challenge_type: AcmeChallengeType) -> bool {
+    if let Some(stripped) = domain.strip_prefix("*.") {
+        return matches!(challenge_type, AcmeChallengeType::Dns01) && is_valid_domain(stripped);
+    }
+    is_valid_domain(domain)
+}
+
 /// Return `true` if `cidr` is a valid IPv4 or IPv6 CIDR string.
 ///
 /// Accepts `"<addr>/<prefix-len>"` where `addr` is parseable as either
@@ -1770,7 +1782,12 @@ pub fn validate_acme_config(config: &AcmeConfig) -> Result<(), String> {
         return Err("acme domains must not be empty".into());
     }
     for domain in &config.domains {
-        if !is_valid_domain(domain) {
+        if !is_valid_acme_domain(domain, config.challenge_type.clone()) {
+            if domain.starts_with("*.") {
+                return Err(
+                    "wildcard domains require challenge_type to be dns01".into(),
+                );
+            }
             return Err(format!(
                 "acme domain {:?} is not a valid domain name",
                 domain

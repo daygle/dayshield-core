@@ -1,3 +1,5 @@
+use std::net::Ipv4Addr;
+
 use crate::{
     ai_policy::models::{Intent, RuleAudit},
     config::models::{Action, FirewallAddressFamily, FirewallRule, Protocol},
@@ -51,14 +53,7 @@ pub fn audit_rules(rules: &[FirewallRule], intents: &[Intent], timestamp: &str) 
                 return false;
             }
 
-            rule.source
-                .as_deref()
-                .map(|src| {
-                    src.starts_with("10.")
-                        || src.starts_with("192.168.")
-                        || src.starts_with("172.16.")
-                })
-                .unwrap_or(false)
+            rule.source.as_deref().map(is_private_source).unwrap_or(false)
         });
 
         if !has_lan_restriction {
@@ -75,4 +70,11 @@ pub fn audit_rules(rules: &[FirewallRule], intents: &[Intent], timestamp: &str) 
     }
 
     audits
+}
+
+fn is_private_source(source: &str) -> bool {
+    let ip = source.split('/').next().unwrap_or(source);
+    ip.parse::<Ipv4Addr>()
+        .map(|parsed| parsed.is_private() || parsed.is_loopback() || parsed.is_link_local())
+        .unwrap_or(false)
 }

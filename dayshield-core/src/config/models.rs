@@ -1063,6 +1063,8 @@ pub enum NatRuleType {
     Snat,
     /// Destination NAT / port forward - rewrites the destination IP and/or port.
     Dnat,
+    /// One-to-one NAT - maps an entire IP address to another IP address.
+    OneToOne,
 }
 
 /// Protocol selector for NAT rules.
@@ -1278,7 +1280,7 @@ pub fn validate_nat_rule_with_ipv6(rule: &NatRule, ipv6_enabled: bool) -> Result
     }
     // Translation validation.
     match rule.rule_type {
-        NatRuleType::Snat | NatRuleType::Dnat => {
+        NatRuleType::Snat | NatRuleType::Dnat | NatRuleType::OneToOne => {
             let translation = rule
                 .translation
                 .as_ref()
@@ -1295,21 +1297,29 @@ pub fn validate_nat_rule_with_ipv6(rule: &NatRule, ipv6_enabled: bool) -> Result
                     addr, rule.address_family
                 ));
             }
-            if let Some(port) = translation.port {
-                if port == 0 {
-                    return Err("translation port must be non-zero".into());
+            // OneToOne NAT does not support port translation.
+            if matches!(rule.rule_type, NatRuleType::OneToOne) {
+                if translation.port.is_some() || translation.port_end.is_some() {
+                    return Err("OneToOne NAT does not support port translation".into());
                 }
-            }
-            if let Some(port_end) = translation.port_end {
-                if port_end == 0 {
-                    return Err("translation port_end must be non-zero".into());
-                }
+            } else {
+                // SNAT and DNAT may have port translation.
                 if let Some(port) = translation.port {
-                    if port_end < port {
-                        return Err(format!(
-                            "translation port_end {} must be ≥ port {}",
-                            port_end, port
-                        ));
+                    if port == 0 {
+                        return Err("translation port must be non-zero".into());
+                    }
+                }
+                if let Some(port_end) = translation.port_end {
+                    if port_end == 0 {
+                        return Err("translation port_end must be non-zero".into());
+                    }
+                    if let Some(port) = translation.port {
+                        if port_end < port {
+                            return Err(format!(
+                                "translation port_end {} must be ≥ port {}",
+                                port_end, port
+                            ));
+                        }
                     }
                 }
             }

@@ -501,6 +501,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/ai/mode", get(ai::get_mode))
         .route("/api/ai/mode", post(ai::set_mode))
+        .route("/api/ai/action_history", get(ai::get_action_history))
         .route("/api/ai/undo_last_action", post(ai::undo_last_action))
         // NAT
         .route("/nat/config", get(nat::get_config))

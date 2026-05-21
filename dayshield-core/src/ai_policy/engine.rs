@@ -37,9 +37,30 @@ const DEFAULT_AUTOMATION_SETTINGS_PATH: &str = "/var/lib/dayshield/ai/automation
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct LoggedAction {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    iface: Option<String>,
     suggestion_id: String,
     decision: Decision,
     change: AppliedChange,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ActionHistoryEntry {
+    pub iface: Option<String>,
+    pub suggestion_id: String,
+    pub decision: Decision,
+    pub change: AppliedChange,
+}
+
+impl From<LoggedAction> for ActionHistoryEntry {
+    fn from(action: LoggedAction) -> Self {
+        Self {
+            iface: action.iface,
+            suggestion_id: action.suggestion_id,
+            decision: action.decision,
+            change: action.change,
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -78,12 +99,49 @@ impl From<PersistedModeConfig> for ModeConfig {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutomationSettingsConfig {
+    #[serde(default)]
+    pub default: AutomationSettings,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub per_interface: HashMap<String, AutomationSettings>,
+}
+
+impl Default for AutomationSettingsConfig {
+    fn default() -> Self {
+        Self {
+            default: AutomationSettings::default(),
+            per_interface: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+enum PersistedAutomationSettingsConfig {
+    Config(AutomationSettingsConfig),
+    Global(AutomationSettings),
+}
+
+impl From<PersistedAutomationSettingsConfig> for AutomationSettingsConfig {
+    fn from(value: PersistedAutomationSettingsConfig) -> Self {
+        match value {
+            PersistedAutomationSettingsConfig::Config(config) => config,
+            PersistedAutomationSettingsConfig::Global(settings) => AutomationSettingsConfig {
+                default: settings,
+                per_interface: HashMap::new(),
+            },
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AiPolicyEngine {
     mode: Arc<RwLock<ModeConfig>>,
     suggestions: Arc<RwLock<Vec<Suggestion>>>,
     intents: Arc<RwLock<Vec<Intent>>>,
-    automation_settings: Arc<RwLock<AutomationSettings>>,
+    automation_settings: Arc<RwLock<AutomationSettingsConfig>>,
     recent_events: Arc<RwLock<Vec<Event>>>,
     applied_actions: Arc<RwLock<Vec<LoggedAction>>>,
     suggestions_path: PathBuf,
@@ -116,7 +174,7 @@ impl AiPolicyEngine {
         let intents = read_json_or_default(&intents_path, Vec::<Intent>::new());
         let mode = read_mode_config_or_default(&mode_path);
         let automation_settings =
-            read_json_or_default(&automation_settings_path, AutomationSettings::default());
+            read_automation_settings_config_or_default(&automation_settings_path);
         let applied_actions = read_json_lines_or_default(&action_log_path);
 
         Self {
@@ -231,7 +289,7 @@ impl AiPolicyEngine {
         }
 
         if matches!(mode, AutomationMode::FullAiControl) {
-            let settings = self.automation_settings.read().await.clone();
+            let settings = self.automation_settings_for_event(&event).await;
             if self
                 .can_auto_apply(state, &suggestion, matched_intent, &settings)
                 .await
@@ -252,54 +310,105 @@ impl AiPolicyEngine {
         Ok(())
     }
 
-    pub async fn list_suggestions(&self, state: &Arc<AppState>) -> Result<Vec<Suggestion>> {
+    pub async fn list_suggestions(
+        &self,
+        state: &Arc<AppState>,
+        iface: Option<String>,
+    ) -> Result<Vec<Suggestion>> {
+        let iface = normalize_iface(iface);
         let mut suggestions = self.suggestions.read().await.clone();
+        filter_suggestions_by_iface(&mut suggestions, iface.as_deref());
+
         if matches!(
-            self.get_mode(None).await,
+            self.get_mode(iface.clone()).await,
             AutomationMode::SuggestEdits | AutomationMode::FullAiControl
         ) {
-            let intents = self.intents.read().await.clone();
-            let rules = state.config_store.load_firewall_rules().unwrap_or_default();
+            let intents = self.get_intents(iface.clone()).await;
+            let mut rules = state.config_store.load_firewall_rules().unwrap_or_default();
+            filter_rules_by_iface(&mut rules, iface.as_deref());
             let audits = audit_rules(&rules, &intents, &now_rfc3339());
-            append_audit_suggestions(&mut suggestions, audits);
+            append_audit_suggestions(&mut suggestions, audits, iface.as_deref());
         }
         Ok(suggestions)
     }
 
-    pub async fn list_traffic_candidates(&self) -> Vec<TrafficCandidate> {
-        let intents = self.intents.read().await.clone();
-        let recent = self.recent_events.read().await.clone();
+    pub async fn list_traffic_candidates(&self, iface: Option<String>) -> Vec<TrafficCandidate> {
+        let iface = normalize_iface(iface);
+        let intents = self.get_intents(iface.clone()).await;
+        let mut recent = self.recent_events.read().await.clone();
+        filter_events_by_iface(&mut recent, iface.as_deref());
         build_traffic_candidates(&recent, &intents)
     }
 
-    pub async fn get_intents(&self) -> Vec<Intent> {
-        self.intents.read().await.clone()
+    pub async fn get_intents(&self, iface: Option<String>) -> Vec<Intent> {
+        let iface = normalize_iface(iface);
+        let mut intents = self.intents.read().await.clone();
+        filter_intents_by_iface(&mut intents, iface.as_deref());
+        intents
     }
 
-    pub async fn set_intents(&self, request: SetIntentsRequest) -> Result<Vec<Intent>> {
+    pub async fn set_intents(
+        &self,
+        mut request: SetIntentsRequest,
+        iface: Option<String>,
+    ) -> Result<Vec<Intent>> {
+        let iface = normalize_iface(iface);
         let mut intents = self.intents.write().await;
-        *intents = request.intents;
+
+        if let Some(iface) = iface.as_deref() {
+            for intent in &mut request.intents {
+                intent.condition.iface = Some(iface.to_string());
+            }
+            intents.retain(|intent| !intent_matches_iface(intent, iface));
+            intents.extend(request.intents);
+        } else {
+            *intents = request.intents;
+        }
+
         persist_json(&self.intents_path, &*intents)?;
-        Ok(intents.clone())
+
+        let mut scoped = intents.clone();
+        filter_intents_by_iface(&mut scoped, iface.as_deref());
+        Ok(scoped)
     }
 
-    pub async fn get_automation_settings(&self) -> AutomationSettings {
-        self.automation_settings.read().await.clone()
+    pub async fn get_automation_settings(&self, iface: Option<String>) -> AutomationSettings {
+        let iface = normalize_iface(iface);
+        let settings = self.automation_settings.read().await;
+        iface
+            .as_ref()
+            .and_then(|name| settings.per_interface.get(name).cloned())
+            .unwrap_or_else(|| settings.default.clone())
     }
 
     pub async fn set_automation_settings(
         &self,
         mut settings: AutomationSettings,
+        iface: Option<String>,
     ) -> Result<AutomationSettings> {
+        let iface = normalize_iface(iface);
         settings.auto_apply_confidence_threshold =
             settings.auto_apply_confidence_threshold.min(100);
-        let mut current = self.automation_settings.write().await;
-        *current = settings;
-        persist_json(&self.automation_settings_path, &*current)?;
-        Ok(current.clone())
+        let mut config = self.automation_settings.write().await;
+
+        let result = if let Some(iface) = iface {
+            config.per_interface.insert(iface.clone(), settings.clone());
+            config
+                .per_interface
+                .get(&iface)
+                .cloned()
+                .unwrap_or_else(|| config.default.clone())
+        } else {
+            config.default = settings.clone();
+            config.default.clone()
+        };
+
+        persist_json(&self.automation_settings_path, &*config)?;
+        Ok(result)
     }
 
     pub async fn get_mode(&self, iface: Option<String>) -> AutomationMode {
+        let iface = normalize_iface(iface);
         let mode = self.mode.read().await;
         iface
             .as_ref()
@@ -312,11 +421,17 @@ impl AiPolicyEngine {
         self.get_mode(iface).await
     }
 
+    async fn automation_settings_for_event(&self, event: &Event) -> AutomationSettings {
+        let iface = (!event.iface.trim().is_empty()).then(|| event.iface.clone());
+        self.get_automation_settings(iface).await
+    }
+
     pub async fn set_mode(
         &self,
         request: ModeRequest,
         iface: Option<String>,
     ) -> Result<AutomationMode> {
+        let iface = normalize_iface(iface);
         let mut mode = self.mode.write().await;
 
         let result = if let Some(iface) = iface {
@@ -392,6 +507,7 @@ impl AiPolicyEngine {
         {
             let mut actions = self.applied_actions.write().await;
             let logged = LoggedAction {
+                iface: normalize_iface(Some(suggestion.event.iface.clone())),
                 suggestion_id: suggestion.id.clone(),
                 decision: decision.clone(),
                 change,
@@ -417,16 +533,40 @@ impl AiPolicyEngine {
         })
     }
 
-    pub async fn undo_last_action(&self, state: &Arc<AppState>) -> Result<UndoResponse> {
+    pub async fn list_action_history(&self, iface: Option<String>) -> Vec<ActionHistoryEntry> {
+        let iface = normalize_iface(iface);
+        let actions = self.applied_actions.read().await;
+        actions
+            .iter()
+            .rev()
+            .filter(|action| logged_action_matches_iface(action, iface.as_deref()))
+            .cloned()
+            .map(ActionHistoryEntry::from)
+            .collect()
+    }
+
+    pub async fn undo_last_action(
+        &self,
+        state: &Arc<AppState>,
+        iface: Option<String>,
+    ) -> Result<UndoResponse> {
+        let iface = normalize_iface(iface);
         let maybe_last = {
             let actions = self.applied_actions.read().await;
-            actions.last().cloned()
+            actions
+                .iter()
+                .rev()
+                .find(|action| logged_action_matches_iface(action, iface.as_deref()))
+                .cloned()
         };
 
         let Some(last) = maybe_last else {
             return Ok(UndoResponse {
                 undone: false,
-                message: "no actions to undo".to_string(),
+                message: match iface.as_deref() {
+                    Some(iface) => format!("no actions to undo for interface {iface}"),
+                    None => "no actions to undo".to_string(),
+                },
                 decision: None,
             });
         };
@@ -439,7 +579,12 @@ impl AiPolicyEngine {
 
         {
             let mut actions = self.applied_actions.write().await;
-            actions.pop();
+            if let Some(pos) = actions
+                .iter()
+                .rposition(|action| action.suggestion_id == last.suggestion_id)
+            {
+                actions.remove(pos);
+            }
             persist_json_lines(&self.action_log_path, &*actions)?;
         }
 
@@ -581,7 +726,8 @@ impl AiPolicyEngine {
         }
         if settings.max_auto_apply_per_hour > 0 {
             let actions = self.applied_actions.read().await;
-            let recent = recent_auto_apply_count(&actions);
+            let iface = normalize_iface(Some(suggestion.event.iface.clone()));
+            let recent = recent_auto_apply_count(&actions, iface.as_deref());
             if recent >= settings.max_auto_apply_per_hour as usize {
                 return false;
             }
@@ -591,7 +737,11 @@ impl AiPolicyEngine {
     }
 }
 
-fn append_audit_suggestions(suggestions: &mut Vec<Suggestion>, audits: Vec<RuleAudit>) {
+fn append_audit_suggestions(
+    suggestions: &mut Vec<Suggestion>,
+    audits: Vec<RuleAudit>,
+    iface: Option<&str>,
+) {
     for audit in audits {
         let synthetic = Suggestion {
             id: format!("audit:{}", audit.recommendation),
@@ -604,7 +754,7 @@ fn append_audit_suggestions(suggestions: &mut Vec<Suggestion>, audits: Vec<RuleA
                 protocol: "any".to_string(),
                 src_port: None,
                 dest_port: None,
-                iface: "n/a".to_string(),
+                iface: iface.unwrap_or("n/a").to_string(),
             },
             decision: Decision {
                 action: DecisionAction::EditRule,
@@ -768,6 +918,88 @@ fn now_rfc3339() -> String {
     Utc::now().to_rfc3339()
 }
 
+fn normalize_iface(iface: Option<String>) -> Option<String> {
+    iface
+        .map(|iface| iface.trim().to_string())
+        .filter(|iface| !iface.is_empty())
+}
+
+fn iface_eq(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
+fn event_matches_iface(event: &Event, iface: &str) -> bool {
+    iface_eq(&event.iface, iface)
+}
+
+fn intent_matches_iface(intent: &Intent, iface: &str) -> bool {
+    intent
+        .condition
+        .iface
+        .as_deref()
+        .is_some_and(|intent_iface| iface_eq(intent_iface, iface))
+}
+
+fn filter_events_by_iface(events: &mut Vec<Event>, iface: Option<&str>) {
+    if let Some(iface) = iface {
+        events.retain(|event| event_matches_iface(event, iface));
+    }
+}
+
+fn filter_suggestions_by_iface(suggestions: &mut Vec<Suggestion>, iface: Option<&str>) {
+    if let Some(iface) = iface {
+        suggestions.retain(|suggestion| event_matches_iface(&suggestion.event, iface));
+    }
+}
+
+fn filter_intents_by_iface(intents: &mut Vec<Intent>, iface: Option<&str>) {
+    if let Some(iface) = iface {
+        intents.retain(|intent| intent_matches_iface(intent, iface));
+    }
+}
+
+fn filter_rules_by_iface(
+    rules: &mut Vec<crate::config::models::FirewallRule>,
+    iface: Option<&str>,
+) {
+    if let Some(iface) = iface {
+        rules.retain(|rule| {
+            rule.interface
+                .as_deref()
+                .is_some_and(|rule_iface| iface_eq(rule_iface, iface))
+        });
+    }
+}
+
+fn logged_action_matches_iface(action: &LoggedAction, iface: Option<&str>) -> bool {
+    let Some(iface) = iface else {
+        return true;
+    };
+
+    action
+        .iface
+        .as_deref()
+        .is_some_and(|action_iface| iface_eq(action_iface, iface))
+        || applied_change_matches_iface(&action.change, iface)
+}
+
+fn applied_change_matches_iface(change: &AppliedChange, iface: &str) -> bool {
+    match change {
+        AppliedChange::AddedRule { rule } | AppliedChange::RemovedRule { rule } => {
+            firewall_rule_matches_iface(rule, iface)
+        }
+        AppliedChange::UpdatedRule { before, after } => {
+            firewall_rule_matches_iface(before, iface) || firewall_rule_matches_iface(after, iface)
+        }
+    }
+}
+
+fn firewall_rule_matches_iface(rule: &crate::config::models::FirewallRule, iface: &str) -> bool {
+    rule.interface
+        .as_deref()
+        .is_some_and(|rule_iface| iface_eq(rule_iface, iface))
+}
+
 fn read_json_or_default<T>(path: &Path, default: T) -> T
 where
     T: serde::de::DeserializeOwned,
@@ -798,6 +1030,15 @@ fn read_mode_config_or_default(path: &Path) -> ModeConfig {
             .map(ModeConfig::from)
             .unwrap_or_default(),
         Err(_) => ModeConfig::default(),
+    }
+}
+
+fn read_automation_settings_config_or_default(path: &Path) -> AutomationSettingsConfig {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => serde_json::from_str::<PersistedAutomationSettingsConfig>(&raw)
+            .map(AutomationSettingsConfig::from)
+            .unwrap_or_default(),
+        Err(_) => AutomationSettingsConfig::default(),
     }
 }
 
@@ -848,10 +1089,11 @@ fn persist_json_lines<T: serde::Serialize>(path: &Path, values: &[T]) -> Result<
     Ok(())
 }
 
-fn recent_auto_apply_count(actions: &[LoggedAction]) -> usize {
+fn recent_auto_apply_count(actions: &[LoggedAction], iface: Option<&str>) -> usize {
     let cutoff = Utc::now() - Duration::hours(1);
     actions
         .iter()
+        .filter(|action| logged_action_matches_iface(action, iface))
         .filter(|action| action.decision.auto_applied)
         .filter(|action| {
             chrono::DateTime::parse_from_rfc3339(&action.decision.timestamp)
@@ -928,5 +1170,145 @@ mod tests {
             engine.get_mode(Some("eth1".to_string())).await,
             AutomationMode::MonitorOnly
         ));
+    }
+
+    #[tokio::test]
+    async fn set_and_get_interface_automation_settings() {
+        let dir = tempdir().unwrap();
+        let engine = AiPolicyEngine::with_paths(
+            dir.path().join("suggestions.json"),
+            dir.path().join("actions.log"),
+            dir.path().join("intents.json"),
+            dir.path().join("mode.json"),
+            dir.path().join("automation_settings.json"),
+        );
+
+        let mut lan_settings = AutomationSettings::default();
+        lan_settings.auto_apply_confidence_threshold = 42;
+
+        let saved = engine
+            .set_automation_settings(lan_settings.clone(), Some("lan0".to_string()))
+            .await
+            .unwrap();
+
+        assert_eq!(saved.auto_apply_confidence_threshold, 42);
+        assert_eq!(
+            engine
+                .get_automation_settings(Some("lan0".to_string()))
+                .await
+                .auto_apply_confidence_threshold,
+            42
+        );
+        assert_eq!(
+            engine
+                .get_automation_settings(Some("wan0".to_string()))
+                .await
+                .auto_apply_confidence_threshold,
+            AutomationSettings::default().auto_apply_confidence_threshold
+        );
+    }
+
+    #[tokio::test]
+    async fn interface_intents_replace_only_that_interface() {
+        let dir = tempdir().unwrap();
+        let engine = AiPolicyEngine::with_paths(
+            dir.path().join("suggestions.json"),
+            dir.path().join("actions.log"),
+            dir.path().join("intents.json"),
+            dir.path().join("mode.json"),
+            dir.path().join("automation_settings.json"),
+        );
+
+        engine
+            .set_intents(
+                SetIntentsRequest {
+                    intents: vec![
+                        test_intent("lan-initial", Some("lan0")),
+                        test_intent("wan-initial", Some("wan0")),
+                    ],
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let scoped = engine
+            .set_intents(
+                SetIntentsRequest {
+                    intents: vec![test_intent("lan-replacement", None)],
+                },
+                Some("lan0".to_string()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].name, "lan-replacement");
+        assert_eq!(scoped[0].condition.iface.as_deref(), Some("lan0"));
+
+        let all = engine.get_intents(None).await;
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|intent| intent.name == "wan-initial"));
+        assert!(all.iter().any(|intent| intent.name == "lan-replacement"));
+        assert!(!all.iter().any(|intent| intent.name == "lan-initial"));
+    }
+
+    #[tokio::test]
+    async fn traffic_candidates_filter_by_interface() {
+        let dir = tempdir().unwrap();
+        let engine = AiPolicyEngine::with_paths(
+            dir.path().join("suggestions.json"),
+            dir.path().join("actions.log"),
+            dir.path().join("intents.json"),
+            dir.path().join("mode.json"),
+            dir.path().join("automation_settings.json"),
+        );
+
+        {
+            let mut events = engine.recent_events.write().await;
+            events.push(test_event("lan0", "10.0.0.2", "10.0.0.1"));
+            events.push(test_event("wan0", "203.0.113.10", "10.0.0.1"));
+        }
+
+        let lan = engine
+            .list_traffic_candidates(Some("lan0".to_string()))
+            .await;
+        assert_eq!(lan.len(), 1);
+        assert_eq!(lan[0].iface, "lan0");
+
+        let all = engine.list_traffic_candidates(None).await;
+        assert_eq!(all.len(), 2);
+    }
+
+    fn test_intent(name: &str, iface: Option<&str>) -> Intent {
+        Intent {
+            id: name.to_string(),
+            name: name.to_string(),
+            description: None,
+            enabled: true,
+            desired_action: DecisionAction::Allow,
+            condition: crate::ai_policy::models::IntentCondition {
+                iface: iface.map(str::to_string),
+                ..Default::default()
+            },
+            protocol: None,
+            port: None,
+            lan_only: false,
+            allowed_sources: Vec::new(),
+        }
+    }
+
+    fn test_event(iface: &str, src_ip: &str, dest_ip: &str) -> Event {
+        Event {
+            timestamp: now_rfc3339(),
+            direction: "inbound".to_string(),
+            action: "ACCEPT".to_string(),
+            src_ip: src_ip.to_string(),
+            dest_ip: dest_ip.to_string(),
+            protocol: "tcp".to_string(),
+            src_port: Some(54321),
+            dest_port: Some(443),
+            iface: iface.to_string(),
+        }
     }
 }

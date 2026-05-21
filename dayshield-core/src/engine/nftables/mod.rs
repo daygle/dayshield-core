@@ -1682,6 +1682,23 @@ fn format_nat_postrouting(nat: &crate::config::models::NatRule) -> Option<String
             ));
             Some(parts.join(" "))
         }
+        NatRuleType::OneToOne => {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(src) = &nat.source {
+                parts.push(format!(
+                    "{} saddr {}",
+                    nft_ip_keyword(&nat.address_family),
+                    src
+                ));
+            }
+            if let Some(iface) = &nat.interface {
+                parts.push(format!("oifname \"{}\"", iface));
+            }
+            let translation = nat.translation.as_ref()?;
+            let addr = translation.address.as_deref()?;
+            parts.push(format!("netmap to {}", addr));
+            Some(parts.join(" "))
+        }
         NatRuleType::Dnat => None,
     }
 }
@@ -1730,7 +1747,7 @@ fn generate_nat_table_for_family(
 
     let user_postrouting: Vec<_> = sorted
         .iter()
-        .filter(|r| matches!(r.rule_type, NatRuleType::Masquerade | NatRuleType::Snat))
+        .filter(|r| matches!(r.rule_type, NatRuleType::Masquerade | NatRuleType::Snat | NatRuleType::OneToOne))
         .collect();
 
     let emit_user_postrouting = matches!(

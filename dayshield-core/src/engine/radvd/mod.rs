@@ -52,10 +52,10 @@ pub struct PrefixAssignment {
     /// Assigned address CIDR on that interface, e.g. `"2001:db8:0:3::1/64"`.
     /// The host bits will be stripped when building the RA prefix block.
     pub prefix: String,
-    /// `AdvManagedFlag` — set `true` for interfaces running a DHCPv6 server so
+    /// `AdvManagedFlag` - set `true` for interfaces running a DHCPv6 server so
     /// hosts request addresses via DHCPv6 rather than configuring via SLAAC.
     pub managed: bool,
-    /// `AdvOtherConfigFlag` — set `true` alongside `managed` so hosts also
+    /// `AdvOtherConfigFlag` - set `true` alongside `managed` so hosts also
     /// fetch DNS servers and other config via DHCPv6.
     pub other: bool,
     /// `AdvAutonomous` (A flag) for the advertised prefix. When set, clients
@@ -183,7 +183,7 @@ async fn reload_or_start_radvd() -> anyhow::Result<()> {
         }
     }
 
-    // Not running or reload failed — start fresh.
+    // Not running or reload failed - start fresh.
     stop_radvd().await.ok();
 
     let result = Command::new("radvd")
@@ -197,7 +197,7 @@ async fn reload_or_start_radvd() -> anyhow::Result<()> {
         }
         Err(e) => {
             warn!(error = %e, "radvd: failed to start; RA advertisements will be unavailable");
-            Ok(()) // non-fatal — prefix is still assigned, hosts can use DHCPv6
+            Ok(()) // non-fatal - prefix is still assigned, hosts can use DHCPv6
         }
     }
 }

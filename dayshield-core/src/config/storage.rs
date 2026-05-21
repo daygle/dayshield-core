@@ -1677,8 +1677,27 @@ impl ConfigStore {
     /// 3. Renaming the temp file to `<config_path>`.
     ///
     /// Renaming is atomic on POSIX systems.
+    fn normalize_config(config: &mut SystemConfig) {
+        if let Some(dhcp) = &mut config.dhcp {
+            for scope in &mut dhcp.scopes {
+                if let Some(normalized) = crate::config::models::normalize_ipv4_cidr(&scope.subnet) {
+                    scope.subnet = normalized;
+                }
+            }
+        }
+        if let Some(dhcp6) = &mut config.dhcp6 {
+            for scope in &mut dhcp6.scopes {
+                if let Some(normalized) = crate::config::models::normalize_ipv6_cidr(&scope.subnet) {
+                    scope.subnet = normalized;
+                }
+            }
+        }
+    }
+
     pub fn save(&self, config: &SystemConfig) -> Result<()> {
-        self.validate(config)?;
+        let mut config = config.clone();
+        Self::normalize_config(&mut config);
+        self.validate(&config)?;
 
         // Ensure the parent directory exists.
         if let Some(parent) = self.config_path.parent() {
@@ -1689,7 +1708,7 @@ impl ConfigStore {
         // Wrap config in the versioned envelope before serialising.
         let versioned = VersionedConfig {
             schema_version: CURRENT_SCHEMA_VERSION,
-            config: config.clone(),
+            config,
         };
         let json =
             serde_json::to_string_pretty(&versioned).context("Failed to serialise config")?;
@@ -1719,8 +1738,11 @@ impl ConfigStore {
             debug!(backup = %bak_path.display(), "Config backed up");
         }
 
+        let mut normalized_config = config.clone();
+        Self::normalize_config(&mut normalized_config);
+
         // Step 2 - write.
-        if let Err(e) = self.save(config) {
+        if let Err(e) = self.save(&normalized_config) {
             // Restore backup if write itself failed.
             self.try_restore_backup(&bak_path);
             return Err(e);
@@ -1731,20 +1753,20 @@ impl ConfigStore {
             Ok(_) => {
                 // Clean up the backup on success.
                 let _ = std::fs::remove_file(&bak_path);
-
-                // Step 5 - notify engine layer.
-                if let Some(hook) = &self.on_save {
-                    hook(config);
-                }
-
-                Ok(())
             }
             Err(e) => {
                 warn!("Post-write validation failed; rolling back to backup");
                 self.try_restore_backup(&bak_path);
-                Err(e.context("Config rolled back after post-write validation failure"))
+                return Err(e.context("Config rolled back after post-write validation failure"));
             }
         }
+
+        // Step 5 - notify engine layer.
+        if let Some(hook) = &self.on_save {
+            hook(&normalized_config);
+        }
+
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -2646,6 +2668,24 @@ mod tests {
 
         let error = store.validate(&cfg).unwrap_err().to_string();
         assert!(error.contains("must be network CIDR"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_normalizes_dhcp_host_cidr_subnet() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        let mut dhcp = make_dhcp_config();
+        dhcp.scopes[0].subnet = "192.168.1.1/24".into();
+        cfg.dhcp = Some(dhcp);
+
+        store.save(&cfg).unwrap();
+
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.dhcp.unwrap().scopes[0].subnet, "192.168.1.0/24");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

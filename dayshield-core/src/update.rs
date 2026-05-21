@@ -512,7 +512,7 @@ pub struct RegistryManifest {
     pub generated_at: String,
     /// When true the manifest only covers the components listed (e.g. a single
     /// GitHub repo's releases). Missing components should not be flagged as
-    /// errors — they are simply not tracked by this registry source.
+    /// errors - they are simply not tracked by this registry source.
     #[serde(default)]
     pub partial: bool,
 }
@@ -2740,7 +2740,7 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
                     }
 
                     let comp_state = ensure_component_state(&mut state_file, component);
-                    // Do not clear remote_version — preserve the last known value so the
+                    // Do not clear remote_version - preserve the last known value so the
                     // UI can still display it. Only mark as not-updatable and flag the
                     // missing-from-manifest state so the UI can style it appropriately.
                     comp_state.update_available = false;

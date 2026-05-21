@@ -156,7 +156,7 @@ async fn main() -> anyhow::Result<()> {
     notify::worker::start_notify_worker(Arc::clone(&app_state), notify_rx).await;
 
     // Build the Axum router.
-    let app: Router = api::router(app_state);
+    let app: Router = api::router(Arc::clone(&app_state));
 
     // Determine bind address from environment and persisted system settings.
     let system_settings = app_state.config_store.load_system_settings().unwrap_or_default();

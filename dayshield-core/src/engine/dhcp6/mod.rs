@@ -11,9 +11,9 @@ use std::os::unix::fs::PermissionsExt;
 use anyhow::{Context, Result};
 use serde_json::json;
 use tokio::process::Command;
-use tracing::info;
+use tracing::{info, warn};
 
-use crate::config::models::Dhcp6Config;
+use crate::config::models::{normalize_ipv6_cidr, Dhcp6Config};
 
 /// Path where the Kea DHCPv6 configuration file is written.
 const KEA6_CONF_PATH: &str = "/etc/dayshield/kea-dhcp6.conf";
@@ -29,6 +29,7 @@ pub fn generate_config(config: &Dhcp6Config) -> String {
     let mut subnets = Vec::new();
 
     for (i, scope) in config.scopes.iter().enumerate() {
+        let subnet = normalize_ipv6_cidr(&scope.subnet).unwrap_or_else(|| scope.subnet.clone());
         let pool_str = format!("{}-{}", scope.pool_start, scope.pool_end);
 
         let mut option_data = Vec::new();
@@ -63,7 +64,7 @@ pub fn generate_config(config: &Dhcp6Config) -> String {
 
         subnets.push(json!({
             "id": (i as u32) + 1,
-            "subnet": scope.subnet,
+            "subnet": subnet,
             "pools": [{ "pool": pool_str }],
             "preferred-lifetime": scope.lease_seconds,
             "valid-lifetime": scope.lease_seconds,
@@ -135,8 +136,7 @@ pub async fn apply_config(config: &Dhcp6Config) -> Result<()> {
 
     std::fs::create_dir_all("/etc/kea").context("failed to create /etc/kea")?;
     #[cfg(unix)]
-    std::fs::set_permissions("/etc/kea", std::fs::Permissions::from_mode(0o755))
-        .context("failed to chmod /etc/kea")?;
+    set_directory_permissions_best_effort("/etc/kea");
     std::fs::create_dir_all("/var/log/kea").context("failed to create /var/log/kea")?;
 
     let conf_str = generate_config(config);
@@ -201,6 +201,16 @@ fn remove_config_if_exists(path: &str) -> Result<()> {
     }
 }
 
+#[cfg(unix)]
+fn set_directory_permissions_best_effort(path: &str) {
+    // The packaged Kea directory is commonly owned by root or the distro's Kea
+    // package. If DayShield can write the config file, failure to chmod the
+    // existing directory should not block DHCP saves.
+    if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)) {
+        warn!(path, error = %error, "dhcp6: continuing after directory chmod failed");
+    }
+}
+
 async fn restart_kea6() -> Result<()> {
     let out = Command::new("systemctl")
         .args(["restart", "kea-dhcp6-server"])
@@ -215,4 +225,44 @@ async fn restart_kea6() -> Result<()> {
 
     info!("dhcp6: kea-dhcp6-server restarted");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::models::{Dhcp6Config, Dhcp6Scope};
+    use uuid::Uuid;
+
+    fn base_config() -> Dhcp6Config {
+        Dhcp6Config {
+            enabled: true,
+            interface: "eth1".into(),
+            scopes: vec![Dhcp6Scope {
+                id: Uuid::new_v4(),
+                subnet: "fd00:1::/64".into(),
+                pool_start: "fd00:1::100".into(),
+                pool_end: "fd00:1::1ff".into(),
+                dns_servers: vec!["fd00:1::1".into()],
+                lease_seconds: 86400,
+                domain_name: None,
+                reservations: vec![],
+            }],
+        }
+    }
+
+    #[test]
+    fn generate_config_contains_subnet() {
+        let cfg = base_config();
+        let out = generate_config(&cfg);
+        assert!(out.contains("\"subnet\": \"fd00:1::/64\""));
+    }
+
+    #[test]
+    fn generate_config_normalizes_host_cidr_subnet() {
+        let mut cfg = base_config();
+        cfg.scopes[0].subnet = "fd00:1::1/64".into();
+        let out = generate_config(&cfg);
+        assert!(out.contains("\"subnet\": \"fd00:1::/64\""));
+        assert!(!out.contains("\"subnet\": \"fd00:1::1/64\""));
+    }
 }

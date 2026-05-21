@@ -25,12 +25,13 @@ use tracing::{info, warn};
 use crate::{
     config::models::{
         ensure_ipv6_allowed, is_valid_cidr, is_valid_interface_name, is_valid_mss, is_valid_mtu,
-        is_valid_vlan_id, Gateway, Interface, Ipv6Mode, RouterAdvertisementMode, WanMode,
+        is_valid_vlan_id, Gateway, Interface, Ipv6Mode, RouterAdvertisementMode, SystemConfig,
+        WanMode,
     },
     engine::gateway::list_kernel_gateways_with_ipv6,
     engine::interfaces::{
         apply_interface_with_ipv6, list_kernel_interfaces, refresh_router_advertisements,
-        InterfaceError, KernelInterface,
+        teardown_interface_runtime, InterfaceError, KernelInterface,
     },
     state::AppState,
 };
@@ -151,6 +152,20 @@ async fn apply_full_nftables_rules(state: &Arc<AppState>) -> Result<(), Interfac
     crate::captive_portal::apply_current_ruleset_nft(&state.config_store)
         .await
         .map_err(|e| InterfaceError::ApplyFailed(e.to_string()))
+}
+
+async fn restore_persisted_state(
+    state: &Arc<AppState>,
+    previous_config: SystemConfig,
+) -> Result<(), InterfaceError> {
+    state
+        .config_store
+        .save_with_rollback(&previous_config)
+        .map_err(InterfaceError::StorageError)?;
+
+    let mut in_memory = state.interfaces.write().await;
+    *in_memory = previous_config.interfaces;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -287,9 +302,9 @@ impl InterfaceResponse {
 
     /// Populate runtime-only fields that cannot be derived from stored config.
     ///
-    /// * `dhcp6` WAN with `ia_pd_hint_len` â†’ read the delegated prefix from
+    /// * `dhcp6` WAN with `ia_pd_hint_len` -> read the delegated prefix from
     ///   the dhclient6-PD state file.
-    /// * `track_interface` LAN â†’ compute the assigned /64 from the source
+    /// * `track_interface` LAN -> compute the assigned /64 from the source
     ///   interface's delegated prefix.
     pub fn enrich_with_runtime(&mut self) {
         use crate::engine::prefix_delegation;
@@ -381,28 +396,33 @@ impl InterfaceRequest {
             .unwrap_or(true)
     }
 
+    fn has_valid_wan_mode(&self) -> bool {
+        matches!(
+            self.wan_mode.as_deref(),
+            None | Some("dhcp") | Some("pppoe")
+        )
+    }
+
     /// Convert from API request format to backend `Interface`.
     pub fn to_interface(self) -> Interface {
-        // Build addresses from ipv4_address and ipv4_prefix
-        let mut addresses = Vec::new();
-        if let (Some(addr), Some(prefix)) = (self.ipv4_address, self.ipv4_prefix) {
-            addresses.push(format!("{}/{}", addr, prefix));
-        }
-        if let (Some(addr), Some(prefix)) = (self.ipv6_address, self.ipv6_prefix) {
-            addresses.push(format!("{}/{}", addr, prefix));
-        }
-
         let wan_mode = match self.wan_mode.as_deref() {
             Some("pppoe") => Some(crate::config::models::WanMode::Pppoe),
             Some("dhcp") => Some(crate::config::models::WanMode::Dhcp),
             _ => None,
         };
+
         let mtu = if matches!(wan_mode, Some(crate::config::models::WanMode::Pppoe)) {
             Some(self.mtu.unwrap_or(1492))
         } else {
             self.mtu
         };
-
+        let dhcp4 = matches!(wan_mode, Some(crate::config::models::WanMode::Dhcp))
+            || (!matches!(wan_mode, Some(crate::config::models::WanMode::Pppoe)) && self.dhcp4);
+        let gateway = if wan_mode.is_some() {
+            None
+        } else {
+            self.gateway
+        };
         let ipv6_mode = match self.ipv6_mode.as_deref() {
             Some("dhcp6") => Some(Ipv6Mode::Dhcp6),
             Some("slaac") => Some(Ipv6Mode::Slaac),
@@ -425,6 +445,22 @@ impl InterfaceRequest {
         let dhcp6 = matches!(effective_mode, Ipv6Mode::Dhcp6);
         let accept_ra = matches!(effective_mode, Ipv6Mode::Slaac);
 
+        // Build addresses from UI fields, dropping stale static values when a
+        // dynamic mode owns that family.
+        let mut addresses = Vec::new();
+        if !matches!(wan_mode, Some(crate::config::models::WanMode::Pppoe)) {
+            if !dhcp4 {
+                if let (Some(addr), Some(prefix)) = (self.ipv4_address, self.ipv4_prefix) {
+                    addresses.push(format!("{}/{}", addr, prefix));
+                }
+            }
+            if matches!(effective_mode, Ipv6Mode::Static) {
+                if let (Some(addr), Some(prefix)) = (self.ipv6_address, self.ipv6_prefix) {
+                    addresses.push(format!("{}/{}", addr, prefix));
+                }
+            }
+        }
+
         Interface {
             name: self.name,
             description: self.description,
@@ -432,7 +468,7 @@ impl InterfaceRequest {
             mtu,
             mss: self.mss,
             enabled: self.enabled,
-            dhcp4: self.dhcp4,
+            dhcp4,
             dhcp6,
             accept_ra,
             ipv6_mode,
@@ -446,7 +482,7 @@ impl InterfaceRequest {
             wan_mode,
             pppoe_username: self.pppoe_username,
             pppoe_password: self.pppoe_password,
-            gateway: self.gateway,
+            gateway,
             block_private_networks: self.block_private_networks,
             block_bogon_networks: self.block_bogon_networks,
         }
@@ -538,6 +574,11 @@ pub async fn create_interface(
     State(state): State<Arc<AppState>>,
     Json(req): Json<InterfaceRequest>,
 ) -> Result<impl IntoResponse, InterfaceError> {
+    if !req.has_valid_wan_mode() {
+        return Err(InterfaceError::ApplyFailed(
+            "wanMode must be dhcp, pppoe, or omitted".to_string(),
+        ));
+    }
     if !req.has_valid_ra_mode() {
         return Err(InterfaceError::ApplyFailed(
             "raMode must be one of router_only, unmanaged, managed, assisted, or stateless"
@@ -752,16 +793,20 @@ pub async fn create_interface(
 
     // --- Persist -----------------------------------------------------------
 
+    let previous_config = state
+        .config_store
+        .load()
+        .map_err(InterfaceError::StorageError)?;
+    let previous_ifaces = previous_config.interfaces.clone();
+
     // Upsert in the in-memory cache (match by name).
-    let previous_ifaces = {
+    {
         let mut ifaces = state.interfaces.write().await;
-        let previous_ifaces = ifaces.clone();
         match ifaces.iter().position(|i| i.name == iface.name) {
             Some(pos) => ifaces[pos] = iface.clone(),
             None => ifaces.push(iface.clone()),
         }
-        previous_ifaces
-    };
+    }
 
     // Atomically write the updated list to disk.
     let ifaces_to_save = {
@@ -778,23 +823,53 @@ pub async fn create_interface(
         return Err(err);
     }
 
-    let nat_wan_changed = sync_nat_wan_interfaces(&state, &ifaces_to_save)?;
-    let gateways_changed = sync_auto_gateways_from_interfaces(&state, &ifaces_to_save)?;
+    let sync_result = sync_nat_wan_interfaces(&state, &ifaces_to_save).and_then(|nat_changed| {
+        sync_auto_gateways_from_interfaces(&state, &ifaces_to_save)
+            .map(|gateways_changed| (nat_changed, gateways_changed))
+    });
+    let (nat_wan_changed, gateways_changed) = match sync_result {
+        Ok(changes) => changes,
+        Err(err) => {
+            if let Err(restore_err) = restore_persisted_state(&state, previous_config).await {
+                return Err(InterfaceError::ApplyFailed(format!(
+                    "{}; failed to restore previous interface config: {}",
+                    err, restore_err
+                )));
+            }
+            return Err(err);
+        }
+    };
 
     info!(name = %iface.name, "interfaces: configuration persisted");
 
     // --- Apply -------------------------------------------------------------
 
-    apply_interface_with_ipv6(&iface, ipv6_enabled).await?;
-    refresh_router_advertisements(&ifaces_to_save, ipv6_enabled).await;
+    let apply_result = async {
+        apply_interface_with_ipv6(&iface, ipv6_enabled).await?;
+        refresh_router_advertisements(&ifaces_to_save, ipv6_enabled).await;
 
-    if nat_wan_changed {
-        apply_full_nftables_rules(&state).await?;
-        info!(name = %iface.name, "interfaces: synchronized NAT WAN interfaces and reapplied nftables");
+        if nat_wan_changed {
+            apply_full_nftables_rules(&state).await?;
+            info!(name = %iface.name, "interfaces: synchronized NAT WAN interfaces and reapplied nftables");
+        }
+
+        if gateways_changed {
+            info!(name = %iface.name, "interfaces: synchronized auto-managed gateways from WAN interfaces");
+        }
+
+        Ok::<(), InterfaceError>(())
     }
+    .await;
 
-    if gateways_changed {
-        info!(name = %iface.name, "interfaces: synchronized auto-managed gateways from WAN interfaces");
+    if let Err(err) = apply_result {
+        warn!(name = %iface.name, error = %err, "interfaces: apply failed; restoring previous persisted config");
+        if let Err(restore_err) = restore_persisted_state(&state, previous_config).await {
+            return Err(InterfaceError::ApplyFailed(format!(
+                "{}; failed to restore previous interface config: {}",
+                err, restore_err
+            )));
+        }
+        return Err(err);
     }
 
     info!(name = %iface.name, "interfaces: engine apply complete");
@@ -817,6 +892,11 @@ pub async fn delete_interface(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, InterfaceError> {
+    let previous_config = state
+        .config_store
+        .load()
+        .map_err(InterfaceError::StorageError)?;
+
     // --- Remove from in-memory cache ---------------------------------------
     let (previous_ifaces, deleted_names) = {
         let mut ifaces = state.interfaces.write().await;
@@ -854,17 +934,26 @@ pub async fn delete_interface(
         return Err(err);
     }
 
-    let nat_wan_changed = sync_nat_wan_interfaces(&state, &ifaces_to_save)?;
-    let gateways_changed = sync_auto_gateways_from_interfaces(&state, &ifaces_to_save)?;
+    let sync_result = sync_nat_wan_interfaces(&state, &ifaces_to_save).and_then(|nat_changed| {
+        sync_auto_gateways_from_interfaces(&state, &ifaces_to_save)
+            .map(|gateways_changed| (nat_changed, gateways_changed))
+    });
+    let (nat_wan_changed, gateways_changed) = match sync_result {
+        Ok(changes) => changes,
+        Err(err) => {
+            if let Err(restore_err) = restore_persisted_state(&state, previous_config).await {
+                return Err(InterfaceError::ApplyFailed(format!(
+                    "{}; failed to restore previous interface config: {}",
+                    err, restore_err
+                )));
+            }
+            return Err(err);
+        }
+    };
 
     // --- Best-effort kernel teardown ---------------------------------------
     for deleted in &deleted_names {
-        if is_valid_interface_name(deleted) {
-            let _ = tokio::process::Command::new("pkill")
-                .args(["-f", &format!("pppd call wan-{deleted}")])
-                .output()
-                .await;
-        }
+        teardown_interface_runtime(deleted).await;
         let _ = tokio::process::Command::new("ip")
             .args(["link", "set", deleted, "down"])
             .output()
@@ -876,7 +965,16 @@ pub async fn delete_interface(
     }
 
     if nat_wan_changed {
-        apply_full_nftables_rules(&state).await?;
+        if let Err(err) = apply_full_nftables_rules(&state).await {
+            warn!(%name, error = %err, "interfaces: nftables apply failed after delete; restoring previous persisted config");
+            if let Err(restore_err) = restore_persisted_state(&state, previous_config).await {
+                return Err(InterfaceError::ApplyFailed(format!(
+                    "{}; failed to restore previous interface config: {}",
+                    err, restore_err
+                )));
+            }
+            return Err(err);
+        }
         info!(%name, "interfaces: synchronized NAT WAN interfaces and reapplied nftables");
     }
 
@@ -899,7 +997,7 @@ pub async fn delete_interface(
 #[cfg(test)]
 mod tests {
     use super::{InterfaceRequest, InterfaceResponse};
-    use crate::config::models::{Interface, Ipv6Mode};
+    use crate::config::models::{Interface, Ipv6Mode, WanMode};
 
     #[test]
     fn interface_request_to_interface_preserves_vlan_parent() {
@@ -937,6 +1035,120 @@ mod tests {
         assert_eq!(iface.vlan, Some(100));
         assert_eq!(iface.parent_interface.as_deref(), Some("eth0"));
         assert_eq!(iface.addresses, vec!["192.168.100.1/24".to_string()]);
+    }
+
+    #[test]
+    fn interface_request_to_interface_normalizes_pppoe() {
+        let req = InterfaceRequest {
+            name: "eth0".into(),
+            description: None,
+            r#type: Some("ethernet".into()),
+            enabled: true,
+            dhcp4: true,
+            dhcp6: Some(false),
+            accept_ra: Some(false),
+            ipv6_mode: Some("static".into()),
+            track_source_interface: None,
+            track_prefix_id: None,
+            delegated_prefix_len: None,
+            ra_mode: None,
+            ia_pd_hint_len: None,
+            mtu: None,
+            mss: None,
+            vlan: None,
+            parent_interface: None,
+            wan_mode: Some("pppoe".into()),
+            pppoe_username: Some("user@example".into()),
+            pppoe_password: Some("secret".into()),
+            ipv4_address: Some("192.0.2.2".into()),
+            ipv4_prefix: Some(24),
+            ipv6_address: Some("2001:db8::2".into()),
+            ipv6_prefix: Some(64),
+            gateway: Some("192.0.2.1".into()),
+            block_private_networks: false,
+            block_bogon_networks: false,
+        };
+
+        let iface = req.to_interface();
+        assert_eq!(iface.wan_mode, Some(WanMode::Pppoe));
+        assert_eq!(iface.mtu, Some(1492));
+        assert!(!iface.dhcp4);
+        assert!(iface.addresses.is_empty());
+        assert!(iface.gateway.is_none());
+    }
+
+    #[test]
+    fn interface_request_to_interface_normalizes_dhcp_wan() {
+        let req = InterfaceRequest {
+            name: "eth0".into(),
+            description: None,
+            r#type: Some("ethernet".into()),
+            enabled: true,
+            dhcp4: false,
+            dhcp6: Some(false),
+            accept_ra: Some(false),
+            ipv6_mode: Some("static".into()),
+            track_source_interface: None,
+            track_prefix_id: None,
+            delegated_prefix_len: None,
+            ra_mode: None,
+            ia_pd_hint_len: None,
+            mtu: Some(1500),
+            mss: None,
+            vlan: None,
+            parent_interface: None,
+            wan_mode: Some("dhcp".into()),
+            pppoe_username: None,
+            pppoe_password: None,
+            ipv4_address: Some("192.0.2.2".into()),
+            ipv4_prefix: Some(24),
+            ipv6_address: Some("2001:db8::2".into()),
+            ipv6_prefix: Some(64),
+            gateway: Some("192.0.2.1".into()),
+            block_private_networks: false,
+            block_bogon_networks: false,
+        };
+
+        let iface = req.to_interface();
+        assert_eq!(iface.wan_mode, Some(WanMode::Dhcp));
+        assert!(iface.dhcp4);
+        assert_eq!(iface.addresses, vec!["2001:db8::2/64".to_string()]);
+        assert!(iface.gateway.is_none());
+    }
+
+    #[test]
+    fn interface_request_rejects_unknown_wan_mode() {
+        let req = InterfaceRequest {
+            name: "eth0".into(),
+            description: None,
+            r#type: Some("ethernet".into()),
+            enabled: true,
+            dhcp4: false,
+            dhcp6: Some(false),
+            accept_ra: Some(false),
+            ipv6_mode: Some("static".into()),
+            track_source_interface: None,
+            track_prefix_id: None,
+            delegated_prefix_len: None,
+            ra_mode: None,
+            ia_pd_hint_len: None,
+            mtu: None,
+            mss: None,
+            vlan: None,
+            parent_interface: None,
+            wan_mode: Some("static".into()),
+            pppoe_username: None,
+            pppoe_password: None,
+            ipv4_address: None,
+            ipv4_prefix: None,
+            ipv6_address: None,
+            ipv6_prefix: None,
+            gateway: None,
+            block_private_networks: false,
+            block_bogon_networks: false,
+        };
+
+        assert!(!req.has_valid_wan_mode());
     }
 
     #[test]

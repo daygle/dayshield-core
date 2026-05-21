@@ -154,6 +154,8 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `POST /portal/logout`                                 - public captive portal logout
 /// - `GET  /nat/config`                                    - get NAT configuration
 /// - `PUT  /nat/config`                                    - update NAT configuration
+/// - `PUT  /nat/config/outbound`                           - update NAT outbound mode/WAN list
+/// - `GET  /nat/interfaces`                                - list interfaces for NAT controls
 /// - `GET  /nat/rules`                                     - list NAT rules
 /// - `POST /nat/rules`                                     - create a NAT rule
 /// - `PUT  /nat/rules/{id}`                                - update a NAT rule
@@ -506,6 +508,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         // NAT
         .route("/nat/config", get(nat::get_config))
         .route("/nat/config", put(nat::put_config))
+        .route("/nat/config/outbound", put(nat::set_outbound_mode))
+        .route("/nat/interfaces", get(nat::list_interfaces))
         .route("/nat/rules", get(nat::list_rules))
         .route("/nat/rules", post(nat::create_rule))
         .route("/nat/rules/{id}", put(nat::update_rule))

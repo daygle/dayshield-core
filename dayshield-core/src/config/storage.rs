@@ -128,7 +128,7 @@ fn migrate_config(config: SystemConfig, from_version: u32) -> Result<SystemConfi
     while version < CURRENT_SCHEMA_VERSION {
         match version {
             0 => {
-                // Migration v0 Ã¢â€ â€™ v1: no structural changes; the schema_version
+                // Migration v0 -> v1: no structural changes; the schema_version
                 // field was simply added to the on-disk envelope.
                 debug!("Migrating config from schema v0 to v1 (no-op)");
                 version = 1;
@@ -307,14 +307,16 @@ impl ConfigStore {
     /// describing the first validation failure found.
     pub fn validate(&self, config: &SystemConfig) -> Result<()> {
         use crate::config::models::{
-            ensure_ipv6_allowed, is_valid_cidr, is_valid_cidr_or_addr, is_valid_domain,
-            is_valid_interface_name, is_valid_ip, is_valid_ipv4_addr, is_valid_ipv4_range,
-            is_valid_mac, is_valid_mss, is_valid_mtu, is_valid_port, is_valid_vlan_id,
-            validate_firewall_rule, validate_firewall_settings, Ipv6Mode,
+            ensure_ipv6_allowed, ipv4_addr_in_cidr, ipv6_addr_in_cidr, is_valid_cidr,
+            is_valid_cidr_or_addr, is_valid_domain, is_valid_interface_name, is_valid_ip,
+            is_valid_ipv4_addr, is_valid_ipv4_range, is_valid_mac, is_valid_mss, is_valid_mtu,
+            is_valid_port, is_valid_vlan_id, normalize_ipv4_cidr, normalize_ipv6_cidr,
+            validate_firewall_rule, validate_firewall_settings, Ipv6Mode, WanMode,
         };
 
         let interface_names: std::collections::HashSet<&str> =
             config.interfaces.iter().map(|i| i.name.as_str()).collect();
+        let mut seen_interface_names = std::collections::HashSet::new();
         let ipv6_enabled = config
             .system_settings
             .as_ref()
@@ -322,9 +324,12 @@ impl ConfigStore {
             .unwrap_or(false);
 
         for iface in &config.interfaces {
+            if !seen_interface_names.insert(iface.name.as_str()) {
+                anyhow::bail!("Duplicate interface name {:?}", iface.name);
+            }
             if !is_valid_interface_name(&iface.name) {
                 anyhow::bail!(
-                    "Interface {:?} has an invalid name (must be 1Ã¢â‚¬â€œ15 alphanumeric/[-_.] chars)",
+                    "Interface {:?} has an invalid name (must be 1-15 alphanumeric/[-_.] chars)",
                     iface.name
                 );
             }
@@ -357,6 +362,14 @@ impl ConfigStore {
             {
                 anyhow::bail!(
                     "Interface {:?} enables SLAAC/RA but is not WAN-designated",
+                    iface.name
+                );
+            }
+            if matches!(ipv6_mode, Ipv6Mode::Slaac)
+                && matches!(iface.wan_mode, Some(WanMode::Pppoe))
+            {
+                anyhow::bail!(
+                    "Interface {:?} enables SLAAC/RA, which is not supported on PPPoE interfaces",
                     iface.name
                 );
             }
@@ -434,6 +447,63 @@ impl ConfigStore {
                     anyhow::bail!("{msg}");
                 }
             }
+            match iface.wan_mode {
+                Some(WanMode::Dhcp) => {
+                    if !iface.dhcp4 {
+                        anyhow::bail!(
+                            "Interface {:?} wan_mode=dhcp requires dhcp4=true",
+                            iface.name
+                        );
+                    }
+                    if iface.gateway.is_some() {
+                        anyhow::bail!(
+                            "Interface {:?} wan_mode=dhcp must not set a static gateway",
+                            iface.name
+                        );
+                    }
+                }
+                Some(WanMode::Pppoe) => {
+                    if iface.gateway.is_some() {
+                        anyhow::bail!(
+                            "Interface {:?} wan_mode=pppoe must not set a static gateway",
+                            iface.name
+                        );
+                    }
+                    if !iface.addresses.is_empty() {
+                        anyhow::bail!(
+                            "Interface {:?} wan_mode=pppoe must not set static addresses",
+                            iface.name
+                        );
+                    }
+                    let username_ok = iface
+                        .pppoe_username
+                        .as_deref()
+                        .map(|value| {
+                            !value.trim().is_empty() && !value.chars().any(char::is_control)
+                        })
+                        .unwrap_or(false);
+                    let password_ok = iface
+                        .pppoe_password
+                        .as_deref()
+                        .map(|value| !value.is_empty() && !value.chars().any(char::is_control))
+                        .unwrap_or(false);
+                    if !username_ok || !password_ok {
+                        anyhow::bail!(
+                            "Interface {:?} wan_mode=pppoe requires non-empty username/password without control characters",
+                            iface.name
+                        );
+                    }
+                    if let Some(mtu) = iface.mtu {
+                        if !(576..=1492).contains(&mtu) {
+                            anyhow::bail!(
+                                "Interface {:?} wan_mode=pppoe requires MTU between 576 and 1492",
+                                iface.name
+                            );
+                        }
+                    }
+                }
+                None => {}
+            }
             let is_wan = iface.wan_mode.is_some() || iface.gateway.is_some();
             if !is_wan && (iface.block_private_networks || iface.block_bogon_networks) {
                 anyhow::bail!(
@@ -444,7 +514,7 @@ impl ConfigStore {
             if let Some(mtu) = iface.mtu {
                 if !is_valid_mtu(mtu) {
                     anyhow::bail!(
-                        "Interface {:?} has invalid MTU {} (must be Ã¢â€°Â¥ 68)",
+                        "Interface {:?} has invalid MTU {} (must be >= 68)",
                         iface.name,
                         mtu
                     );
@@ -453,7 +523,7 @@ impl ConfigStore {
             if let Some(mss) = iface.mss {
                 if !is_valid_mss(mss) {
                     anyhow::bail!(
-                        "Interface {:?} has invalid MSS {} (must be Ã¢â€°Â¥ 536)",
+                        "Interface {:?} has invalid MSS {} (must be >= 536)",
                         iface.name,
                         mss
                     );
@@ -593,11 +663,19 @@ impl ConfigStore {
         // DHCP config validation.
         if let Some(dhcp) = &config.dhcp {
             for scope in &dhcp.scopes {
-                if !is_valid_cidr(&scope.subnet) {
+                let Some(normalized_subnet) = normalize_ipv4_cidr(&scope.subnet) else {
                     anyhow::bail!(
                         "DHCP scope {} has invalid subnet {:?}",
                         scope.id,
                         scope.subnet
+                    );
+                };
+                if normalized_subnet != scope.subnet.trim() {
+                    anyhow::bail!(
+                        "DHCP scope {} subnet {:?} must be network CIDR {:?}",
+                        scope.id,
+                        scope.subnet,
+                        normalized_subnet
                     );
                 }
                 if !is_valid_ipv4_addr(&scope.pool_start) {
@@ -622,9 +700,33 @@ impl ConfigStore {
                         scope.pool_end
                     );
                 }
+                if !ipv4_addr_in_cidr(&scope.pool_start, &scope.subnet) {
+                    anyhow::bail!(
+                        "DHCP scope {} pool_start {} is outside subnet {}",
+                        scope.id,
+                        scope.pool_start,
+                        scope.subnet
+                    );
+                }
+                if !ipv4_addr_in_cidr(&scope.pool_end, &scope.subnet) {
+                    anyhow::bail!(
+                        "DHCP scope {} pool_end {} is outside subnet {}",
+                        scope.id,
+                        scope.pool_end,
+                        scope.subnet
+                    );
+                }
                 if let Some(gw) = &scope.gateway {
                     if !is_valid_ipv4_addr(gw) {
                         anyhow::bail!("DHCP scope {} has invalid gateway {:?}", scope.id, gw);
+                    }
+                    if !ipv4_addr_in_cidr(gw, &scope.subnet) {
+                        anyhow::bail!(
+                            "DHCP scope {} gateway {} is outside subnet {}",
+                            scope.id,
+                            gw,
+                            scope.subnet
+                        );
                     }
                 }
                 for dns in &scope.dns_servers {
@@ -647,6 +749,14 @@ impl ConfigStore {
                             res.ip_address
                         );
                     }
+                    if !ipv4_addr_in_cidr(&res.ip_address, &scope.subnet) {
+                        anyhow::bail!(
+                            "DHCP reservation {} IP {} is outside subnet {}",
+                            res.id,
+                            res.ip_address,
+                            scope.subnet
+                        );
+                    }
                 }
             }
         }
@@ -662,11 +772,19 @@ impl ConfigStore {
                 }
             }
             for scope in &dhcp6.scopes {
-                if !crate::config::models::is_valid_ipv6_cidr(&scope.subnet) {
+                let Some(normalized_subnet) = normalize_ipv6_cidr(&scope.subnet) else {
                     anyhow::bail!(
                         "DHCPv6 scope {} has invalid subnet {:?}",
                         scope.id,
                         scope.subnet
+                    );
+                };
+                if normalized_subnet != scope.subnet.trim() {
+                    anyhow::bail!(
+                        "DHCPv6 scope {} subnet {:?} must be network CIDR {:?}",
+                        scope.id,
+                        scope.subnet,
+                        normalized_subnet
                     );
                 }
                 if !crate::config::models::is_valid_ipv6_addr(&scope.pool_start) {
@@ -701,6 +819,22 @@ impl ConfigStore {
                         scope.pool_end
                     );
                 }
+                if !ipv6_addr_in_cidr(&scope.pool_start, &scope.subnet) {
+                    anyhow::bail!(
+                        "DHCPv6 scope {} pool_start {} is outside subnet {}",
+                        scope.id,
+                        scope.pool_start,
+                        scope.subnet
+                    );
+                }
+                if !ipv6_addr_in_cidr(&scope.pool_end, &scope.subnet) {
+                    anyhow::bail!(
+                        "DHCPv6 scope {} pool_end {} is outside subnet {}",
+                        scope.id,
+                        scope.pool_end,
+                        scope.subnet
+                    );
+                }
                 for dns in &scope.dns_servers {
                     if !crate::config::models::is_valid_ipv6_addr(dns) {
                         anyhow::bail!("DHCPv6 scope {} has invalid DNS server {:?}", scope.id, dns);
@@ -721,6 +855,15 @@ impl ConfigStore {
                             scope.id,
                             reservation.id,
                             reservation.ip_address
+                        );
+                    }
+                    if !ipv6_addr_in_cidr(&reservation.ip_address, &scope.subnet) {
+                        anyhow::bail!(
+                            "DHCPv6 scope {} reservation {} IP {} is outside subnet {}",
+                            scope.id,
+                            reservation.id,
+                            reservation.ip_address,
+                            scope.subnet
                         );
                     }
                 }
@@ -1662,7 +1805,9 @@ fn merge_json(dst: &mut serde_json::Value, src: serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::models::{is_valid_cidr, is_valid_interface_name, is_valid_mtu, Interface};
+    use crate::config::models::{
+        is_valid_cidr, is_valid_interface_name, is_valid_mtu, Gateway, Interface, WanMode,
+    };
 
     fn temp_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("ds-test-{}", uuid::Uuid::new_v4()));
@@ -1696,6 +1841,16 @@ mod tests {
             block_private_networks: false,
             block_bogon_networks: false,
         }
+    }
+
+    fn make_pppoe_interface(name: &str) -> Interface {
+        let mut iface = make_interface(name);
+        iface.addresses.clear();
+        iface.mtu = Some(1492);
+        iface.wan_mode = Some(WanMode::Pppoe);
+        iface.pppoe_username = Some("user@example".into());
+        iface.pppoe_password = Some("secret".into());
+        iface
     }
 
     // -----------------------------------------------------------------------
@@ -1830,6 +1985,113 @@ mod tests {
             block_bogon_networks: false,
         });
         assert!(store.validate(&cfg).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_interface_names() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        cfg.interfaces = vec![make_interface("eth0"), make_interface("eth0")];
+        let error = store.validate(&cfg).unwrap_err().to_string();
+        assert!(error.contains("Duplicate interface name"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_dhcp_wan_without_dhcp4() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        let mut iface = make_interface("eth0");
+        iface.addresses.clear();
+        iface.wan_mode = Some(WanMode::Dhcp);
+        iface.dhcp4 = false;
+        cfg.interfaces.push(iface);
+
+        let error = store.validate(&cfg).unwrap_err().to_string();
+        assert!(error.contains("wan_mode=dhcp requires dhcp4=true"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_accepts_dhcp_wan_gateway_without_static_ip() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        let mut iface = make_interface("eth0");
+        iface.addresses.clear();
+        iface.wan_mode = Some(WanMode::Dhcp);
+        iface.dhcp4 = true;
+        cfg.interfaces.push(iface);
+        cfg.gateways.push(Gateway {
+            name: "WAN_DHCP".into(),
+            description: None,
+            interface: "eth0".into(),
+            gateway_ip: None,
+            monitor_ip: Some("1.1.1.1".into()),
+            weight: 1,
+            enabled: true,
+        });
+
+        store.validate(&cfg).unwrap();
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_pppoe_without_credentials() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        let mut iface = make_pppoe_interface("eth0");
+        iface.pppoe_password = Some(String::new());
+        cfg.interfaces.push(iface);
+
+        let error = store.validate(&cfg).unwrap_err().to_string();
+        assert!(error.contains("wan_mode=pppoe requires non-empty username/password"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_pppoe_static_gateway_or_addresses() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut with_gateway = SystemConfig::default();
+        let mut iface = make_pppoe_interface("eth0");
+        iface.gateway = Some("192.0.2.1".into());
+        with_gateway.interfaces.push(iface);
+        let error = store.validate(&with_gateway).unwrap_err().to_string();
+        assert!(error.contains("wan_mode=pppoe must not set a static gateway"));
+
+        let mut with_address = SystemConfig::default();
+        let mut iface = make_pppoe_interface("eth1");
+        iface.addresses.push("192.0.2.2/24".into());
+        with_address.interfaces.push(iface);
+        let error = store.validate(&with_address).unwrap_err().to_string();
+        assert!(error.contains("wan_mode=pppoe must not set static addresses"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_accepts_normalized_pppoe_interface() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        cfg.interfaces.push(make_pppoe_interface("eth0"));
+        store.validate(&cfg).unwrap();
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2368,6 +2630,93 @@ mod tests {
         let cfg = store.load().unwrap();
         assert_eq!(cfg.interfaces.len(), 1, "interfaces must survive dhcp save");
         assert!(cfg.dhcp.is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_dhcp_host_cidr_subnet() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        let mut dhcp = make_dhcp_config();
+        dhcp.scopes[0].subnet = "192.168.1.1/24".into();
+        cfg.dhcp = Some(dhcp);
+
+        let error = store.validate(&cfg).unwrap_err().to_string();
+        assert!(error.contains("must be network CIDR"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_dhcp_pool_outside_subnet() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        let mut dhcp = make_dhcp_config();
+        dhcp.scopes[0].pool_start = "192.168.0.100".into();
+        dhcp.scopes[0].pool_end = "192.168.0.200".into();
+        cfg.dhcp = Some(dhcp);
+
+        let error = store.validate(&cfg).unwrap_err().to_string();
+        assert!(error.contains("pool_start 192.168.0.100 is outside subnet"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_dhcp6_host_cidr_subnet() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        cfg.dhcp6 = Some(crate::config::models::Dhcp6Config {
+            enabled: true,
+            interface: "eth1".into(),
+            scopes: vec![crate::config::models::Dhcp6Scope {
+                id: uuid::Uuid::new_v4(),
+                subnet: "fd00:1::1/64".into(),
+                pool_start: "fd00:1::100".into(),
+                pool_end: "fd00:1::1ff".into(),
+                dns_servers: vec![],
+                lease_seconds: 86400,
+                domain_name: None,
+                reservations: vec![],
+            }],
+        });
+
+        let error = store.validate(&cfg).unwrap_err().to_string();
+        assert!(error.contains("must be network CIDR"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_dhcp6_pool_outside_subnet() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        cfg.dhcp6 = Some(crate::config::models::Dhcp6Config {
+            enabled: true,
+            interface: "eth1".into(),
+            scopes: vec![crate::config::models::Dhcp6Scope {
+                id: uuid::Uuid::new_v4(),
+                subnet: "fd00:1::/64".into(),
+                pool_start: "fd00:2::100".into(),
+                pool_end: "fd00:2::1ff".into(),
+                dns_servers: vec![],
+                lease_seconds: 86400,
+                domain_name: None,
+                reservations: vec![],
+            }],
+        });
+
+        let error = store.validate(&cfg).unwrap_err().to_string();
+        assert!(error.contains("pool_start fd00:2::100 is outside subnet"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

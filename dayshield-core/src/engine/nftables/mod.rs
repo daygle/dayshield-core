@@ -22,11 +22,11 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::models::{
-    is_valid_cidr, is_valid_ip, Action, AddressFamily, AliasType, CaptivePortalConfig,
-    CaptivePortalSession, FirewallAddressFamily, FirewallAlias, FirewallChainPolicy,
-    FirewallDirection, FirewallRule, FirewallSchedule, FirewallSettings, FirewallStateLimits,
-    Interface, LogPosition, NatConfig, NatProtocol, NatRuleType, OutboundMode, Protocol,
-    SystemSettings, effective_management_ports,
+    effective_management_ports, is_valid_cidr, is_valid_ip, Action, AddressFamily, AliasType,
+    CaptivePortalConfig, CaptivePortalSession, FirewallAddressFamily, FirewallAlias,
+    FirewallChainPolicy, FirewallDirection, FirewallRule, FirewallSchedule, FirewallSettings,
+    FirewallStateLimits, Interface, LogPosition, NatConfig, NatProtocol, NatRuleType, OutboundMode,
+    Protocol, SystemSettings,
 };
 
 const DEFAULT_BLOCK_LOG_RATE_PER_SECOND: u32 = 10;
@@ -349,7 +349,10 @@ fn system_default_block_rule(direction: &str) -> FirewallRule {
 
     FirewallRule {
         id: stable_system_rule_id("system", "default-block", direction, &chain_direction),
-        description: Some(format!("Default drop policy for {} chain", direction.to_uppercase())),
+        description: Some(format!(
+            "Default drop policy for {} chain",
+            direction.to_uppercase()
+        )),
         priority: -100,
         source: None,
         destination: None,
@@ -1694,12 +1697,63 @@ fn format_nat_postrouting(nat: &crate::config::models::NatRule) -> Option<String
             if let Some(iface) = &nat.interface {
                 parts.push(format!("oifname \"{}\"", iface));
             }
+            if let Some(dst) = &nat.destination {
+                parts.push(format!(
+                    "{} daddr {}",
+                    nft_ip_keyword(&nat.address_family),
+                    dst
+                ));
+            }
+            push_nat_protocol_and_ports(
+                &mut parts,
+                &nat.protocol,
+                nat.source_port,
+                nat.destination_port,
+            );
             let translation = nat.translation.as_ref()?;
             let addr = translation.address.as_deref()?;
-            parts.push(format!("netmap to {}", addr));
+            parts.push(format_nat_target("snat", addr, None, None));
             Some(parts.join(" "))
         }
         NatRuleType::Dnat => None,
+    }
+}
+
+/// Translate a [`NatRule`] into an output-chain DNAT statement.
+///
+/// Output NAT handles locally generated traffic, so inbound-interface matches
+/// from a prerouting port-forward do not apply here.
+fn format_nat_output(nat: &crate::config::models::NatRule) -> Option<String> {
+    match nat.rule_type {
+        NatRuleType::Dnat => {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(src) = &nat.source {
+                parts.push(format!(
+                    "{} saddr {}",
+                    nft_ip_keyword(&nat.address_family),
+                    src
+                ));
+            }
+            if let Some(dst) = &nat.destination {
+                parts.push(format!(
+                    "{} daddr {}",
+                    nft_ip_keyword(&nat.address_family),
+                    dst
+                ));
+            }
+            push_nat_protocol_and_ports(
+                &mut parts,
+                &nat.protocol,
+                nat.source_port,
+                nat.destination_port,
+            );
+            let translation = nat.translation.as_ref()?;
+            let addr = translation.address.as_deref()?;
+            let target = format_nat_target("dnat", addr, translation.port, translation.port_end);
+            parts.push(target);
+            Some(parts.join(" "))
+        }
+        _ => None,
     }
 }
 
@@ -1747,7 +1801,12 @@ fn generate_nat_table_for_family(
 
     let user_postrouting: Vec<_> = sorted
         .iter()
-        .filter(|r| matches!(r.rule_type, NatRuleType::Masquerade | NatRuleType::Snat | NatRuleType::OneToOne))
+        .filter(|r| {
+            matches!(
+                r.rule_type,
+                NatRuleType::Masquerade | NatRuleType::Snat | NatRuleType::OneToOne
+            )
+        })
         .collect();
 
     let emit_user_postrouting = matches!(
@@ -1828,7 +1887,7 @@ fn generate_nat_table_for_family(
         out.push_str("    chain output {\n");
         out.push_str("        type nat hook output priority -100; policy accept;\n");
         for rule in &reflection_rules {
-            if let Some(line) = format_nat_prerouting(rule) {
+            if let Some(line) = format_nat_output(rule) {
                 out.push_str(&format!("        {}\n", line));
             }
         }
@@ -2405,6 +2464,43 @@ mod tests {
     }
 
     #[test]
+    fn one_to_one_uses_supported_snat_statement() {
+        let one_to_one = NatRule {
+            id: Uuid::new_v4(),
+            enabled: true,
+            description: None,
+            rule_type: NatRuleType::OneToOne,
+            interface: Some("eth0".into()),
+            source: Some("10.0.0.5".into()),
+            destination: None,
+            protocol: NatProtocol::Any,
+            source_port: None,
+            destination_port: None,
+            translation: Some(NatTranslation {
+                address: Some("203.0.113.5".into()),
+                port: None,
+                port_end: None,
+            }),
+            nat_reflection: false,
+            address_family: AddressFamily::Ipv4,
+            priority: 0,
+            log: false,
+            auto_firewall_rule: true,
+        };
+        let nat = NatConfig {
+            outbound_mode: OutboundMode::Manual,
+            wan_interfaces: vec![],
+            rules: vec![one_to_one],
+            nat_reflection: false,
+        };
+        let rs = generate_ruleset(&[], Some(&nat), &[], None, &HashMap::new());
+        assert!(rs.contains("ip saddr 10.0.0.5"));
+        assert!(rs.contains("oifname \"eth0\""));
+        assert!(rs.contains("snat to 203.0.113.5"));
+        assert!(!rs.contains("netmap"));
+    }
+
+    #[test]
     fn nat_reflection_generates_output_chain() {
         let mut rule = dnat_rule("203.0.113.1/32", "10.0.0.1", Some(80));
         rule.nat_reflection = true;
@@ -2420,6 +2516,32 @@ mod tests {
             rs.contains("hook output"),
             "reflection output chain missing"
         );
+    }
+
+    #[test]
+    fn nat_reflection_output_chain_omits_inbound_interface_match() {
+        let mut rule = dnat_rule("203.0.113.1/32", "10.0.0.1", Some(80));
+        rule.interface = Some("wan0".into());
+        rule.nat_reflection = true;
+        let nat = NatConfig {
+            outbound_mode: OutboundMode::Manual,
+            wan_interfaces: vec![],
+            rules: vec![rule],
+            nat_reflection: false,
+        };
+        let rs = generate_ruleset(&[], Some(&nat), &[], None, &HashMap::new());
+        let nat_table = rs
+            .split("table ip nat")
+            .nth(1)
+            .expect("NAT table must be present");
+        let output_section = nat_table
+            .split("    chain output {\n")
+            .nth(1)
+            .and_then(|section| section.split("\n    }\n").next())
+            .expect("NAT output chain must be present");
+
+        assert!(output_section.contains("dnat to 10.0.0.1:80"));
+        assert!(!output_section.contains("iifname \"wan0\""));
     }
 
     #[test]

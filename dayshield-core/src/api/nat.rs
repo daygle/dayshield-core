@@ -6,11 +6,13 @@
 //! |----------|-----------------------|-------------------------------------------|
 //! | `GET`    | `/nat/config`         | Return the current [`NatConfig`]          |
 //! | `PUT`    | `/nat/config`         | Replace the [`NatConfig`]                 |
+//! | `PUT`    | `/nat/config/outbound`| Update outbound mode and WAN interfaces   |
+//! | `GET`    | `/nat/interfaces`     | Return interface names with WAN markers   |
 //! | `GET`    | `/nat/rules`          | Return the user-defined [`NatRule`] list  |
 //! | `POST`   | `/nat/rules`          | Append a new [`NatRule`]                  |
 //! | `DELETE` | `/nat/rules/{id}`     | Remove a rule by UUID                     |
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use axum::{
     extract::{Path, State},
@@ -25,7 +27,7 @@ use uuid::Uuid;
 use crate::{
     config::models::{
         validate_nat_config_with_ipv6, validate_nat_rule_with_ipv6, AddressFamily, NatConfig,
-        NatProtocol, NatRule, NatRuleType, NatTranslation, OutboundMode,
+        NatInterface, NatProtocol, NatRule, NatRuleType, NatTranslation, OutboundMode,
     },
     state::AppState,
 };
@@ -126,6 +128,40 @@ fn next_nat_priority(config: &NatConfig) -> i32 {
         .unwrap_or(0)
 }
 
+fn restore_nat_config(state: &AppState, previous_nat: Option<NatConfig>) -> anyhow::Result<()> {
+    let mut config = state.config_store.load()?;
+    config.nat = previous_nat;
+    state.config_store.save_with_rollback(&config)
+}
+
+async fn save_and_apply_config(state: &AppState, cfg: NatConfig) -> Result<(), NatError> {
+    let previous_nat = state
+        .config_store
+        .load_nat_config()
+        .map_err(NatError::StorageError)?;
+
+    state
+        .config_store
+        .save_nat_config(cfg)
+        .map_err(NatError::StorageError)?;
+
+    if let Err(apply_err) =
+        crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await
+    {
+        warn!(error = %apply_err, "nat: nftables apply failed; restoring previous config");
+        if let Err(restore_err) = restore_nat_config(state, previous_nat) {
+            warn!(error = %restore_err, "nat: failed to restore previous config after apply failure");
+            return Err(NatError::EngineError(format!(
+                "{}; failed to restore previous NAT config: {:#}",
+                apply_err, restore_err
+            )));
+        }
+        return Err(NatError::EngineError(apply_err.to_string()));
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -150,6 +186,58 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> Result<impl IntoR
     Ok(Json(cfg))
 }
 
+/// Handler: `GET /nat/interfaces`
+///
+/// Returns configured interfaces with the NAT/WAN marker the management UI
+/// needs for outbound-mode controls.
+pub async fn list_interfaces(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, NatError> {
+    let cfg = state
+        .config_store
+        .load_nat_config()
+        .map_err(NatError::StorageError)?
+        .unwrap_or_default();
+    let interfaces = state
+        .config_store
+        .load_interfaces()
+        .map_err(NatError::StorageError)?;
+
+    let configured_wans = cfg
+        .wan_interfaces
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    let mut response = interfaces
+        .into_iter()
+        .map(|iface| {
+            let is_wan = configured_wans.contains(iface.name.as_str())
+                || iface.wan_mode.is_some()
+                || iface.gateway.is_some();
+            seen.insert(iface.name.clone());
+            NatInterface {
+                name: iface.name,
+                is_wan,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    for iface in cfg.wan_interfaces {
+        if seen.insert(iface.clone()) {
+            response.push(NatInterface {
+                name: iface,
+                is_wan: true,
+            });
+        }
+    }
+
+    response.sort_by(|a, b| a.name.cmp(&b.name));
+
+    info!(count = response.len(), "nat: listed interfaces");
+    Ok(Json(response))
+}
+
 /// Handler: `PUT /nat/config`
 ///
 /// Replaces the entire [`NatConfig`].  The request body must be a valid JSON
@@ -171,10 +259,7 @@ pub async fn put_config(
         return Err(NatError::ValidationFailed(msg));
     }
 
-    state
-        .config_store
-        .save_nat_config(cfg.clone())
-        .map_err(NatError::StorageError)?;
+    save_and_apply_config(&state, cfg.clone()).await?;
 
     info!(
         mode = ?cfg.outbound_mode,
@@ -182,11 +267,6 @@ pub async fn put_config(
         rules = cfg.rules.len(),
         "nat: config saved"
     );
-
-    // Re-apply the full ruleset.
-    crate::captive_portal::apply_current_ruleset_nft(&state.config_store)
-        .await
-        .map_err(|e| NatError::EngineError(e.to_string()))?;
 
     info!("nat: nftables engine apply complete");
     Ok(Json(cfg))
@@ -255,17 +335,9 @@ pub async fn create_rule(
 
     cfg.rules.push(rule.clone());
 
-    state
-        .config_store
-        .save_nat_config(cfg)
-        .map_err(NatError::StorageError)?;
+    save_and_apply_config(&state, cfg).await?;
 
     info!(id = %rule.id, rule_type = ?rule.rule_type, "nat: rule created");
-
-    // Re-apply the full ruleset.
-    crate::captive_portal::apply_current_ruleset_nft(&state.config_store)
-        .await
-        .map_err(|e| NatError::EngineError(e.to_string()))?;
 
     info!(id = %rule.id, "nat: nftables engine apply complete");
     Ok((StatusCode::CREATED, Json(rule)))
@@ -293,17 +365,9 @@ pub async fn delete_rule(
         return Err(NatError::NotFound(id));
     }
 
-    state
-        .config_store
-        .save_nat_config(cfg)
-        .map_err(NatError::StorageError)?;
+    save_and_apply_config(&state, cfg).await?;
 
     info!(%id, "nat: rule deleted");
-
-    // Re-apply the full ruleset.
-    crate::captive_portal::apply_current_ruleset_nft(&state.config_store)
-        .await
-        .map_err(|e| NatError::EngineError(e.to_string()))?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -364,16 +428,9 @@ pub async fn update_rule(
 
     cfg.rules[pos] = rule.clone();
 
-    state
-        .config_store
-        .save_nat_config(cfg)
-        .map_err(NatError::StorageError)?;
+    save_and_apply_config(&state, cfg).await?;
 
     info!(%id, rule_type = ?rule.rule_type, "nat: rule updated");
-
-    crate::captive_portal::apply_current_ruleset_nft(&state.config_store)
-        .await
-        .map_err(|e| NatError::EngineError(e.to_string()))?;
 
     info!(%id, "nat: nftables engine apply complete");
     Ok(Json(rule))
@@ -390,6 +447,44 @@ pub struct SetOutboundModeRequest {
     pub wan_interfaces: Vec<String>,
 }
 
+/// Handler: `PUT /nat/config/outbound`
+///
+/// Updates outbound mode and WAN interfaces while preserving existing NAT
+/// rules and reflection settings.
+pub async fn set_outbound_mode(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SetOutboundModeRequest>,
+) -> Result<impl IntoResponse, NatError> {
+    let ipv6_enabled = state
+        .config_store
+        .load_system_settings()
+        .map_err(NatError::StorageError)?
+        .ipv6_enabled;
+
+    let mut cfg = state
+        .config_store
+        .load_nat_config()
+        .map_err(NatError::StorageError)?
+        .unwrap_or_default();
+
+    cfg.outbound_mode = req.outbound_mode;
+    cfg.wan_interfaces = req.wan_interfaces;
+
+    if let Err(msg) = validate_nat_config_with_ipv6(&cfg, ipv6_enabled) {
+        warn!(error = %msg, "nat: outbound mode validation failed");
+        return Err(NatError::ValidationFailed(msg));
+    }
+
+    save_and_apply_config(&state, cfg.clone()).await?;
+
+    info!(
+        mode = ?cfg.outbound_mode,
+        wan_interfaces = cfg.wan_interfaces.len(),
+        "nat: outbound mode saved"
+    );
+    Ok(Json(cfg))
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
@@ -398,25 +493,68 @@ pub struct SetOutboundModeRequest {
 mod tests {
     use super::*;
     use axum::{
-        body::Body,
+        body::{to_bytes, Body},
         http::{Request, StatusCode},
         routing::{delete, get, post, put},
         Router,
     };
     use tower::ServiceExt;
 
+    use crate::config::models::{Interface, SystemConfig, WanMode};
     use crate::state::AppState;
+
+    fn router_from_state(state: AppState) -> Router {
+        let state = std::sync::Arc::new(state);
+        Router::new()
+            .route("/nat/config", get(get_config).put(put_config))
+            .route("/nat/config/outbound", put(set_outbound_mode))
+            .route("/nat/interfaces", get(list_interfaces))
+            .route("/nat/rules", get(list_rules).post(create_rule))
+            .route("/nat/rules/{id}", delete(delete_rule).put(update_rule))
+            .with_state(state)
+    }
 
     fn test_router() -> Router {
         let tmp = std::env::temp_dir().join(format!("dayshield-nat-test-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&tmp).unwrap();
         let (state, _rx) = AppState::with_config_dir(tmp);
-        let state = std::sync::Arc::new(state);
-        Router::new()
-            .route("/nat/config", get(get_config).put(put_config))
-            .route("/nat/rules", get(list_rules).post(create_rule))
-            .route("/nat/rules/{id}", delete(delete_rule).put(update_rule))
-            .with_state(state)
+        router_from_state(state)
+    }
+
+    fn test_router_with_config(config: SystemConfig) -> Router {
+        let tmp = std::env::temp_dir().join(format!("dayshield-nat-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let (state, _rx) = AppState::with_config_dir(tmp);
+        state.config_store.save(&config).unwrap();
+        router_from_state(state)
+    }
+
+    fn test_interface(name: &str, wan_mode: Option<WanMode>, gateway: Option<&str>) -> Interface {
+        Interface {
+            name: name.into(),
+            description: None,
+            addresses: vec![],
+            mtu: None,
+            mss: None,
+            enabled: true,
+            dhcp4: matches!(wan_mode, Some(WanMode::Dhcp)),
+            dhcp6: false,
+            accept_ra: false,
+            ipv6_mode: None,
+            track_source_interface: None,
+            track_prefix_id: None,
+            delegated_prefix_len: None,
+            ra_mode: None,
+            ia_pd_hint_len: None,
+            vlan: None,
+            parent_interface: None,
+            wan_mode,
+            pppoe_username: None,
+            pppoe_password: None,
+            gateway: gateway.map(str::to_string),
+            block_private_networks: false,
+            block_bogon_networks: false,
+        }
     }
 
     #[tokio::test]
@@ -492,6 +630,66 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn list_interfaces_marks_configured_and_derived_wans() {
+        let config = SystemConfig {
+            interfaces: vec![
+                test_interface("lan0", None, None),
+                test_interface("wan0", Some(WanMode::Dhcp), None),
+            ],
+            nat: Some(NatConfig {
+                outbound_mode: OutboundMode::Automatic,
+                wan_interfaces: vec!["pppoe0".into()],
+                rules: vec![],
+                nat_reflection: false,
+            }),
+            ..SystemConfig::default()
+        };
+        let app = test_router_with_config(config);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/nat/interfaces")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let interfaces: Vec<NatInterface> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(interfaces.len(), 3);
+        assert_eq!(interfaces[0].name, "lan0");
+        assert!(!interfaces[0].is_wan);
+        assert_eq!(interfaces[1].name, "pppoe0");
+        assert!(interfaces[1].is_wan);
+        assert_eq!(interfaces[2].name, "wan0");
+        assert!(interfaces[2].is_wan);
+    }
+
+    #[tokio::test]
+    async fn set_outbound_mode_rejects_invalid_interface_name() {
+        let app = test_router();
+        let payload = serde_json::json!({
+            "outbound_mode": "hybrid",
+            "wan_interfaces": ["bad interface!"]
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/nat/config/outbound")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]

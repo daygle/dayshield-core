@@ -20,9 +20,9 @@ use std::os::unix::fs::PermissionsExt;
 use anyhow::{Context, Result};
 use serde_json::json;
 use tokio::process::Command;
-use tracing::info;
+use tracing::{info, warn};
 
-use crate::config::models::DhcpConfig;
+use crate::config::models::{normalize_ipv4_cidr, DhcpConfig};
 
 /// Path where the Kea DHCPv4 configuration file is written.
 const KEA_CONF_PATH: &str = "/etc/dayshield/kea-dhcp4.conf";
@@ -45,6 +45,7 @@ pub fn generate_config(config: &DhcpConfig) -> String {
     let mut subnets = Vec::new();
 
     for (i, scope) in config.scopes.iter().enumerate() {
+        let subnet = normalize_ipv4_cidr(&scope.subnet).unwrap_or_else(|| scope.subnet.clone());
         let pool_str = format!("{}-{}", scope.pool_start, scope.pool_end);
 
         let mut option_data = Vec::new();
@@ -83,7 +84,7 @@ pub fn generate_config(config: &DhcpConfig) -> String {
 
         subnets.push(json!({
             "id": (i as u32) + 1,
-            "subnet": scope.subnet,
+            "subnet": subnet,
             "pools": [{ "pool": pool_str }],
             "valid-lifetime": scope.lease_seconds,
             "option-data": option_data,
@@ -165,10 +166,7 @@ pub async fn apply_config(config: &DhcpConfig) -> Result<()> {
 
     std::fs::create_dir_all("/etc/kea").context("failed to create /etc/kea")?;
     #[cfg(unix)]
-    // Packaged Kea units may run under a dedicated service user, so the
-    // config directory must be traversable even though the files are public.
-    std::fs::set_permissions("/etc/kea", std::fs::Permissions::from_mode(0o755))
-        .context("failed to chmod /etc/kea")?;
+    set_directory_permissions_best_effort("/etc/kea");
     std::fs::create_dir_all("/var/log/kea").context("failed to create /var/log/kea")?;
 
     let conf_str = generate_config(config);
@@ -239,6 +237,16 @@ fn remove_config_if_exists(path: &str) -> Result<()> {
     }
 }
 
+#[cfg(unix)]
+fn set_directory_permissions_best_effort(path: &str) {
+    // The packaged Kea directory is commonly owned by root or the distro's Kea
+    // package. If DayShield can write the config file, failure to chmod the
+    // existing directory should not block DHCP saves.
+    if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)) {
+        warn!(path, error = %error, "dhcp: continuing after directory chmod failed");
+    }
+}
+
 /// Restart the kea-dhcp4-server service via systemctl.
 async fn restart_kea() -> Result<()> {
     let out = Command::new("systemctl")
@@ -300,6 +308,15 @@ mod tests {
         let cfg = base_config();
         let out = generate_config(&cfg);
         assert!(out.contains("192.168.1.0/24"));
+    }
+
+    #[test]
+    fn generate_config_normalizes_host_cidr_subnet() {
+        let mut cfg = base_config();
+        cfg.scopes[0].subnet = "192.168.1.1/24".into();
+        let out = generate_config(&cfg);
+        assert!(out.contains("\"subnet\": \"192.168.1.0/24\""));
+        assert!(!out.contains("\"subnet\": \"192.168.1.1/24\""));
     }
 
     #[test]

@@ -417,6 +417,121 @@ pub fn is_valid_cidr(cidr: &str) -> bool {
     false
 }
 
+fn ipv4_prefix_mask(prefix: u8) -> Option<u32> {
+    if prefix > 32 {
+        return None;
+    }
+    Some(if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix as u32)
+    })
+}
+
+/// Normalize an IPv4 CIDR to its network address.
+///
+/// Accepts either `addr/prefix` or a plain IPv4 host address. Plain addresses
+/// are treated as `/24` for compatibility with setup flows that collect a LAN
+/// host IP separately from the prefix length.
+pub fn normalize_ipv4_cidr(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    let (addr_text, prefix) = if let Some((addr_text, prefix_text)) = value.split_once('/') {
+        (addr_text, prefix_text.parse::<u8>().ok()?)
+    } else {
+        (value, 24)
+    };
+
+    let addr = addr_text.parse::<std::net::Ipv4Addr>().ok()?;
+    let mask = ipv4_prefix_mask(prefix)?;
+    let network = u32::from(addr) & mask;
+    Some(format!("{}/{}", std::net::Ipv4Addr::from(network), prefix))
+}
+
+/// Return `true` if an IPv4 host address belongs to an IPv4 CIDR.
+pub fn ipv4_addr_in_cidr(addr: &str, cidr: &str) -> bool {
+    let Ok(addr) = addr.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    let Some(normalized) = normalize_ipv4_cidr(cidr) else {
+        return false;
+    };
+    let Some((network_text, prefix_text)) = normalized.split_once('/') else {
+        return false;
+    };
+    let Ok(network) = network_text.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    let Ok(prefix) = prefix_text.parse::<u8>() else {
+        return false;
+    };
+    let Some(mask) = ipv4_prefix_mask(prefix) else {
+        return false;
+    };
+
+    (u32::from(addr) & mask) == (u32::from(network) & mask)
+}
+
+fn ipv6_prefix_mask(prefix: u8) -> Option<u128> {
+    if prefix > 128 {
+        return None;
+    }
+    Some(if prefix == 0 {
+        0
+    } else {
+        u128::MAX << (128 - prefix as u32)
+    })
+}
+
+/// Normalize an IPv6 CIDR to its network address.
+///
+/// Accepts either `addr/prefix` or a plain IPv6 host address. Plain addresses
+/// are treated as `/64`, matching the common LAN DHCPv6 prefix size.
+pub fn normalize_ipv6_cidr(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    let (addr_text, prefix) = if let Some((addr_text, prefix_text)) = value.split_once('/') {
+        (addr_text, prefix_text.parse::<u8>().ok()?)
+    } else {
+        (value, 64)
+    };
+
+    let addr = addr_text.parse::<std::net::Ipv6Addr>().ok()?;
+    let mask = ipv6_prefix_mask(prefix)?;
+    let network = u128::from(addr) & mask;
+    Some(format!("{}/{}", std::net::Ipv6Addr::from(network), prefix))
+}
+
+/// Return `true` if an IPv6 host address belongs to an IPv6 CIDR.
+pub fn ipv6_addr_in_cidr(addr: &str, cidr: &str) -> bool {
+    let Ok(addr) = addr.parse::<std::net::Ipv6Addr>() else {
+        return false;
+    };
+    let Some(normalized) = normalize_ipv6_cidr(cidr) else {
+        return false;
+    };
+    let Some((network_text, prefix_text)) = normalized.split_once('/') else {
+        return false;
+    };
+    let Ok(network) = network_text.parse::<std::net::Ipv6Addr>() else {
+        return false;
+    };
+    let Ok(prefix) = prefix_text.parse::<u8>() else {
+        return false;
+    };
+    let Some(mask) = ipv6_prefix_mask(prefix) else {
+        return false;
+    };
+
+    (u128::from(addr) & mask) == (u128::from(network) & mask)
+}
+
 /// Return `true` if `value` is a valid IP address or CIDR prefix.
 pub fn is_valid_cidr_or_addr(value: &str) -> bool {
     is_valid_ip(value) || is_valid_cidr(value)
@@ -1281,6 +1396,10 @@ pub fn validate_nat_rule_with_ipv6(rule: &NatRule, ipv6_enabled: bool) -> Result
     // Translation validation.
     match rule.rule_type {
         NatRuleType::Snat | NatRuleType::Dnat | NatRuleType::OneToOne => {
+            if matches!(rule.rule_type, NatRuleType::OneToOne) && rule.source.is_none() {
+                return Err("OneToOne NAT requires a source address/CIDR".into());
+            }
+
             let translation = rule
                 .translation
                 .as_ref()
@@ -1304,6 +1423,11 @@ pub fn validate_nat_rule_with_ipv6(rule: &NatRule, ipv6_enabled: bool) -> Result
                 }
             } else {
                 // SNAT and DNAT may have port translation.
+                let has_translation_port =
+                    translation.port.is_some() || translation.port_end.is_some();
+                if has_translation_port && matches!(&rule.protocol, NatProtocol::Any) {
+                    return Err("translation port requires tcp, udp, or tcp_udp protocol".into());
+                }
                 if let Some(port) = translation.port {
                     if port == 0 {
                         return Err("translation port must be non-zero".into());
@@ -1313,19 +1437,22 @@ pub fn validate_nat_rule_with_ipv6(rule: &NatRule, ipv6_enabled: bool) -> Result
                     if port_end == 0 {
                         return Err("translation port_end must be non-zero".into());
                     }
-                    if let Some(port) = translation.port {
-                        if port_end < port {
-                            return Err(format!(
-                                "translation port_end {} must be ≥ port {}",
-                                port_end, port
-                            ));
-                        }
+                    let Some(port) = translation.port else {
+                        return Err("translation port_end requires translation port".into());
+                    };
+                    if port_end < port {
+                        return Err(format!(
+                            "translation port_end {} must be >= port {}",
+                            port_end, port
+                        ));
                     }
                 }
             }
         }
         NatRuleType::Masquerade => {
-            // Masquerade rules do not use a translation target.
+            if rule.translation.is_some() {
+                return Err("Masquerade rules must not specify a translation".into());
+            }
         }
     }
     Ok(())
@@ -1340,6 +1467,7 @@ pub fn validate_nat_config(config: &NatConfig) -> Result<(), String> {
 /// Return `Ok(())` if `config` is a valid [`NatConfig`] for the current IPv6
 /// mode, or `Err` with a descriptive message.
 pub fn validate_nat_config_with_ipv6(config: &NatConfig, ipv6_enabled: bool) -> Result<(), String> {
+    let mut seen_wan_interfaces = BTreeSet::new();
     for iface in &config.wan_interfaces {
         if !is_valid_interface_name(iface) {
             return Err(format!(
@@ -1347,8 +1475,18 @@ pub fn validate_nat_config_with_ipv6(config: &NatConfig, ipv6_enabled: bool) -> 
                 iface
             ));
         }
+        if !seen_wan_interfaces.insert(iface) {
+            return Err(format!(
+                "NAT wan_interfaces contains duplicate interface {:?}",
+                iface
+            ));
+        }
     }
+    let mut seen_rule_ids = BTreeSet::new();
     for rule in &config.rules {
+        if !seen_rule_ids.insert(rule.id) {
+            return Err(format!("duplicate NAT rule id {}", rule.id));
+        }
         if let Err(msg) = validate_nat_rule_with_ipv6(rule, ipv6_enabled) {
             return Err(format!("NAT rule {}: {}", rule.id, msg));
         }
@@ -1792,9 +1930,7 @@ pub fn validate_acme_config(config: &AcmeConfig) -> Result<(), String> {
     for domain in &config.domains {
         if !is_valid_acme_domain(domain, config.challenge_type.clone()) {
             if domain.starts_with("*.") {
-                return Err(
-                    "wildcard domains require challenge_type to be dns01".into(),
-                );
+                return Err("wildcard domains require challenge_type to be dns01".into());
             }
             return Err(format!(
                 "acme domain {:?} is not a valid domain name",

@@ -29,8 +29,9 @@ use uuid::Uuid;
 
 use crate::{
     config::models::{
-        is_valid_duid, is_valid_ipv4_addr, is_valid_ipv4_range, is_valid_ipv6_addr,
-        is_valid_ipv6_cidr, is_valid_mac, Dhcp6Config, Dhcp6Reservation, Dhcp6Scope, DhcpConfig,
+        ipv6_addr_in_cidr, is_valid_duid, is_valid_ipv4_addr, is_valid_ipv4_range,
+        is_valid_ipv6_addr, is_valid_ipv6_cidr, is_valid_mac, normalize_ipv4_cidr,
+        normalize_ipv6_cidr, Dhcp6Config, Dhcp6Reservation, Dhcp6Scope, DhcpConfig,
         DhcpReservation, DhcpScope,
     },
     engine::{dhcp::apply_config as apply_dhcp4_config, dhcp6::apply_config as apply_dhcp6_config},
@@ -170,13 +171,14 @@ fn default_dhcp_cfg() -> DhcpConfig {
 /// Convert the first scope of a DhcpConfig into a flat response.
 fn to_flat_response(cfg: &DhcpConfig) -> DhcpFlatConfigResponse {
     if let Some(scope) = cfg.scopes.first() {
+        let subnet = normalize_ipv4_cidr(&scope.subnet).unwrap_or_else(|| scope.subnet.clone());
         DhcpFlatConfigResponse {
             enabled: cfg.enabled,
             interface: cfg.interface.clone(),
-            subnet: scope.subnet.clone(),
+            subnet: subnet.clone(),
             range_start: scope.pool_start.clone(),
             range_end: scope.pool_end.clone(),
-            subnet_mask: cidr_to_mask(&scope.subnet),
+            subnet_mask: cidr_to_mask(&subnet),
             gateway: scope.gateway.clone().unwrap_or_default(),
             dns_servers: scope.dns_servers.clone(),
             lease_time: scope.lease_seconds,
@@ -203,13 +205,32 @@ fn to_flat_response(cfg: &DhcpConfig) -> DhcpFlatConfigResponse {
 fn derive_subnet_from_addr(addr: &str) -> String {
     let parts: Vec<&str> = addr.split('.').collect();
     if parts.len() == 4 {
-        format!("{}.{}.{}.0/24", parts[0], parts[1], parts[2])
+        normalize_ipv4_cidr(&format!("{}.{}.{}.0/24", parts[0], parts[1], parts[2]))
+            .unwrap_or_else(|| "192.168.1.0/24".to_string())
     } else {
         "192.168.1.0/24".to_string()
     }
 }
 
+fn normalize_requested_subnet(subnet: Option<&str>) -> Result<Option<String>, DhcpError> {
+    let Some(subnet) = subnet.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    normalize_ipv4_cidr(subnet)
+        .map(Some)
+        .ok_or_else(|| DhcpError::ValidationFailed(format!("invalid subnet: {subnet}")))
+}
+
 /// Derive a /24 subnet mask from a CIDR prefix, e.g. `192.168.1.0/24` → `255.255.255.0`.
+fn normalize_dhcp_config_subnets(cfg: &mut DhcpConfig) {
+    for scope in &mut cfg.scopes {
+        if let Some(normalized) = normalize_ipv4_cidr(&scope.subnet) {
+            scope.subnet = normalized;
+        }
+    }
+}
+
 fn cidr_to_mask(cidr: &str) -> String {
     let prefix: u8 = cidr
         .split('/')
@@ -228,6 +249,109 @@ fn cidr_to_mask(cidr: &str) -> String {
         (mask >> 8) & 0xFF,
         mask & 0xFF
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_requested_subnet_accepts_installer_host_cidr() {
+        assert_eq!(
+            normalize_requested_subnet(Some("192.168.50.1/24"))
+                .unwrap()
+                .as_deref(),
+            Some("192.168.50.0/24")
+        );
+    }
+
+    #[test]
+    fn normalize_requested_subnet_accepts_host_without_prefix_as_24() {
+        assert_eq!(
+            normalize_requested_subnet(Some("192.168.50.1"))
+                .unwrap()
+                .as_deref(),
+            Some("192.168.50.0/24")
+        );
+    }
+
+    #[test]
+    fn flat_response_normalizes_stale_host_cidr() {
+        let cfg = stale_host_cidr_config();
+
+        let response = to_flat_response(&cfg);
+        assert_eq!(response.subnet, "192.168.50.0/24");
+        assert_eq!(response.subnet_mask, "255.255.255.0");
+    }
+
+    #[test]
+    fn normalize_dhcp_config_subnets_heals_stale_host_cidr() {
+        let mut cfg = stale_host_cidr_config();
+
+        normalize_dhcp_config_subnets(&mut cfg);
+        assert_eq!(cfg.scopes[0].subnet, "192.168.50.0/24");
+    }
+
+    #[test]
+    fn normalize_requested_subnet_v6_accepts_host_cidr() {
+        assert_eq!(
+            normalize_requested_subnet_v6(Some("fd00:1::1/64"))
+                .unwrap()
+                .as_deref(),
+            Some("fd00:1::/64")
+        );
+    }
+
+    #[test]
+    fn flat_response_v6_normalizes_stale_host_cidr() {
+        let cfg = stale_dhcp6_host_cidr_config();
+
+        let response = to_flat_response_v6(&cfg);
+        assert_eq!(response.subnet, "fd00:1::/64");
+    }
+
+    #[test]
+    fn normalize_dhcp6_config_subnets_heals_stale_host_cidr() {
+        let mut cfg = stale_dhcp6_host_cidr_config();
+
+        normalize_dhcp6_config_subnets(&mut cfg);
+        assert_eq!(cfg.scopes[0].subnet, "fd00:1::/64");
+    }
+
+    fn stale_host_cidr_config() -> DhcpConfig {
+        DhcpConfig {
+            enabled: true,
+            interface: "ens19".into(),
+            scopes: vec![DhcpScope {
+                id: Uuid::new_v4(),
+                subnet: "192.168.50.1/24".into(),
+                pool_start: "192.168.50.100".into(),
+                pool_end: "192.168.50.199".into(),
+                gateway: Some("192.168.50.1".into()),
+                dns_servers: vec![],
+                lease_seconds: 43200,
+                domain_name: None,
+                reservations: vec![],
+            }],
+        }
+    }
+
+    fn stale_dhcp6_host_cidr_config() -> Dhcp6Config {
+        Dhcp6Config {
+            enabled: true,
+            interface: "ens19".into(),
+            scopes: vec![Dhcp6Scope {
+                id: Uuid::new_v4(),
+                subnet: "fd00:1::1/64".into(),
+                pool_start: "fd00:1::100".into(),
+                pool_end: "fd00:1::1ff".into(),
+                dns_servers: vec![],
+                lease_seconds: 43200,
+                domain_name: None,
+                reservations: vec![],
+            }],
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -281,6 +405,7 @@ pub async fn update_config(
     if let Some(v) = req.interface {
         cfg.interface = v;
     }
+    let requested_subnet = normalize_requested_subnet(req.subnet.as_deref())?;
 
     // Ensure at least one scope exists to hold the pool settings.
     if cfg.scopes.is_empty() {
@@ -289,11 +414,8 @@ pub async fn update_config(
         // 2. Derive a /24 from the pool start address if provided.
         // 3. Fall back to a /24 based on the gateway if provided.
         // 4. Last resort: use the gateway/range to derive, or 192.168.1.0/24.
-        let subnet = req
-            .subnet
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .map(String::from)
+        let subnet = requested_subnet
+            .clone()
             .or_else(|| {
                 req.range_start
                     .as_deref()
@@ -323,7 +445,7 @@ pub async fn update_config(
 
     let scope = &mut cfg.scopes[0];
     // Subnet can be updated explicitly; otherwise preserve the existing value.
-    if let Some(v) = req.subnet.filter(|s| !s.is_empty()) {
+    if let Some(v) = requested_subnet {
         scope.subnet = v;
     }
     if let Some(v) = req.range_start {
@@ -393,6 +515,7 @@ pub async fn update_config(
 
     // --- Persist -----------------------------------------------------------
 
+    normalize_dhcp_config_subnets(&mut cfg);
     state
         .config_store
         .save_dhcp_config(cfg.clone())
@@ -514,6 +637,7 @@ pub async fn create_static_lease(
 
     cfg.scopes[0].reservations.push(reservation);
 
+    normalize_dhcp_config_subnets(&mut cfg);
     state
         .config_store
         .save_dhcp_config(cfg.clone())
@@ -565,6 +689,7 @@ pub async fn delete_static_lease(
         )));
     }
 
+    normalize_dhcp_config_subnets(&mut cfg);
     state
         .config_store
         .save_dhcp_config(cfg.clone())
@@ -744,14 +869,12 @@ pub async fn update_interface_dhcp_config(
     if let Some(v) = req.enabled {
         cfg.enabled = v;
     }
+    let requested_subnet = normalize_requested_subnet(req.subnet.as_deref())?;
 
     // Ensure at least one scope exists to hold the pool settings.
     if cfg.scopes.is_empty() {
-        let subnet = req
-            .subnet
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .map(String::from)
+        let subnet = requested_subnet
+            .clone()
             .or_else(|| {
                 req.range_start
                     .as_deref()
@@ -781,7 +904,7 @@ pub async fn update_interface_dhcp_config(
 
     let scope = &mut cfg.scopes[0];
     // Subnet can be updated explicitly; otherwise preserve the existing value.
-    if let Some(v) = req.subnet.filter(|s| !s.is_empty()) {
+    if let Some(v) = requested_subnet {
         scope.subnet = v;
     }
     if let Some(v) = req.range_start {
@@ -851,6 +974,7 @@ pub async fn update_interface_dhcp_config(
 
     // --- Persist -----------------------------------------------------------
 
+    normalize_dhcp_config_subnets(&mut cfg);
     state
         .config_store
         .save_dhcp_config(cfg.clone())
@@ -993,6 +1117,7 @@ pub async fn create_interface_static_lease(
 
     cfg.scopes[0].reservations.push(reservation);
 
+    normalize_dhcp_config_subnets(&mut cfg);
     state
         .config_store
         .save_dhcp_config(cfg.clone())
@@ -1054,6 +1179,7 @@ pub async fn delete_interface_static_lease(
         )));
     }
 
+    normalize_dhcp_config_subnets(&mut cfg);
     state
         .config_store
         .save_dhcp_config(cfg.clone())
@@ -1147,10 +1273,11 @@ fn default_dhcp6_cfg() -> Dhcp6Config {
 
 fn to_flat_response_v6(cfg: &Dhcp6Config) -> Dhcp6FlatConfigResponse {
     if let Some(scope) = cfg.scopes.first() {
+        let subnet = normalize_ipv6_cidr(&scope.subnet).unwrap_or_else(|| scope.subnet.clone());
         Dhcp6FlatConfigResponse {
             enabled: cfg.enabled,
             interface: cfg.interface.clone(),
-            subnet: scope.subnet.clone(),
+            subnet,
             range_start: scope.pool_start.clone(),
             range_end: scope.pool_end.clone(),
             dns_servers: scope.dns_servers.clone(),
@@ -1172,11 +1299,25 @@ fn to_flat_response_v6(cfg: &Dhcp6Config) -> Dhcp6FlatConfigResponse {
 }
 
 fn derive_subnet_from_ipv6_addr(addr: &str) -> String {
-    if let Ok(ip) = addr.parse::<Ipv6Addr>() {
-        let seg = ip.segments();
-        return format!("{:x}:{:x}:{:x}:{:x}::/64", seg[0], seg[1], seg[2], seg[3]);
+    normalize_ipv6_cidr(addr).unwrap_or_else(|| "fd00::/64".to_string())
+}
+
+fn normalize_requested_subnet_v6(subnet: Option<&str>) -> Result<Option<String>, DhcpError> {
+    let Some(subnet) = subnet.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    normalize_ipv6_cidr(subnet)
+        .map(Some)
+        .ok_or_else(|| DhcpError::ValidationFailed(format!("invalid subnet: {subnet}")))
+}
+
+fn normalize_dhcp6_config_subnets(cfg: &mut Dhcp6Config) {
+    for scope in &mut cfg.scopes {
+        if let Some(normalized) = normalize_ipv6_cidr(&scope.subnet) {
+            scope.subnet = normalized;
+        }
     }
-    "fd00::/64".to_string()
 }
 
 fn is_valid_ipv6_range(start: &str, end: &str) -> bool {
@@ -1224,6 +1365,18 @@ fn validate_dhcp6_scope(scope: &Dhcp6Scope) -> Result<(), DhcpError> {
         return Err(DhcpError::ValidationFailed(format!(
             "rangeStart {} must be <= rangeEnd {}",
             scope.pool_start, scope.pool_end
+        )));
+    }
+    if !ipv6_addr_in_cidr(&scope.pool_start, &scope.subnet) {
+        return Err(DhcpError::ValidationFailed(format!(
+            "rangeStart {} is outside subnet {}",
+            scope.pool_start, scope.subnet
+        )));
+    }
+    if !ipv6_addr_in_cidr(&scope.pool_end, &scope.subnet) {
+        return Err(DhcpError::ValidationFailed(format!(
+            "rangeEnd {} is outside subnet {}",
+            scope.pool_end, scope.subnet
         )));
     }
     if scope.lease_seconds == 0 {
@@ -1302,17 +1455,19 @@ fn dhcp6_request_has_scope_values(req: &UpdateDhcp6FlatRequest) -> bool {
             .is_some_and(|s| !s.trim().is_empty())
 }
 
-fn apply_dhcp6_scope_request(cfg: &mut Dhcp6Config, req: UpdateDhcp6FlatRequest) {
+fn apply_dhcp6_scope_request(
+    cfg: &mut Dhcp6Config,
+    req: UpdateDhcp6FlatRequest,
+) -> Result<(), DhcpError> {
+    let requested_subnet = normalize_requested_subnet_v6(req.subnet.as_deref())?;
+
     if cfg.scopes.is_empty() {
         if !cfg.enabled && !dhcp6_request_has_scope_values(&req) {
-            return;
+            return Ok(());
         }
 
-        let subnet = req
-            .subnet
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| s.trim().to_string())
+        let subnet = requested_subnet
+            .clone()
             .or_else(|| {
                 req.range_start
                     .as_deref()
@@ -1334,8 +1489,8 @@ fn apply_dhcp6_scope_request(cfg: &mut Dhcp6Config, req: UpdateDhcp6FlatRequest)
     }
 
     let scope = &mut cfg.scopes[0];
-    if let Some(v) = req.subnet.filter(|s| !s.trim().is_empty()) {
-        scope.subnet = v.trim().to_string();
+    if let Some(v) = requested_subnet {
+        scope.subnet = v;
     }
     if let Some(v) = req.range_start {
         scope.pool_start = v.trim().to_string();
@@ -1361,32 +1516,8 @@ fn apply_dhcp6_scope_request(cfg: &mut Dhcp6Config, req: UpdateDhcp6FlatRequest)
             Some(domain)
         };
     }
-}
 
-fn ipv6_addr_in_cidr(addr: &str, cidr: &str) -> bool {
-    let Some((network, prefix_text)) = cidr.split_once('/') else {
-        return false;
-    };
-    let Ok(addr) = addr.parse::<Ipv6Addr>() else {
-        return false;
-    };
-    let Ok(network) = network.parse::<Ipv6Addr>() else {
-        return false;
-    };
-    let Ok(prefix) = prefix_text.parse::<u32>() else {
-        return false;
-    };
-    if prefix > 128 {
-        return false;
-    }
-
-    let mask = if prefix == 0 {
-        0
-    } else {
-        u128::MAX << (128 - prefix)
-    };
-
-    (u128::from(addr) & mask) == (u128::from(network) & mask)
+    Ok(())
 }
 
 fn dhcp6_static_response(reservation: &Dhcp6Reservation) -> Dhcp6StaticLeaseResponse {
@@ -1543,9 +1674,10 @@ pub async fn update_config_v6(
         cfg.interface = v.trim().to_string();
     }
 
-    apply_dhcp6_scope_request(&mut cfg, req);
+    apply_dhcp6_scope_request(&mut cfg, req)?;
     validate_dhcp6_config_for_apply(&cfg)?;
 
+    normalize_dhcp6_config_subnets(&mut cfg);
     state
         .config_store
         .save_dhcp6_config(cfg.clone())
@@ -1612,9 +1744,10 @@ pub async fn update_interface_dhcp6_config(
         cfg.enabled = v;
     }
 
-    apply_dhcp6_scope_request(&mut cfg, req);
+    apply_dhcp6_scope_request(&mut cfg, req)?;
     validate_dhcp6_config_for_apply(&cfg)?;
 
+    normalize_dhcp6_config_subnets(&mut cfg);
     state
         .config_store
         .save_dhcp6_config(cfg.clone())
@@ -1708,6 +1841,7 @@ pub async fn create_dhcp6_static_lease(
 
     let resp = add_dhcp6_reservation(&mut cfg, req, None)?;
 
+    normalize_dhcp6_config_subnets(&mut cfg);
     state
         .config_store
         .save_dhcp6_config(cfg.clone())
@@ -1743,6 +1877,7 @@ pub async fn create_interface_dhcp6_static_lease(
 
     let resp = add_dhcp6_reservation(&mut cfg, req, Some(&interface_name))?;
 
+    normalize_dhcp6_config_subnets(&mut cfg);
     state
         .config_store
         .save_dhcp6_config(cfg.clone())
@@ -1799,6 +1934,7 @@ pub async fn delete_dhcp6_static_lease(
         )));
     }
 
+    normalize_dhcp6_config_subnets(&mut cfg);
     state
         .config_store
         .save_dhcp6_config(cfg.clone())
@@ -1856,6 +1992,7 @@ pub async fn delete_interface_dhcp6_static_lease(
 
     validate_dhcp6_config_for_apply(&cfg)?;
 
+    normalize_dhcp6_config_subnets(&mut cfg);
     state
         .config_store
         .save_dhcp6_config(cfg.clone())

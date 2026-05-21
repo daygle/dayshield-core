@@ -128,6 +128,19 @@ mod tests {
     }
 
     #[test]
+    fn masquerade_with_translation_rejected() {
+        let rule = NatRule {
+            translation: Some(NatTranslation {
+                address: Some("203.0.113.5".into()),
+                port: None,
+                port_end: None,
+            }),
+            ..base_masquerade_rule()
+        };
+        assert!(validate_nat_rule(&rule).is_err());
+    }
+
+    #[test]
     fn ipv6_source_rejected() {
         let rule = NatRule {
             source: Some("2001:db8::/32".into()),
@@ -212,6 +225,49 @@ mod tests {
         assert!(validate_nat_rule(&rule).is_err());
     }
 
+    #[test]
+    fn translation_port_requires_transport_protocol() {
+        let rule = NatRule {
+            protocol: NatProtocol::Any,
+            destination_port: None,
+            translation: Some(NatTranslation {
+                address: Some("10.0.0.1".into()),
+                port: Some(8443),
+                port_end: None,
+            }),
+            ..base_dnat_rule()
+        };
+        assert!(validate_nat_rule(&rule).is_err());
+    }
+
+    #[test]
+    fn translation_port_end_without_port_rejected() {
+        let rule = NatRule {
+            translation: Some(NatTranslation {
+                address: Some("10.0.0.1".into()),
+                port: None,
+                port_end: Some(9000),
+            }),
+            ..base_dnat_rule()
+        };
+        assert!(validate_nat_rule(&rule).is_err());
+    }
+
+    #[test]
+    fn one_to_one_without_source_rejected() {
+        let rule = NatRule {
+            rule_type: NatRuleType::OneToOne,
+            source: None,
+            translation: Some(NatTranslation {
+                address: Some("203.0.113.5".into()),
+                port: None,
+                port_end: None,
+            }),
+            ..base_masquerade_rule()
+        };
+        assert!(validate_nat_rule(&rule).is_err());
+    }
+
     // -------------------------------------------------------------------
     // validate_nat_config
     // -------------------------------------------------------------------
@@ -226,6 +282,15 @@ mod tests {
     fn invalid_wan_interface_name_rejected() {
         let cfg = NatConfig {
             wan_interfaces: vec!["bad interface!".into()],
+            ..Default::default()
+        };
+        assert!(validate_nat_config(&cfg).is_err());
+    }
+
+    #[test]
+    fn duplicate_wan_interface_rejected() {
+        let cfg = NatConfig {
+            wan_interfaces: vec!["eth0".into(), "eth0".into()],
             ..Default::default()
         };
         assert!(validate_nat_config(&cfg).is_err());
@@ -255,5 +320,21 @@ mod tests {
             nat_reflection: false,
         };
         assert!(validate_nat_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn duplicate_nat_rule_id_rejected() {
+        let id = Uuid::new_v4();
+        let mut first = base_masquerade_rule();
+        first.id = id;
+        let mut second = base_masquerade_rule();
+        second.id = id;
+        let cfg = NatConfig {
+            outbound_mode: OutboundMode::Manual,
+            wan_interfaces: vec![],
+            rules: vec![first, second],
+            nat_reflection: false,
+        };
+        assert!(validate_nat_config(&cfg).is_err());
     }
 }

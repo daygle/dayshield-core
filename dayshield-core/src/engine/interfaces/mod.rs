@@ -237,7 +237,7 @@ pub async fn list_kernel_interfaces() -> Result<Vec<KernelInterface>, InterfaceE
         vec![]
     };
 
-    // Build ifname â†’ addresses map.
+    // Build ifname -> addresses map.
     let mut addr_map: HashMap<String, Vec<String>> = HashMap::new();
     for entry in &addr_entries {
         let cidrs: Vec<String> = entry
@@ -298,7 +298,10 @@ pub async fn list_kernel_interfaces() -> Result<Vec<KernelInterface>, InterfaceE
 ///   to acquire an address from the upstream DHCP server.  Any previously
 ///   running dhclient for the same interface is released first.
 /// - If `config.dhcp4` is `false`, any running dhclient for this interface is
-///   stopped before static addresses are configured via `ip addr add`.
+///   stopped before static addresses are applied idempotently and stale
+///   managed addresses are removed.
+/// - If `config.wan_mode` is PPPoE, stale static addressing is flushed before
+///   `pppd` is started for the interface.
 ///
 /// When `config.enabled` is `false`:
 /// - Releases any active DHCP lease (`dhclient -r`) before bringing the
@@ -391,12 +394,18 @@ pub async fn apply_interface_with_ipv6(
                 stop_dhcp6_client(name).await;
                 stop_dhcp6_pd_client(name).await;
                 set_ipv6_ra_accept(name, false).await?;
+                flush_interface_addresses(name).await;
                 let username = config.pppoe_username.as_deref().unwrap_or("");
                 let password = config.pppoe_password.as_deref().unwrap_or("");
                 let ppp_mtu = config.mtu.unwrap_or(1492).clamp(576, 1492);
                 start_pppoe(name, username, password, ipv6_enabled, ppp_mtu).await?;
             }
             _ => {
+                // If this interface was previously PPPoE-backed, ensure the
+                // old pppd session and peer file do not linger after changing modes.
+                stop_pppoe(name).await;
+                remove_pppoe_config(name).await;
+
                 let ipv6_mode = config.effective_ipv6_mode();
                 let use_dhcp6 = ipv6_enabled && matches!(ipv6_mode, Ipv6Mode::Dhcp6);
                 let use_ra = ipv6_enabled && matches!(ipv6_mode, Ipv6Mode::Slaac);
@@ -454,22 +463,17 @@ pub async fn apply_interface_with_ipv6(
                     }
                 }
 
-                for cidr in &config.addresses {
+                for cidr in desired_static_addresses(config, ipv6_enabled) {
                     if !ipv6_enabled && cidr.contains(':') {
-                        return Err(InterfaceError::InvalidCIDR(cidr.clone()));
-                    }
-                    if cidr.contains(':') && !matches!(ipv6_mode, Ipv6Mode::Static) {
-                        continue;
-                    }
-                    if config.dhcp4 && !cidr.contains(':') {
-                        continue;
+                        return Err(InterfaceError::InvalidCIDR(cidr.to_string()));
                     }
                     if !is_valid_cidr(cidr) {
-                        return Err(InterfaceError::InvalidCIDR(cidr.clone()));
+                        return Err(InterfaceError::InvalidCIDR(cidr.to_string()));
                     }
-                    debug!(name = %name, cidr = %cidr, "interfaces: adding address");
-                    run_ip(&["addr", "add", cidr, "dev", name]).await?;
+                    debug!(name = %name, cidr = %cidr, "interfaces: applying address");
+                    run_ip(&["addr", "replace", cidr, "dev", name]).await?;
                 }
+                remove_stale_static_addresses(config, ipv6_enabled).await;
 
                 // Apply static default gateway if configured.
                 if let Some(gw_ip) = &config.gateway {
@@ -492,11 +496,7 @@ pub async fn apply_interface_with_ipv6(
         }
     } else {
         // Release any active DHCP or PPPoE session before taking the interface down.
-        stop_pppoe(name).await;
-        stop_dhcp_client(name).await;
-        stop_dhcp6_client(name).await;
-        stop_dhcp6_pd_client(name).await;
-        let _ = set_ipv6_ra_accept(name, false).await;
+        teardown_interface_runtime(name).await;
         info!(name = %name, "interfaces: bringing interface down");
         run_ip(&["link", "set", "dev", name, "down"]).await?;
     }
@@ -535,26 +535,16 @@ pub async fn sync_interfaces_with_ipv6(
     for config in configured {
         let kernel_iface = kernel_map.get(config.name.as_str()).copied();
         let ipv6_mode = config.effective_ipv6_mode();
-        let manage_ipv4_static = !config.dhcp4;
-        let manage_ipv6_static = ipv6_enabled && matches!(ipv6_mode, Ipv6Mode::Static);
+        let (manage_ipv4_static, manage_ipv6_static) =
+            managed_static_address_families(config, ipv6_enabled);
+        let needs_pppoe_apply = config.enabled && matches!(config.wan_mode, Some(WanMode::Pppoe));
 
         let current_up = kernel_iface.map(|k| k.state == "UP").unwrap_or(false);
 
         // Only skip apply if both state and addresses already match.
         let already_up = config.enabled == current_up;
         let kernel_addrs: &[String] = kernel_iface.map(|k| k.addresses.as_slice()).unwrap_or(&[]);
-        let desired_addrs = config
-            .addresses
-            .iter()
-            .filter(|addr| {
-                if addr.contains(':') {
-                    manage_ipv6_static
-                } else {
-                    manage_ipv4_static
-                }
-            })
-            .cloned()
-            .collect::<Vec<String>>();
+        let desired_addrs = desired_static_addresses(config, ipv6_enabled);
         let managed_kernel_addrs = kernel_addrs
             .iter()
             .filter(|addr| {
@@ -568,11 +558,13 @@ pub async fn sync_interfaces_with_ipv6(
             .collect::<Vec<String>>();
         let addrs_match = (manage_ipv4_static || manage_ipv6_static)
             && desired_addrs.len() == managed_kernel_addrs.len()
-            && desired_addrs
-                .iter()
-                .all(|a| managed_kernel_addrs.contains(a));
+            && desired_addrs.iter().all(|a| {
+                managed_kernel_addrs
+                    .iter()
+                    .any(|kernel_addr| kernel_addr == a)
+            });
 
-        if !already_up || !addrs_match {
+        if needs_pppoe_apply || !already_up || !addrs_match {
             apply_interface_with_ipv6(config, ipv6_enabled).await?;
         } else if config.enabled {
             // Keep RA policy synchronized even when addresses/state are unchanged.
@@ -592,7 +584,10 @@ pub async fn sync_interfaces_with_ipv6(
                     if !kernel_addr.contains(':') && !manage_ipv4_static {
                         continue;
                     }
-                    if !desired_addrs.contains(kernel_addr) {
+                    if !desired_addrs
+                        .iter()
+                        .any(|desired_addr| *desired_addr == kernel_addr.as_str())
+                    {
                         warn!(
                             name = %config.name,
                             address = %kernel_addr,
@@ -698,6 +693,92 @@ pub async fn refresh_router_advertisements(configured: &[Interface], ipv6_enable
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
+
+fn managed_static_address_families(config: &Interface, ipv6_enabled: bool) -> (bool, bool) {
+    if matches!(config.wan_mode, Some(WanMode::Pppoe)) {
+        return (false, false);
+    }
+
+    let ipv6_mode = config.effective_ipv6_mode();
+    (
+        !config.dhcp4,
+        ipv6_enabled && matches!(ipv6_mode, Ipv6Mode::Static),
+    )
+}
+
+fn desired_static_addresses(config: &Interface, ipv6_enabled: bool) -> Vec<&str> {
+    let (manage_ipv4_static, manage_ipv6_static) =
+        managed_static_address_families(config, ipv6_enabled);
+
+    config
+        .addresses
+        .iter()
+        .filter(|addr| {
+            if addr.contains(':') {
+                manage_ipv6_static
+            } else {
+                manage_ipv4_static
+            }
+        })
+        .map(String::as_str)
+        .collect()
+}
+
+async fn remove_stale_static_addresses(config: &Interface, ipv6_enabled: bool) {
+    let (manage_ipv4_static, manage_ipv6_static) =
+        managed_static_address_families(config, ipv6_enabled);
+    if !config.enabled || (!manage_ipv4_static && !manage_ipv6_static) {
+        return;
+    }
+
+    let desired = desired_static_addresses(config, ipv6_enabled);
+    let kernel = match list_kernel_interfaces().await {
+        Ok(kernel) => kernel,
+        Err(error) => {
+            debug!(
+                name = %config.name,
+                error = %error,
+                "interfaces: could not query kernel addresses for stale cleanup"
+            );
+            return;
+        }
+    };
+
+    let Some(kernel_iface) = kernel.iter().find(|iface| iface.name == config.name) else {
+        return;
+    };
+
+    for kernel_addr in &kernel_iface.addresses {
+        if kernel_addr.contains(':') && !manage_ipv6_static {
+            continue;
+        }
+        if !kernel_addr.contains(':') && !manage_ipv4_static {
+            continue;
+        }
+        if !desired.contains(&kernel_addr.as_str()) {
+            warn!(
+                name = %config.name,
+                address = %kernel_addr,
+                "interfaces: removing stale address"
+            );
+            let _ = run_ip(&["addr", "del", kernel_addr, "dev", &config.name]).await;
+        }
+    }
+}
+
+async fn flush_interface_addresses(name: &str) {
+    let _ = run_ip(&["addr", "flush", "dev", name, "scope", "global"]).await;
+    let _ = run_ip(&["-6", "addr", "flush", "dev", name, "scope", "global"]).await;
+}
+
+pub(crate) async fn teardown_interface_runtime(name: &str) {
+    stop_pppoe(name).await;
+    remove_pppoe_config(name).await;
+    stop_dhcp_client(name).await;
+    stop_dhcp6_client(name).await;
+    stop_dhcp6_pd_client(name).await;
+    let _ = set_ipv6_ra_accept(name, false).await;
+}
 
 /// Start `dhclient` for `name` to acquire an IPv4 address via DHCP.
 ///
@@ -971,8 +1052,6 @@ async fn start_pppoe(
     let peer_name = format!("wan-{wan_iface}");
     let peer_path = format!("/etc/ppp/peers/{peer_name}");
     let pid_file = format!("/run/ppp-{peer_name}.pid");
-    let secrets_line = format!("\"{}\" * \"{}\" *\n", escaped_username, escaped_password);
-
     // Ensure /etc/ppp exists
     fs::create_dir_all("/etc/ppp/peers")
         .await
@@ -999,17 +1078,9 @@ hide-password\npersist\nmaxfail 0\nholdoff 5\nmtu {ppp_mtu}\nmru {ppp_mtu}\n{ipv
             .map_err(|e| InterfaceError::ApplyFailed(format!("pppoe: chmod peer file: {e}")))?;
     }
 
-    // Write secrets (600 permissions)
+    // Upsert secrets without discarding unrelated PPP credentials.
     for path in ["/etc/ppp/chap-secrets", "/etc/ppp/pap-secrets"] {
-        fs::write(path, &secrets_line)
-            .await
-            .map_err(|e| InterfaceError::ApplyFailed(format!("pppoe: write {path}: {e}")))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| InterfaceError::ApplyFailed(format!("pppoe: chmod {path}: {e}")))?;
-        }
+        upsert_pppoe_secret(path, &peer_name, &escaped_username, &escaped_password).await?;
     }
 
     // Stop any existing pppd for this WAN first
@@ -1038,10 +1109,138 @@ async fn stop_pppoe(wan_iface: &str) {
     }
 
     // Best-effort fallback for sessions started before pidfile support.
+    let escaped_peer_name = escape_posix_ere(&peer_name);
     let _ = Command::new("pkill")
-        .args(["-f", &format!("pppd call {peer_name}")])
+        .args([
+            "-f",
+            &format!("pppd[[:space:]]+call[[:space:]]+{escaped_peer_name}"),
+        ])
         .output()
         .await;
+}
+
+async fn remove_pppoe_config(wan_iface: &str) {
+    let peer_name = format!("wan-{wan_iface}");
+    let peer_path = format!("/etc/ppp/peers/{peer_name}");
+
+    let _ = tokio::fs::remove_file(&peer_path).await;
+    for path in ["/etc/ppp/chap-secrets", "/etc/ppp/pap-secrets"] {
+        if let Err(error) = remove_pppoe_secret(path, &peer_name).await {
+            debug!(path, peer_name = %peer_name, error = %error, "interfaces: could not remove PPPoE secret block");
+        }
+    }
+}
+
+async fn upsert_pppoe_secret(
+    path: &str,
+    peer_name: &str,
+    escaped_username: &str,
+    escaped_password: &str,
+) -> Result<(), InterfaceError> {
+    let existing = tokio::fs::read_to_string(path).await.unwrap_or_default();
+    let retained = remove_pppoe_secret_block(&existing, peer_name);
+
+    let mut updated = String::new();
+    updated.push_str(&format!("# dayshield:begin {peer_name}\n"));
+    updated.push_str(&format!(
+        "\"{escaped_username}\" * \"{escaped_password}\" *\n"
+    ));
+    updated.push_str(&format!("# dayshield:end {peer_name}\n"));
+    if !retained.is_empty() {
+        updated.push_str(retained.trim_start_matches('\n'));
+        if !updated.ends_with('\n') {
+            updated.push('\n');
+        }
+    }
+
+    tokio::fs::write(path, updated)
+        .await
+        .map_err(|e| InterfaceError::ApplyFailed(format!("pppoe: write {path}: {e}")))?;
+    set_secret_file_permissions(path)
+}
+
+async fn remove_pppoe_secret(path: &str, peer_name: &str) -> Result<(), InterfaceError> {
+    let existing = match tokio::fs::read_to_string(path).await {
+        Ok(existing) => existing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(InterfaceError::ApplyFailed(format!(
+                "pppoe: read {path}: {error}"
+            )))
+        }
+    };
+    let updated = remove_pppoe_secret_block(&existing, peer_name);
+    tokio::fs::write(path, updated)
+        .await
+        .map_err(|e| InterfaceError::ApplyFailed(format!("pppoe: write {path}: {e}")))?;
+    set_secret_file_permissions(path)
+}
+
+fn remove_pppoe_secret_block(existing: &str, peer_name: &str) -> String {
+    let begin = format!("# dayshield:begin {peer_name}");
+    let end = format!("# dayshield:end {peer_name}");
+    let mut filtered = Vec::new();
+    let mut skipping = false;
+
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if trimmed == begin {
+            skipping = true;
+            continue;
+        }
+        if skipping {
+            if trimmed == end {
+                skipping = false;
+            }
+            continue;
+        }
+        filtered.push(line);
+    }
+
+    let mut result = filtered.join("\n");
+    if existing.ends_with('\n') && !result.is_empty() {
+        result.push('\n');
+    }
+    result
+}
+
+#[cfg(test)]
+fn ppp_secret_line_matches_username(line: &str, escaped_username: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return false;
+    }
+
+    trimmed.starts_with(&format!("\"{escaped_username}\""))
+}
+
+fn set_secret_file_permissions(path: &str) -> Result<(), InterfaceError> {
+    #[cfg(not(unix))]
+    let _ = path;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| InterfaceError::ApplyFailed(format!("pppoe: chmod {path}: {e}")))?;
+    }
+    Ok(())
+}
+
+fn escape_posix_ere(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|ch| {
+            if matches!(
+                ch,
+                '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '\\'
+            ) {
+                vec!['\\', ch]
+            } else {
+                vec![ch]
+            }
+        })
+        .collect()
 }
 
 /// Run `ip <args>` and return an error if the command exits non-zero.
@@ -1142,5 +1341,74 @@ mod tests {
         let result = apply_interface(&config).await;
         // May succeed (unlikely) or fail; either way it must not panic.
         let _ = result;
+    }
+
+    #[test]
+    fn desired_static_addresses_respects_dynamic_modes() {
+        let mut dhcp = iface("eth0", vec!["192.0.2.2/24", "2001:db8::2/64"], true);
+        dhcp.dhcp4 = true;
+        assert_eq!(
+            desired_static_addresses(&dhcp, true),
+            vec!["2001:db8::2/64"]
+        );
+
+        let mut pppoe = iface("eth1", vec!["192.0.2.3/24", "2001:db8::3/64"], true);
+        pppoe.wan_mode = Some(WanMode::Pppoe);
+        assert!(desired_static_addresses(&pppoe, true).is_empty());
+    }
+
+    #[test]
+    fn pppoe_secret_block_removal_preserves_unmanaged_lines() {
+        let existing = concat!(
+            "\"other\" * \"keep\" *\n",
+            "# dayshield:begin wan-eth0\n",
+            "\"user\" * \"secret\" *\n",
+            "# dayshield:end wan-eth0\n",
+            "\"after\" * \"keep\" *\n",
+        );
+
+        let updated = remove_pppoe_secret_block(existing, "wan-eth0");
+        assert_eq!(updated, "\"other\" * \"keep\" *\n\"after\" * \"keep\" *\n");
+    }
+
+    #[test]
+    fn pppoe_secret_username_match_ignores_comments() {
+        assert!(ppp_secret_line_matches_username(
+            "  \"user@example\" * \"secret\" *",
+            "user@example"
+        ));
+        assert!(!ppp_secret_line_matches_username(
+            "# \"user@example\" * \"secret\" *",
+            "user@example"
+        ));
+        assert!(!ppp_secret_line_matches_username(
+            "\"other\" * \"secret\" *",
+            "user@example"
+        ));
+    }
+
+    #[test]
+    fn escape_posix_ere_escapes_regex_metacharacters() {
+        assert_eq!(escape_posix_ere("wan-eth0.100+"), "wan-eth0\\.100\\+");
+    }
+
+    #[tokio::test]
+    async fn upsert_pppoe_secret_preserves_unmanaged_entries() {
+        let path =
+            std::env::temp_dir().join(format!("dayshield-pppoe-secret-{}", uuid::Uuid::new_v4()));
+        tokio::fs::write(&path, "\"user\" * \"old\" *\n\"other\" * \"keep\" *\n")
+            .await
+            .unwrap();
+
+        upsert_pppoe_secret(path.to_str().unwrap(), "wan-eth0", "user", "new")
+            .await
+            .unwrap();
+        let updated = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(updated.starts_with("# dayshield:begin wan-eth0\n"));
+        assert!(updated.contains("\"user\" * \"old\" *"));
+        assert!(updated.contains("\"other\" * \"keep\" *"));
+        assert!(updated.contains("\"user\" * \"new\" *"));
+
+        let _ = tokio::fs::remove_file(path).await;
     }
 }

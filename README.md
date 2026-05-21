@@ -63,10 +63,6 @@ Run the crate test suite:
 cargo test -p dayshield-core
 ```
 
-## Release model
-
-`dayshield-core` is released as the standalone backend artifact for the DayShield appliance. Release automation is managed via GitHub Actions and produces versioned core packages consumed by appliance builds.
-
 ## Notes
 
 - This repo focuses on core service behavior and API/runtime integration.

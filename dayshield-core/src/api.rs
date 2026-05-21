@@ -162,6 +162,7 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `DELETE /nat/rules/{id}`                              - delete a NAT rule
 /// - `GET  /admin/security`                                - get admin security settings
 /// - `PUT  /admin/security`                                - update admin security settings
+/// - `GET  /dashboard/cards`                               - canonical dashboard card set
 /// - `GET  /dashboard/system`                              - host resource usage summary
 /// - `GET  /dashboard/network`                             - WAN/LAN network overview
 /// - `GET  /dashboard/security`                            - firewall, Suricata, CrowdSec summary
@@ -200,6 +201,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(schedules::run_schedule_job),
         )
         // Dashboard
+        .route("/dashboard/cards", get(dashboard::get_cards))
         .route("/dashboard/system", get(dashboard::get_system_status))
         .route("/dashboard/network", get(dashboard::get_network_status))
         .route("/dashboard/security", get(dashboard::get_security_status))

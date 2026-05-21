@@ -19,7 +19,8 @@ use tokio::process::Command;
 use tracing::{info, warn};
 
 use crate::config::models::{
-    AcmeChallengeType, AcmeConfig, AcmeProvider, DnsConfig, DnsLocalRecord, DotConfig,
+    AcmeChallengeType, AcmeConfig, AcmeDnsProvider, AcmeProvider, DnsConfig, DnsLocalRecord,
+    DotConfig,
 };
 
 /// Path where Unbound's configuration file is written.
@@ -266,6 +267,9 @@ fn write_dot_tls_files(dot: &DotConfig) -> Result<()> {
             domains: vec![acme_domain.clone()],
             challenge_type: AcmeChallengeType::Http01,
             renew_interval_hours: 24,
+            dns_provider: AcmeDnsProvider::Manual,
+            cloudflare_zone_id: None,
+            cloudflare_api_token: None,
             provider: AcmeProvider::Custom,
             cert_storage_path: storage_path.clone(),
         };

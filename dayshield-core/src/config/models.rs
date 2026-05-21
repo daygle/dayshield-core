@@ -1855,6 +1855,15 @@ pub enum AcmeChallengeType {
     Dns01,
 }
 
+/// DNS provider used to automate DNS-01 ACME TXT records.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AcmeDnsProvider {
+    #[default]
+    Manual,
+    Cloudflare,
+}
+
 /// Configuration for automatic TLS certificate management via ACME.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcmeConfig {
@@ -1873,6 +1882,15 @@ pub struct AcmeConfig {
     /// How often (in hours) the renewal scheduler checks for expiring certificates.
     #[serde(default = "default_acme_renew_interval_hours")]
     pub renew_interval_hours: u64,
+    /// Provider used for DNS-01 record automation.
+    #[serde(default)]
+    pub dns_provider: AcmeDnsProvider,
+    /// Cloudflare zone ID for DNS-01 TXT record automation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloudflare_zone_id: Option<String>,
+    /// Cloudflare API token for DNS-01 TXT record automation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloudflare_api_token: Option<String>,
     /// ACME provider hint (retained for backward compatibility).
     #[serde(default)]
     pub provider: AcmeProvider,
@@ -1943,6 +1961,18 @@ pub fn validate_acme_config(config: &AcmeConfig) -> Result<(), String> {
             "acme directory_url {:?} is not a valid HTTP/HTTPS URL",
             config.directory_url
         ));
+    }
+    if matches!(config.challenge_type, AcmeChallengeType::Dns01)
+        && matches!(config.dns_provider, AcmeDnsProvider::Cloudflare)
+    {
+        let zone_id = config.cloudflare_zone_id.as_deref().unwrap_or("").trim();
+        let api_token = config.cloudflare_api_token.as_deref().unwrap_or("").trim();
+        if zone_id.is_empty() {
+            return Err("cloudflare zone ID is required for DNS-01 Cloudflare automation".into());
+        }
+        if api_token.is_empty() {
+            return Err("cloudflare API token is required for DNS-01 Cloudflare automation".into());
+        }
     }
     Ok(())
 }

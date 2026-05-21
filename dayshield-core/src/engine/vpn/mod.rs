@@ -410,6 +410,7 @@ mod tests {
             public_key: dummy_key(1),
             listen_port: 51820,
             addresses: vec!["10.0.0.1/24".into()],
+            mtu: None,
             peers: vec![],
             enabled: true,
         }

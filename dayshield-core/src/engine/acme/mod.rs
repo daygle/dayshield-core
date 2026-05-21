@@ -49,7 +49,7 @@ use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-use crate::config::models::{AcmeChallengeType, AcmeConfig};
+use crate::config::models::{AcmeChallengeType, AcmeConfig, AcmeDnsProvider};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -282,7 +282,7 @@ impl AcmeEngine {
                     );
                 }
                 AcmeChallengeType::Dns01 => {
-                    let challenge = auth.challenge(ChallengeType::Dns01).ok_or_else(|| {
+                    let mut challenge = auth.challenge(ChallengeType::Dns01).ok_or_else(|| {
                         AcmeError::Other(format!(
                             "no DNS-01 challenge available for domain {domain}"
                         ))
@@ -291,21 +291,37 @@ impl AcmeEngine {
                     let key_auth = challenge.key_authorization();
                     let dns_value = key_auth.dns_value();
 
-                    warn!(
-                        domain = %domain,
-                        txt_name = format!("_acme-challenge.{domain}"),
-                        txt_value = %dns_value,
-                        "acme: DNS-01 requires manual TXT record creation"
-                    );
-
                     if let Some(handle) = &server_handle {
                         handle.abort();
                     }
 
-                    return Err(AcmeError::Dns01ManualRequired {
-                        domain,
-                        value: dns_value,
-                    });
+                    match self.config.dns_provider {
+                        AcmeDnsProvider::Manual => {
+                            warn!(
+                                domain = %domain,
+                                txt_name = format!("_acme-challenge.{domain}"),
+                                txt_value = %dns_value,
+                                "acme: DNS-01 requires manual TXT record creation"
+                            );
+                            return Err(AcmeError::Dns01ManualRequired {
+                                domain,
+                                value: dns_value,
+                            });
+                        }
+                        AcmeDnsProvider::Cloudflare => {
+                            self.perform_cloudflare_dns01(&domain, &dns_value)
+                                .await
+                                .map_err(AcmeError::Other)?;
+
+                            challenge.set_ready().await.map_err(AcmeError::Protocol)?;
+                            info!(
+                                domain = %domain,
+                                txt_name = format!("_acme-challenge.{domain}"),
+                                txt_value = %dns_value,
+                                "acme: DNS-01 challenge prepared via Cloudflare"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -518,6 +534,208 @@ async fn start_http01_server(
     Ok(handle)
 }
 
+impl AcmeEngine {
+    async fn perform_cloudflare_dns01(&self, domain: &str, dns_value: &str) -> Result<(), String> {
+        let zone_id = self
+            .config
+            .cloudflare_zone_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| "cloudflare zone ID is not configured".to_string())?;
+        let token = self
+            .config
+            .cloudflare_api_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| "cloudflare API token is not configured".to_string())?;
+
+        let record_name = format!("_acme-challenge.{}", domain);
+        let client = reqwest::Client::new();
+
+        let record_id = self
+            .find_cloudflare_txt_record(&client, zone_id, token, &record_name)
+            .await
+            .map_err(|e| format!("cloudflare DNS lookup failed: {e}"))?;
+
+        let action = if let Some(existing_id) = record_id {
+            self.update_cloudflare_txt_record(
+                &client,
+                zone_id,
+                token,
+                &existing_id,
+                &record_name,
+                dns_value,
+            )
+                .await
+                .map_err(|e| format!("cloudflare DNS update failed: {e}"))?;
+            "updated"
+        } else {
+            self.create_cloudflare_txt_record(&client, zone_id, token, &record_name, dns_value)
+                .await
+                .map_err(|e| format!("cloudflare DNS creation failed: {e}"))?;
+            "created"
+        };
+
+        info!(
+            domain = %domain,
+            record = %record_name,
+            action,
+            "acme: Cloudflare DNS-01 TXT record provisioned"
+        );
+
+        // Give DNS some time to propagate before the ACME server checks it.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        Ok(())
+    }
+
+    async fn find_cloudflare_txt_record(
+        &self,
+        client: &reqwest::Client,
+        zone_id: &str,
+        token: &str,
+        record_name: &str,
+    ) -> Result<Option<String>, String> {
+        let list_url = format!(
+            "https://api.cloudflare.com/client/v4/zones/{}/dns_records",
+            zone_id
+        );
+        let mut url = reqwest::Url::parse(&list_url).map_err(|err| err.to_string())?;
+        url.query_pairs_mut()
+            .append_pair("type", "TXT")
+            .append_pair("name", record_name)
+            .append_pair("per_page", "1");
+
+        let response = client
+            .get(url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .send()
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!("HTTP {}: {}", status.as_u16(), body));
+        }
+
+        let payload: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| err.to_string())?;
+        let success = payload.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !success {
+            return Err(format!("cloudflare lookup rejected: {}", payload));
+        }
+
+        let existing = payload
+            .get("result")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|item| item.get("id"))
+            .and_then(|id| id.as_str())
+            .map(|s| s.to_string());
+
+        Ok(existing)
+    }
+
+    async fn create_cloudflare_txt_record(
+        &self,
+        client: &reqwest::Client,
+        zone_id: &str,
+        token: &str,
+        record_name: &str,
+        value: &str,
+    ) -> Result<(), String> {
+        let url = format!(
+            "https://api.cloudflare.com/client/v4/zones/{}/dns_records",
+            zone_id
+        );
+        let payload = serde_json::json!({
+            "type": "TXT",
+            "name": record_name,
+            "content": value,
+            "ttl": 120,
+        });
+
+        let response = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!("HTTP {}: {}", status.as_u16(), body));
+        }
+
+        let payload: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| err.to_string())?;
+        let success = payload.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !success {
+            return Err(format!("cloudflare create rejected: {}", payload));
+        }
+
+        Ok(())
+    }
+
+    async fn update_cloudflare_txt_record(
+        &self,
+        client: &reqwest::Client,
+        zone_id: &str,
+        token: &str,
+        record_id: &str,
+        record_name: &str,
+        value: &str,
+    ) -> Result<(), String> {
+        let url = format!(
+            "https://api.cloudflare.com/client/v4/zones/{}/dns_records/{}",
+            zone_id, record_id
+        );
+        let payload = serde_json::json!({
+            "type": "TXT",
+            "name": record_name,
+            "content": value,
+            "ttl": 120,
+        });
+
+        let response = client
+            .put(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!("HTTP {}: {}", status.as_u16(), body));
+        }
+
+        let payload: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| err.to_string())?;
+        let success = payload.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !success {
+            return Err(format!("cloudflare update rejected: {}", payload));
+        }
+
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
@@ -525,7 +743,7 @@ async fn start_http01_server(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::models::{AcmeChallengeType, AcmeProvider};
+    use crate::config::models::{AcmeChallengeType, AcmeProvider, AcmeDnsProvider};
 
     fn test_config() -> AcmeConfig {
         AcmeConfig {
@@ -535,6 +753,9 @@ mod tests {
             domains: vec!["example.com".into()],
             challenge_type: AcmeChallengeType::Http01,
             renew_interval_hours: 24,
+            dns_provider: AcmeDnsProvider::Manual,
+            cloudflare_zone_id: None,
+            cloudflare_api_token: None,
             provider: AcmeProvider::LetsEncrypt,
             cert_storage_path: "/tmp/acme-test".into(),
         }

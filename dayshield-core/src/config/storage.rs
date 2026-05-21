@@ -2852,6 +2852,9 @@ mod tests {
             domains: vec!["example.com".into()],
             challenge_type: AcmeChallengeType::Http01,
             renew_interval_hours: 24,
+            dns_provider: crate::config::models::AcmeDnsProvider::Manual,
+            cloudflare_zone_id: None,
+            cloudflare_api_token: None,
             provider: AcmeProvider::LetsEncrypt,
             cert_storage_path: "/tmp/certs".into(),
         }
@@ -2985,6 +2988,9 @@ mod tests {
             domains: vec![],
             challenge_type: crate::config::models::AcmeChallengeType::Http01,
             renew_interval_hours: 0,
+            dns_provider: crate::config::models::AcmeDnsProvider::Manual,
+            cloudflare_zone_id: None,
+            cloudflare_api_token: None,
             provider: crate::config::models::AcmeProvider::Custom,
             cert_storage_path: "/tmp".into(),
         });

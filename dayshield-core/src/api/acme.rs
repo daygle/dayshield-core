@@ -28,7 +28,9 @@ use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use tracing::{info, warn};
 
 use crate::{
-    config::models::{validate_acme_config, AcmeChallengeType, AcmeConfig, AcmeProvider},
+    config::models::{
+        validate_acme_config, AcmeChallengeType, AcmeConfig, AcmeDnsProvider, AcmeProvider,
+    },
     engine::acme::AcmeEngine,
     state::AppState,
 };
@@ -81,6 +83,9 @@ pub struct UpdateAcmeConfigRequest {
     pub email: String,
     pub domains: Vec<String>,
     pub challenge_type: AcmeChallengeType,
+    pub dns_provider: Option<AcmeDnsProvider>,
+    pub cloudflare_zone_id: Option<String>,
+    pub cloudflare_api_token: Option<String>,
     pub renew_interval_hours: u64,
     pub cert_storage_path: String,
 }
@@ -118,6 +123,9 @@ pub async fn get_config(
             domains: vec![],
             challenge_type: AcmeChallengeType::Http01,
             renew_interval_hours: 24,
+            dns_provider: AcmeDnsProvider::Manual,
+            cloudflare_zone_id: None,
+            cloudflare_api_token: None,
             provider: AcmeProvider::LetsEncrypt,
             cert_storage_path: "/etc/dayshield/certs".into(),
         });
@@ -141,6 +149,9 @@ pub async fn update_config(
         email: req.email,
         domains: req.domains,
         challenge_type: req.challenge_type,
+        dns_provider: req.dns_provider.unwrap_or_default(),
+        cloudflare_zone_id: req.cloudflare_zone_id,
+        cloudflare_api_token: req.cloudflare_api_token,
         renew_interval_hours: req.renew_interval_hours,
         provider: AcmeProvider::Custom,
         cert_storage_path: req.cert_storage_path,

@@ -39,7 +39,7 @@ mod state;
 mod update;
 mod utils;
 
-use config::models::{Dhcp6Config, DhcpConfig};
+use config::models::{Dhcp6Config, DhcpConfig, SystemSettings};
 use state::AppState;
 
 #[tokio::main]
@@ -158,8 +158,9 @@ async fn main() -> anyhow::Result<()> {
     // Build the Axum router.
     let app: Router = api::router(app_state);
 
-    // Bind and serve.
-    let addr = resolve_bind_addr(ipv6_enabled);
+    // Determine bind address from environment and persisted system settings.
+    let system_settings = app_state.config_store.load_system_settings().unwrap_or_default();
+    let addr = resolve_bind_addr(ipv6_enabled, &system_settings);
     let listener = TcpListener::bind(&addr).await?;
     info!("Listening on http://{}", addr);
 
@@ -301,7 +302,7 @@ fn default_bind_addr(ipv6_enabled: bool) -> &'static str {
     }
 }
 
-fn resolve_bind_addr(ipv6_enabled: bool) -> String {
+fn resolve_bind_addr(ipv6_enabled: bool, settings: &SystemSettings) -> String {
     if let Ok(addr) = env::var("DAYSHIELD_BIND_ADDR") {
         return addr;
     }
@@ -318,7 +319,11 @@ fn resolve_bind_addr(ipv6_enabled: bool) -> String {
         }
     }
 
-    default_bind_addr(ipv6_enabled).to_string()
+    if ipv6_enabled {
+        format!("[::]:{}", settings.web_port)
+    } else {
+        format!("0.0.0.0:{}", settings.web_port)
+    }
 }
 
 async fn reconcile_dhcp_runtime(config_store: &config::ConfigStore) {

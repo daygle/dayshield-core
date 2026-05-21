@@ -2442,7 +2442,7 @@ fn default_ssh_port() -> u16 {
     22
 }
 fn default_web_port() -> u16 {
-    443
+    8443
 }
 
 impl Default for SystemSettings {

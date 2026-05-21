@@ -147,11 +147,20 @@ pub async fn update_config(
         refresh_router_advertisements(&full_cfg.interfaces, settings.ipv6_enabled).await;
     }
 
+    if previous.web_port != settings.web_port {
+        warn!(
+            previous_web_port = previous.web_port,
+            new_web_port = settings.web_port,
+            "system: web port changed; restart required to apply"
+        );
+    }
+
     info!(
         hostname = %settings.hostname,
         timezone = %settings.timezone,
         ssh_enabled = settings.ssh_enabled,
         ipv6_enabled = settings.ipv6_enabled,
+        web_port = settings.web_port,
         "system: settings updated via API"
     );
 

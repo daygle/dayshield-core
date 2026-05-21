@@ -50,11 +50,6 @@ Default listen address:
 
 - `0.0.0.0:8443`
 
-Override the address with environment variables:
-
-- `DAYSHIELD_BIND_ADDR` — full listen address, e.g. `127.0.0.1:8443`
-- `DAYSHIELD_PORT` — bind port on `0.0.0.0`, e.g. `8443`
-
 ## Test
 
 Run the crate test suite:

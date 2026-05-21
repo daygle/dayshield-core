@@ -14,11 +14,12 @@
 //! - `POST /system/updates/validate` - validate applied update state
 //! - `POST /system/updates/appliance-rebuild-complete` - clear pending appliance rebuild status
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, fs, path::Path, sync::Arc};
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tracing::{info, warn};
 
 use crate::{
@@ -43,6 +44,10 @@ pub enum SystemApiError {
     #[error("command error: {0}")]
     CommandError(String),
 }
+
+const SSHD_CONFIG_PATH: &str = "/etc/ssh/sshd_config";
+const SSH_ROOT_DIR: &str = "/root/.ssh";
+const SSH_AUTHORIZED_KEYS_PATH: &str = "/root/.ssh/authorized_keys";
 
 impl IntoResponse for SystemApiError {
     fn into_response(self) -> axum::response::Response {
@@ -108,6 +113,7 @@ pub async fn update_config(
     State(state): State<Arc<AppState>>,
     Json(settings): Json<SystemSettings>,
 ) -> Result<impl IntoResponse, SystemApiError> {
+    validate_system_settings(&state, &settings)?;
     let previous = state
         .config_store
         .load_system_settings()
@@ -117,6 +123,8 @@ pub async fn update_config(
         .config_store
         .save_system_settings(settings.clone())
         .map_err(SystemApiError::StorageError)?;
+
+    apply_ssh_settings(&state, &settings).await?;
 
     if previous.ipv6_enabled != settings.ipv6_enabled {
         apply_ipv6_setting(settings.ipv6_enabled)
@@ -165,6 +173,213 @@ pub async fn update_config(
     );
 
     Ok(Json(settings))
+}
+
+fn validate_system_settings(state: &AppState, settings: &SystemSettings) -> Result<(), SystemApiError> {
+    if settings.hostname.trim().is_empty() {
+        return Err(SystemApiError::CommandError("hostname must not be empty".into()));
+    }
+    if settings.ssh_port == 0 {
+        return Err(SystemApiError::CommandError("ssh_port must be between 1 and 65535".into()));
+    }
+    if settings.web_port == 0 {
+        return Err(SystemApiError::CommandError("web_port must be between 1 and 65535".into()));
+    }
+    if settings.ssh_port == settings.web_port {
+        return Err(SystemApiError::CommandError(
+            "ssh_port and web_port must be different".into(),
+        ));
+    }
+
+    let cfg = state.config_store.load().map_err(SystemApiError::StorageError)?;
+    let known_interfaces = cfg
+        .interfaces
+        .iter()
+        .filter(|iface| iface.enabled)
+        .map(|iface| iface.name.as_str())
+        .collect::<BTreeSet<_>>();
+    for iface in &settings.ssh_listen_interfaces {
+        if iface.trim().is_empty() {
+            return Err(SystemApiError::CommandError(
+                "ssh_listen_interfaces cannot contain empty interface names".into(),
+            ));
+        }
+        if !known_interfaces.contains(iface.as_str()) {
+            return Err(SystemApiError::CommandError(format!(
+                "unknown SSH listen interface: {iface}"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+async fn apply_ssh_settings(
+    state: &AppState,
+    settings: &SystemSettings,
+) -> Result<(), SystemApiError> {
+    let full_cfg = state.config_store.load().map_err(SystemApiError::StorageError)?;
+    let listen_addresses = resolve_ssh_listen_addresses(&settings.ssh_listen_interfaces, &full_cfg.interfaces).await;
+    render_and_write_ssh_config(settings, &listen_addresses)?;
+    write_authorized_keys(&settings.ssh_authorized_keys)?;
+
+    if settings.ssh_enabled {
+        run_systemctl(["enable", "--now", "ssh"]).await?;
+        run_systemctl(["reload-or-restart", "ssh"]).await?;
+    } else {
+        run_systemctl(["disable", "--now", "ssh"]).await?;
+    }
+
+    Ok(())
+}
+
+fn render_and_write_ssh_config(
+    settings: &SystemSettings,
+    listen_addresses: &[String],
+) -> Result<(), SystemApiError> {
+    let mut rendered = String::new();
+    rendered.push_str("# DayShield - managed sshd_config\n");
+    rendered.push_str(&format!("Port {}\n", settings.ssh_port));
+    rendered.push_str("AddressFamily any\n");
+    for addr in listen_addresses {
+        rendered.push_str(&format!("ListenAddress {}\n", addr));
+    }
+    rendered.push_str("\n# Authentication\n");
+    rendered.push_str(&format!(
+        "PermitRootLogin {}\n",
+        if settings.ssh_permit_root_login { "yes" } else { "no" }
+    ));
+    rendered.push_str("PubkeyAuthentication yes\n");
+    rendered.push_str("AuthorizedKeysFile .ssh/authorized_keys\n");
+    rendered.push_str(&format!(
+        "PasswordAuthentication {}\n",
+        if settings.ssh_password_authentication { "yes" } else { "no" }
+    ));
+    rendered.push_str("PermitEmptyPasswords no\n");
+    rendered.push_str("ChallengeResponseAuthentication no\n");
+    rendered.push_str("KbdInteractiveAuthentication no\n");
+    rendered.push_str("UsePAM yes\n");
+    rendered.push_str("UseDNS no\n");
+    rendered.push_str("PermitUserEnvironment no\n");
+    rendered.push_str("LogLevel VERBOSE\n\n");
+    rendered.push_str("# Forwarding\n");
+    rendered.push_str("AllowAgentForwarding no\n");
+    rendered.push_str("AllowTcpForwarding no\n");
+    rendered.push_str("GatewayPorts no\n");
+    rendered.push_str("X11Forwarding no\n");
+    rendered.push_str("PermitTunnel no\n\n");
+    rendered.push_str("# Session hardening\n");
+    rendered.push_str("LoginGraceTime 30\n");
+    rendered.push_str("MaxAuthTries 3\n");
+    rendered.push_str("MaxStartups 10:30:60\n");
+    rendered.push_str("MaxSessions 5\n");
+    rendered.push_str("ClientAliveInterval 300\n");
+    rendered.push_str("ClientAliveCountMax 2\n\n");
+    rendered.push_str("Subsystem sftp /usr/lib/openssh/sftp-server\n");
+
+    fs::write(SSHD_CONFIG_PATH, rendered).map_err(|err| {
+        SystemApiError::CommandError(format!("failed to write sshd config: {err}"))
+    })
+}
+
+fn write_authorized_keys(keys: &[String]) -> Result<(), SystemApiError> {
+    fs::create_dir_all(SSH_ROOT_DIR).map_err(|err| {
+        SystemApiError::CommandError(format!("failed to create SSH directory: {err}"))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(SSH_ROOT_DIR, fs::Permissions::from_mode(0o700));
+    }
+
+    let contents = if keys.is_empty() {
+        String::new()
+    } else {
+        let mut normalized = keys
+            .iter()
+            .map(|key| key.trim())
+            .filter(|key| !key.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        normalized.push('\n');
+        normalized
+    };
+
+    fs::write(SSH_AUTHORIZED_KEYS_PATH, contents).map_err(|err| {
+        SystemApiError::CommandError(format!("failed to write authorized_keys: {err}"))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(SSH_AUTHORIZED_KEYS_PATH, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+async fn resolve_ssh_listen_addresses(selected_interfaces: &[String], interfaces: &[crate::config::models::Interface]) -> Vec<String> {
+    let mut addresses = BTreeSet::new();
+    for iface_name in selected_interfaces {
+        if let Ok(output) = tokio::process::Command::new("ip")
+            .args(["-j", "addr", "show", "dev", iface_name])
+            .output()
+            .await
+        {
+            if output.status.success() {
+                if let Ok(value) = serde_json::from_slice::<Value>(&output.stdout) {
+                    if let Some(items) = value.as_array() {
+                        for item in items {
+                            if let Some(addr_info) = item.get("addr_info").and_then(Value::as_array) {
+                                for addr in addr_info {
+                                    if let Some(local) = addr.get("local").and_then(Value::as_str) {
+                                        addresses.insert(local.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(iface) = interfaces.iter().find(|iface| iface.name == *iface_name) {
+            for addr in &iface.addresses {
+                if let Some(local) = addr.split('/').next().filter(|value| !value.is_empty()) {
+                    addresses.insert(local.to_string());
+                }
+            }
+        }
+    }
+    addresses.into_iter().collect()
+}
+
+async fn run_systemctl<const N: usize>(args: [&str; N]) -> Result<(), SystemApiError> {
+    let output = tokio::process::Command::new("systemctl")
+        .args(args)
+        .output()
+        .await
+        .map_err(|err| SystemApiError::CommandError(format!("failed to spawn systemctl: {err}")))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    if args.last() == Some(&"ssh") {
+        let mut fallback = args.iter().map(|value| value.to_string()).collect::<Vec<_>>();
+        if let Some(last) = fallback.last_mut() {
+            *last = "sshd".to_string();
+        }
+        let fallback_output = tokio::process::Command::new("systemctl")
+            .args(&fallback)
+            .output()
+            .await
+            .map_err(|err| SystemApiError::CommandError(format!("failed to spawn systemctl fallback: {err}")))?;
+        if fallback_output.status.success() {
+            return Ok(());
+        }
+    }
+    Err(SystemApiError::CommandError(format!(
+        "systemctl {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    )))
 }
 
 // ---------------------------------------------------------------------------

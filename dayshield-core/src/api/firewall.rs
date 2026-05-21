@@ -68,6 +68,7 @@ pub async fn list_rules(State(state): State<Arc<AppState>>) -> Result<impl IntoR
     let system_rules = crate::engine::nftables::system_firewall_rules(
         &cfg.interfaces,
         &firewall_settings,
+        cfg.system_settings.as_ref(),
         ipv6_enabled,
     );
 
@@ -126,11 +127,6 @@ pub async fn update_settings(
         .map_err(NftError::StorageError)?
         .ipv6_enabled;
 
-    if settings.management_ports.is_empty() {
-        return Err(NftError::ValidationFailed(
-            "management_ports must contain at least one port".into(),
-        ));
-    }
     for p in &settings.management_ports {
         if !is_valid_port(*p) {
             return Err(NftError::ValidationFailed(format!(

@@ -26,6 +26,7 @@ use crate::config::models::{
     CaptivePortalSession, FirewallAddressFamily, FirewallAlias, FirewallChainPolicy,
     FirewallDirection, FirewallRule, FirewallSchedule, FirewallSettings, FirewallStateLimits,
     Interface, LogPosition, NatConfig, NatProtocol, NatRuleType, OutboundMode, Protocol,
+    SystemSettings, effective_management_ports,
 };
 
 const DEFAULT_BLOCK_LOG_RATE_PER_SECOND: u32 = 10;
@@ -143,11 +144,30 @@ pub fn generate_ruleset(
     firewall_settings: Option<&FirewallSettings>,
     resolved_url_tables: &HashMap<String, Vec<String>>,
 ) -> String {
-    generate_ruleset_with_ipv6(
+    generate_ruleset_with_system_settings(
         rules,
         nat_config,
         aliases,
         firewall_settings,
+        None,
+        resolved_url_tables,
+    )
+}
+
+pub fn generate_ruleset_with_system_settings(
+    rules: &[FirewallRule],
+    nat_config: Option<&NatConfig>,
+    aliases: &[FirewallAlias],
+    firewall_settings: Option<&FirewallSettings>,
+    system_settings: Option<&SystemSettings>,
+    resolved_url_tables: &HashMap<String, Vec<String>>,
+) -> String {
+    generate_ruleset_with_ipv6_and_system_settings(
+        rules,
+        nat_config,
+        aliases,
+        firewall_settings,
+        system_settings,
         resolved_url_tables,
         false,
     )
@@ -162,11 +182,32 @@ pub fn generate_ruleset_with_ipv6(
     resolved_url_tables: &HashMap<String, Vec<String>>,
     ipv6_enabled: bool,
 ) -> String {
+    generate_ruleset_with_ipv6_and_system_settings(
+        rules,
+        nat_config,
+        aliases,
+        firewall_settings,
+        None,
+        resolved_url_tables,
+        ipv6_enabled,
+    )
+}
+
+pub fn generate_ruleset_with_ipv6_and_system_settings(
+    rules: &[FirewallRule],
+    nat_config: Option<&NatConfig>,
+    aliases: &[FirewallAlias],
+    firewall_settings: Option<&FirewallSettings>,
+    system_settings: Option<&SystemSettings>,
+    resolved_url_tables: &HashMap<String, Vec<String>>,
+    ipv6_enabled: bool,
+) -> String {
     generate_ruleset_with_captive_and_interfaces(
         rules,
         nat_config,
         aliases,
         firewall_settings,
+        system_settings,
         resolved_url_tables,
         ipv6_enabled,
         None,
@@ -178,6 +219,7 @@ pub fn generate_ruleset_with_ipv6(
 pub fn system_firewall_rules(
     interfaces: &[Interface],
     firewall_settings: &FirewallSettings,
+    system_settings: Option<&SystemSettings>,
     ipv6_enabled: bool,
 ) -> Vec<FirewallRule> {
     let mut rules = Vec::new();
@@ -235,8 +277,67 @@ pub fn system_firewall_rules(
     if matches!(firewall_settings.forward_policy, FirewallChainPolicy::Drop) {
         rules.push(system_default_block_rule("forward"));
     }
+    let management_ports = effective_management_ports(firewall_settings, system_settings);
+    if firewall_settings.management_anti_lockout && !management_ports.is_empty() {
+        rules.extend(system_management_rules(
+            firewall_settings,
+            &management_ports,
+            ipv6_enabled,
+        ));
+    }
 
     rules
+}
+
+fn system_management_rules(
+    firewall_settings: &FirewallSettings,
+    management_ports: &[u16],
+    ipv6_enabled: bool,
+) -> Vec<FirewallRule> {
+    let address_family = if firewall_settings.management_allowed_sources.is_empty() {
+        FirewallAddressFamily::Ipv4Ipv6
+    } else {
+        let has_ipv4 = firewall_settings
+            .management_allowed_sources
+            .iter()
+            .any(|src| !src.contains(':'));
+        let has_ipv6 = firewall_settings
+            .management_allowed_sources
+            .iter()
+            .any(|src| src.contains(':'));
+        match (has_ipv4, has_ipv6 && ipv6_enabled) {
+            (true, true) => FirewallAddressFamily::Ipv4Ipv6,
+            (false, true) => FirewallAddressFamily::Ipv6,
+            _ => FirewallAddressFamily::Ipv4,
+        }
+    };
+
+    management_ports
+        .iter()
+        .map(|port| FirewallRule {
+            id: stable_system_rule_id(
+                "system",
+                "management",
+                &format!("anti-lockout-{port}"),
+                &FirewallDirection::Input,
+            ),
+            description: Some(format!("Management Anti-lockout (port {port})")),
+            priority: -150,
+            source: None,
+            destination: None,
+            protocol: Some(Protocol::Tcp),
+            source_port: None,
+            destination_port: Some(*port),
+            ip_family: address_family,
+            action: Action::Accept,
+            direction: FirewallDirection::Input,
+            interface: firewall_settings.management_interface.clone(),
+            log: false,
+            enabled: true,
+            schedule: None,
+            state_limits: FirewallStateLimits::default(),
+        })
+        .collect()
 }
 
 fn system_default_block_rule(direction: &str) -> FirewallRule {
@@ -360,6 +461,7 @@ pub fn generate_ruleset_with_captive(
         nat_config,
         aliases,
         firewall_settings,
+        None,
         resolved_url_tables,
         ipv6_enabled,
         captive_portal,
@@ -373,6 +475,7 @@ pub fn generate_ruleset_with_captive_and_interfaces(
     nat_config: Option<&NatConfig>,
     aliases: &[FirewallAlias],
     firewall_settings: Option<&FirewallSettings>,
+    system_settings: Option<&SystemSettings>,
     resolved_url_tables: &HashMap<String, Vec<String>>,
     ipv6_enabled: bool,
     captive_portal: Option<&CaptivePortalConfig>,
@@ -380,7 +483,7 @@ pub fn generate_ruleset_with_captive_and_interfaces(
     interfaces: &[Interface],
 ) -> String {
     let settings = firewall_settings.cloned().unwrap_or_default();
-    let system_rules = system_firewall_rules(interfaces, &settings, ipv6_enabled);
+    let system_rules = system_firewall_rules(interfaces, &settings, system_settings, ipv6_enabled);
     // Only emit rules that are enabled and whose schedule (if any) is currently active.
     let mut sorted: Vec<&FirewallRule> = system_rules
         .iter()
@@ -452,7 +555,8 @@ pub fn generate_ruleset_with_captive_and_interfaces(
             settings.syn_flood_rate, settings.syn_flood_burst
         ));
     }
-    if settings.management_anti_lockout && !settings.management_ports.is_empty() {
+    let management_ports = effective_management_ports(&settings, system_settings);
+    if settings.management_anti_lockout && !management_ports.is_empty() {
         let mut base_parts: Vec<String> = Vec::new();
         if let Some(iface) = &settings.management_interface {
             if !iface.is_empty() {
@@ -461,8 +565,7 @@ pub fn generate_ruleset_with_captive_and_interfaces(
         }
         let ports_part = format!(
             "tcp dport {{ {} }}",
-            settings
-                .management_ports
+            management_ports
                 .iter()
                 .map(u16::to_string)
                 .collect::<Vec<String>>()
@@ -659,6 +762,7 @@ pub async fn apply_rules(
         nat_config,
         aliases,
         firewall_settings,
+        None,
         ipv6_enabled,
         None,
         &[],
@@ -673,6 +777,7 @@ pub async fn apply_rules_with_captive(
     nat_config: Option<&NatConfig>,
     aliases: &[FirewallAlias],
     firewall_settings: Option<&FirewallSettings>,
+    system_settings: Option<&SystemSettings>,
     ipv6_enabled: bool,
     captive_portal: Option<&CaptivePortalConfig>,
     captive_sessions: &[CaptivePortalSession],
@@ -686,6 +791,7 @@ pub async fn apply_rules_with_captive(
         nat_config,
         aliases,
         firewall_settings,
+        system_settings,
         &resolved_url_tables,
         ipv6_enabled,
         captive_portal,

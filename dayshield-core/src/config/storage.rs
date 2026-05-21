@@ -520,9 +520,6 @@ impl ConfigStore {
             if settings.syn_flood_burst == 0 {
                 anyhow::bail!("Firewall syn_flood_burst must be greater than 0");
             }
-            if settings.management_ports.is_empty() {
-                anyhow::bail!("Firewall management_ports must contain at least one port");
-            }
             for port in &settings.management_ports {
                 if !is_valid_port(*port) {
                     anyhow::bail!(

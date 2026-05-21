@@ -649,6 +649,7 @@ pub async fn apply_current_ruleset_nft(config_store: &ConfigStore) -> Result<(),
         cfg.nat.as_ref(),
         &cfg.firewall_aliases,
         cfg.firewall_settings.as_ref(),
+        cfg.system_settings.as_ref(),
         cfg.system_settings
             .as_ref()
             .map(|settings| settings.ipv6_enabled)

@@ -861,6 +861,7 @@ impl AiRuntime {
             config.nat.as_ref(),
             &config.firewall_aliases,
             config.firewall_settings.as_ref(),
+            config.system_settings.as_ref(),
             config
                 .system_settings
                 .as_ref()

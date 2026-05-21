@@ -5,6 +5,7 @@
 
 use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -606,7 +607,7 @@ impl Default for FirewallSettings {
             management_anti_lockout: true,
             management_interface: None,
             management_allowed_sources: vec![],
-            management_ports: vec![22, 443, 8443],
+            management_ports: vec![8443],
             management_tls_acme_domain: None,
             log_position: default_log_position(),
         }
@@ -998,9 +999,6 @@ pub fn validate_firewall_settings(
     }
     if settings.syn_flood_burst == 0 {
         return Err("Firewall syn_flood_burst must be greater than 0".into());
-    }
-    if settings.management_ports.is_empty() {
-        return Err("Firewall management_ports must contain at least one port".into());
     }
     for port in &settings.management_ports {
         if !is_valid_port(*port) {
@@ -2422,6 +2420,18 @@ pub struct SystemSettings {
     /// TCP port for the SSH daemon.
     #[serde(default = "default_ssh_port")]
     pub ssh_port: u16,
+    /// Whether root can authenticate over SSH.
+    #[serde(default = "default_ssh_permit_root_login")]
+    pub ssh_permit_root_login: bool,
+    /// Whether SSH password authentication is allowed.
+    #[serde(default = "default_ssh_password_authentication")]
+    pub ssh_password_authentication: bool,
+    /// Public keys authorised for the root account over SSH.
+    #[serde(default)]
+    pub ssh_authorized_keys: Vec<String>,
+    /// Optional list of interface names SSH should bind to.
+    #[serde(default)]
+    pub ssh_listen_interfaces: Vec<String>,
     /// TCP port for the DayShield web UI / REST API.
     #[serde(default = "default_web_port")]
     pub web_port: u16,
@@ -2441,6 +2451,12 @@ fn default_ssh_enabled() -> bool {
 fn default_ssh_port() -> u16 {
     22
 }
+fn default_ssh_permit_root_login() -> bool {
+    true
+}
+fn default_ssh_password_authentication() -> bool {
+    true
+}
 fn default_web_port() -> u16 {
     8443
 }
@@ -2454,11 +2470,38 @@ impl Default for SystemSettings {
             dns_servers: vec![],
             ssh_enabled: default_ssh_enabled(),
             ssh_port: default_ssh_port(),
+            ssh_permit_root_login: default_ssh_permit_root_login(),
+            ssh_password_authentication: default_ssh_password_authentication(),
+            ssh_authorized_keys: vec![],
+            ssh_listen_interfaces: vec![],
             web_port: default_web_port(),
             ipv6_enabled: false,
             management_tls_acme_domain: None,
         }
     }
+}
+
+pub fn effective_management_ports(
+    firewall_settings: &FirewallSettings,
+    system_settings: Option<&SystemSettings>,
+) -> Vec<u16> {
+    let mut ports = BTreeSet::new();
+    for port in &firewall_settings.management_ports {
+        if is_valid_port(*port) {
+            ports.insert(*port);
+        }
+    }
+
+    if let Some(settings) = system_settings {
+        if is_valid_port(settings.web_port) {
+            ports.insert(settings.web_port);
+        }
+        if settings.ssh_enabled && is_valid_port(settings.ssh_port) {
+            ports.insert(settings.ssh_port);
+        }
+    }
+
+    ports.into_iter().collect()
 }
 
 // ---------------------------------------------------------------------------

@@ -2322,6 +2322,9 @@ pub struct WireGuardInterface {
     pub listen_port: u16,
     /// Tunnel address(es) in CIDR notation, e.g. `["10.0.0.1/24"]`.
     pub addresses: Vec<String>,
+    /// Optional MTU for the WireGuard interface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u16>,
     /// Configured peers for this interface.
     pub peers: Vec<WireGuardPeer>,
     /// Whether this interface should be active.

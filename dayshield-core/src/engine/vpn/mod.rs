@@ -45,6 +45,9 @@ pub fn generate_config(iface: &WireGuardInterface) -> String {
     out.push_str("[Interface]\n");
     out.push_str(&format!("PrivateKey = {}\n", iface.private_key));
     out.push_str(&format!("ListenPort = {}\n", iface.listen_port));
+    if let Some(mtu) = iface.mtu {
+        out.push_str(&format!("MTU = {}\n", mtu));
+    }
 
     if !iface.addresses.is_empty() {
         out.push_str(&format!("Address = {}\n", iface.addresses.join(", ")));
@@ -91,6 +94,9 @@ fn generate_syncconf(iface: &WireGuardInterface) -> String {
     out.push_str("[Interface]\n");
     out.push_str(&format!("PrivateKey = {}\n", iface.private_key));
     out.push_str(&format!("ListenPort = {}\n", iface.listen_port));
+    if let Some(mtu) = iface.mtu {
+        out.push_str(&format!("MTU = {}\n", mtu));
+    }
 
     for peer in &iface.peers {
         out.push('\n');
@@ -417,6 +423,14 @@ mod tests {
         assert!(out.contains(&format!("PrivateKey = {}", iface.private_key)));
         assert!(out.contains("ListenPort = 51820"));
         assert!(out.contains("Address = 10.0.0.1/24"));
+    }
+
+    #[test]
+    fn generate_config_with_mtu() {
+        let mut iface = make_iface();
+        iface.mtu = Some(1420);
+        let out = generate_config(&iface);
+        assert!(out.contains("MTU = 1420"));
     }
 
     #[test]

@@ -19,7 +19,7 @@ use tracing::{info, warn};
 use crate::{
     config::models::{
         ensure_ipv6_allowed, validate_cidr, validate_endpoint, validate_wg_interface_name,
-        validate_wg_key, WireGuardInterface, WireGuardPeer,
+        validate_wg_key, is_valid_mtu, WireGuardInterface, WireGuardPeer,
     },
     engine::vpn::{apply_interface, generate_keypair, remove_interface},
     state::AppState,
@@ -91,6 +91,7 @@ pub struct CreateWireGuardInterfaceRequest {
     pub listen_port: u16,
     pub addresses: Vec<String>,
     pub peers: Vec<PeerRequest>,
+    pub mtu: Option<u16>,
     pub enabled: bool,
 }
 
@@ -168,6 +169,14 @@ pub async fn create_interface(
         ));
     }
 
+    if let Some(mtu) = req.mtu {
+        if !is_valid_mtu(mtu) {
+            return Err(WireGuardError::ValidationFailed(
+                "mtu must be between 68 and 65535".into(),
+            ));
+        }
+    }
+
     for addr in &req.addresses {
         if !validate_cidr(addr) {
             return Err(WireGuardError::ValidationFailed(format!(
@@ -235,6 +244,7 @@ pub async fn create_interface(
         public_key: req.public_key,
         listen_port: req.listen_port,
         addresses: req.addresses,
+        mtu: req.mtu,
         peers,
         enabled: req.enabled,
     };

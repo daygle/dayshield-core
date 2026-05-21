@@ -13,10 +13,6 @@ This repository implements the core service that:
 - collects and serves logs, metrics, and status information
 - delivers the management UI assets in deployed environments
 
-## Why it matters
-
-The core service is the central runtime component of the DayShield appliance. It coordinates the underlying Linux platform and appliance services while providing a stable interface for the UI and automation components.
-
 ## Requirements
 
 - Rust toolchain pinned in `rust-toolchain.toml` (currently `1.88.0`)

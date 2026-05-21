@@ -609,14 +609,14 @@ impl AiRuntime {
                 if event
                     .action
                     .as_deref()
-                    .map_or(false, |a| a.eq_ignore_ascii_case("drop"))
+                    .is_some_and(|a| a.eq_ignore_ascii_case("drop"))
                 {
                     firewall_drops += 1.0;
                 }
                 if event
                     .action
                     .as_deref()
-                    .map_or(false, |a| a.eq_ignore_ascii_case("accept"))
+                    .is_some_and(|a| a.eq_ignore_ascii_case("accept"))
                 {
                     firewall_accepts += 1.0;
                 }
@@ -738,14 +738,14 @@ impl AiRuntime {
                 if event
                     .action
                     .as_deref()
-                    .map_or(false, |a| a.eq_ignore_ascii_case("drop"))
+                    .is_some_and(|a| a.eq_ignore_ascii_case("drop"))
                 {
                     firewall_drops += 1.0;
                 }
                 if event
                     .action
                     .as_deref()
-                    .map_or(false, |a| a.eq_ignore_ascii_case("accept"))
+                    .is_some_and(|a| a.eq_ignore_ascii_case("accept"))
                 {
                     firewall_accepts += 1.0;
                 }

@@ -26,6 +26,8 @@ use tracing::{debug, info, warn};
 use crate::config::models::{is_valid_cidr, is_valid_interface_name, Interface, Ipv6Mode, WanMode};
 use crate::engine::{prefix_delegation, radvd};
 
+const DHCP_LEASE_DIR: &str = "/var/lib/dhcp";
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -792,6 +794,7 @@ async fn start_dhcp_client(name: &str) -> Result<(), InterfaceError> {
 
     // Release any existing lease and clean up the old process first.
     stop_dhcp_client(name).await;
+    ensure_dhclient_lease_dirs().await?;
 
     info!(name = %name, pid_file = %pid_file, "interfaces: starting dhclient");
 
@@ -811,6 +814,7 @@ async fn start_dhcp6_client(name: &str) -> Result<(), InterfaceError> {
     let pid_file = format!("/run/dhclient6.{name}.pid");
 
     stop_dhcp6_client(name).await;
+    ensure_dhclient_lease_dirs().await?;
 
     info!(name = %name, pid_file = %pid_file, "interfaces: starting dhclient -6");
 
@@ -899,9 +903,10 @@ async fn stop_dhcp6_client(name: &str) {
 /// is written first.  The PID is written to `/run/dhclient6-pd.<name>.pid`.
 async fn start_dhcp6_pd_client(name: &str, hint_len: Option<u8>) -> Result<(), InterfaceError> {
     let pid_file = format!("/run/dhclient6-pd.{name}.pid");
-    let lease_file = format!("/var/lib/dhclient/dhclient6-pd.{name}.leases");
+    let lease_file = format!("{DHCP_LEASE_DIR}/dhclient6-pd.{name}.leases");
 
     stop_dhcp6_pd_client(name).await;
+    ensure_dhclient_lease_dirs().await?;
 
     let mut args: Vec<String> = vec!["-6".into(), "-P".into()];
 
@@ -935,6 +940,17 @@ async fn start_dhcp6_pd_client(name: &str, hint_len: Option<u8>) -> Result<(), I
         .spawn()
         .map_err(|e| {
             InterfaceError::ApplyFailed(format!("failed to spawn dhclient6-pd for {name}: {e}"))
+        })?;
+    Ok(())
+}
+
+async fn ensure_dhclient_lease_dirs() -> Result<(), InterfaceError> {
+    tokio::fs::create_dir_all(DHCP_LEASE_DIR)
+        .await
+        .map_err(|e| {
+            InterfaceError::ApplyFailed(format!(
+                "failed to create DHCP lease directory {DHCP_LEASE_DIR}: {e}"
+            ))
         })?;
     Ok(())
 }

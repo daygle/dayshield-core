@@ -163,12 +163,14 @@ mod tests {
         let event = LogEvent::SystemEvent {
             timestamp: "2024-01-15T12:00:00+00:00".into(),
             unit: "sshd.service".into(),
+            priority: Some(4),
             message: "Failed login".into(),
         };
         let json = serde_json::to_string(&event).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "system_event");
         assert_eq!(v["unit"], "sshd.service");
+        assert_eq!(v["priority"], 4);
     }
 
     #[test]

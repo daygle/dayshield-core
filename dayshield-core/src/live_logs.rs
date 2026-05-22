@@ -3,7 +3,7 @@
 //! This module provides real-time streaming of log events from three sources:
 //! - **Suricata** (`/var/log/suricata/eve.json`) - IDS/IPS alerts.
 //! - **Firewall** (journald, `SYSLOG_IDENTIFIER=nftables`) - nftables events.
-//! - **System** (journald, `PRIORITY<=4`) - warnings and errors.
+//! - **System** (journald, `PRIORITY<=6`) - system events through info level.
 //!
 //! All three streams are merged and forwarded to connected WebSocket clients
 //! via [`websocket::logs_websocket`].
@@ -77,6 +77,8 @@ pub enum LogEvent {
         timestamp: String,
         /// systemd unit name (e.g. `"sshd.service"`).
         unit: String,
+        /// Journald/syslog priority when available (0 = emerg, 6 = info).
+        priority: Option<u8>,
         /// Human-readable log message.
         message: String,
     },

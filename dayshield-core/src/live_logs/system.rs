@@ -1,9 +1,9 @@
 //! System log parser - reads journald entries up to info level
-//! (PRIORITY ≤ 6, i.e. emergency through info).
+//! (PRIORITY <= 6, i.e. emergency through info).
 //!
 //! Like [`crate::live_logs::firewall`] this module spawns `journalctl` as a child
-//! process using `--output=json --follow --priority=warn` (syslog priority 4
-//! and below) to avoid a hard dependency on `libsystemd`.
+//! process using `--output=json --follow --priority=info` to avoid a hard
+//! dependency on `libsystemd`.
 //!
 //! Each JSON line is parsed to extract the unit name and log message and is
 //! forwarded as a [`LogEvent::SystemEvent`].
@@ -23,7 +23,7 @@ use crate::live_logs::LogEvent;
 // Public streaming function
 // ---------------------------------------------------------------------------
 
-/// Stream system log events (PRIORITY ≤ 6) from journald to `tx`.
+/// Stream system log events (PRIORITY <= 6) from journald to `tx`.
 ///
 /// Spawns `journalctl --output=json --follow --priority=info --lines=0` and
 /// processes its output line by line.  Restarts automatically on exit.
@@ -103,6 +103,7 @@ pub(crate) fn parse_journald_system_line(line: &str) -> Option<LogEvent> {
 
     let timestamp =
         parse_realtime_timestamp(obj.get("__REALTIME_TIMESTAMP").and_then(|v| v.as_str()));
+    let priority = parse_priority(obj.get("PRIORITY"));
 
     // Some firewall drops are emitted by the kernel logger (SYSLOG_IDENTIFIER=kernel)
     // while still carrying nftables key=value message format.
@@ -123,6 +124,7 @@ pub(crate) fn parse_journald_system_line(line: &str) -> Option<LogEvent> {
     Some(LogEvent::SystemEvent {
         timestamp,
         unit,
+        priority,
         message,
     })
 }
@@ -147,6 +149,14 @@ fn parse_realtime_timestamp(raw: Option<&str>) -> String {
         .unwrap_or_else(|| Utc::now().to_rfc3339())
 }
 
+fn parse_priority(raw: Option<&serde_json::Value>) -> Option<u8> {
+    raw.and_then(|v| {
+        v.as_u64()
+            .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+            .and_then(|n| u8::try_from(n).ok())
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -157,11 +167,17 @@ mod tests {
 
     #[test]
     fn test_parse_system_line_with_unit() {
-        let line = r#"{"__REALTIME_TIMESTAMP":"1705320000000000","_SYSTEMD_UNIT":"sshd.service","MESSAGE":"Failed password for invalid user admin"}"#;
+        let line = r#"{"__REALTIME_TIMESTAMP":"1705320000000000","_SYSTEMD_UNIT":"sshd.service","PRIORITY":"4","MESSAGE":"Failed password for invalid user admin"}"#;
         let event = parse_journald_system_line(line).expect("should parse");
         match event {
-            LogEvent::SystemEvent { unit, message, .. } => {
+            LogEvent::SystemEvent {
+                unit,
+                priority,
+                message,
+                ..
+            } => {
                 assert_eq!(unit, "sshd.service");
+                assert_eq!(priority, Some(4));
                 assert_eq!(message, "Failed password for invalid user admin");
             }
             _ => panic!("unexpected variant"),

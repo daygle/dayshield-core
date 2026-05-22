@@ -30,7 +30,7 @@ use tokio::{
 };
 use tracing::{info, warn};
 
-use crate::live_logs::LogEvent;
+use crate::live_logs::{journald_field_text, LogEvent};
 
 // ---------------------------------------------------------------------------
 // Public streaming function
@@ -111,16 +111,17 @@ pub(crate) fn parse_journald_firewall_line(line: &str) -> Option<LogEvent> {
         }
     };
 
-    // Journald encodes MESSAGE as either a plain string or a base64-encoded
-    // byte array (for binary logs).  We only handle the string case.
-    let message = match obj.get("MESSAGE").and_then(|v| v.as_str()) {
+    // Journald usually encodes MESSAGE as a string, but some entries arrive as
+    // arrays. Decode both so valid journal entries are not silently dropped.
+    let message = match journald_field_text(obj.get("MESSAGE")) {
         Some(m) => m.to_string(),
         None => return None,
     };
 
     // Parse the __REALTIME_TIMESTAMP field (microseconds since epoch).
-    let timestamp =
-        parse_realtime_timestamp(obj.get("__REALTIME_TIMESTAMP").and_then(|v| v.as_str()));
+    let timestamp = parse_realtime_timestamp(
+        journald_field_text(obj.get("__REALTIME_TIMESTAMP")).as_deref(),
+    );
 
     parse_nftables_message(&message, &timestamp)
 }
@@ -286,5 +287,18 @@ mod tests {
     fn test_parse_journald_firewall_line_no_message_field() {
         let line = r#"{"__REALTIME_TIMESTAMP":"1705320000000000","SYSLOG_IDENTIFIER":"nftables"}"#;
         assert!(parse_journald_firewall_line(line).is_none());
+    }
+
+    #[test]
+    fn test_parse_journald_firewall_line_byte_array_message() {
+        let line = r#"{"__REALTIME_TIMESTAMP":"1705320000000000","MESSAGE":[68,82,79,80,32,73,78,61,101,116,104,48,32,79,85,84,61,32,83,82,67,61,49,57,50,46,49,54,56,46,49,46,49,32,68,83,84,61,49,48,46,48,46,48,46,49,32,80,82,79,84,79,61,84,67,80,32,83,80,84,61,49,50,51,52,32,68,80,84,61,52,52,51],"SYSLOG_IDENTIFIER":"nftables"}"#;
+        let event = parse_journald_firewall_line(line).expect("should parse");
+        match event {
+            LogEvent::FirewallEvent { action, dport, .. } => {
+                assert_eq!(action, "DROP");
+                assert_eq!(dport, 443);
+            }
+            _ => panic!("unexpected variant"),
+        }
     }
 }

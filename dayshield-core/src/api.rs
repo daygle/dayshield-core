@@ -85,8 +85,8 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `GET  /dns/overrides`                                 - list DNS host and domain overrides
 /// - `POST /dns/overrides`                                 - create a DNS override
 /// - `DELETE /dns/overrides/{name}`                        - delete a DNS override
-/// - `GET  /dhcp/config`                                   - get DHCP (dnsmasq) configuration
-/// - `POST /dhcp/config`                                   - update DHCP (dnsmasq) configuration
+/// - `GET  /dhcp/config`                                   - get DHCP (Kea) configuration
+/// - `POST /dhcp/config`                                   - update DHCP (Kea) configuration
 /// - `GET  /suricata/config`                               - get Suricata configuration
 /// - `POST /suricata/config`                               - update Suricata configuration
 /// - `GET  /rulesets/available`                            - list available (curated) rulesets

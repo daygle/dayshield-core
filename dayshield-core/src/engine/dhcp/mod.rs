@@ -33,6 +33,9 @@ const KEA_SYSTEM_CONF_PATH: &str = "/etc/kea/kea-dhcp4.conf";
 /// Path to the Kea memfile lease database.
 pub const KEA_LEASES_PATH: &str = "/var/lib/kea/kea-leases4.csv";
 
+/// Directory that contains Kea's memfile lease databases.
+const KEA_DATA_DIR: &str = "/var/lib/kea";
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -168,6 +171,9 @@ pub async fn apply_config(config: &DhcpConfig) -> Result<()> {
     #[cfg(unix)]
     set_directory_permissions_best_effort("/etc/kea");
     std::fs::create_dir_all("/var/log/kea").context("failed to create /var/log/kea")?;
+    std::fs::create_dir_all(KEA_DATA_DIR).context("failed to create /var/lib/kea")?;
+    #[cfg(unix)]
+    set_directory_permissions_best_effort(KEA_DATA_DIR);
 
     let conf_str = generate_config(config);
     write_config_atomic(KEA_CONF_PATH, &conf_str).context("failed to write kea-dhcp4.conf")?;

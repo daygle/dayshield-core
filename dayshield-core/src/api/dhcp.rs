@@ -12,7 +12,7 @@
 //! | GET    | `/dhcp/static-leases`                     | List all static MAC → IP bindings    |
 //! | POST   | `/dhcp/static-leases`                     | Add a static lease                   |
 //! | DELETE | `/dhcp/static-leases/{id}`                | Remove a static lease by UUID        |
-//! | GET    | `/dhcp/leases`                            | List active leases from dnsmasq      |
+//! | GET    | `/dhcp/leases`                            | List active leases from Kea          |
 //! | GET    | `/dhcp/pools`                             | List DHCP scopes as pool view        |
 
 use std::{net::Ipv6Addr, sync::Arc};
@@ -133,7 +133,7 @@ pub struct CreateStaticLeaseRequest {
     pub description: Option<String>,
 }
 
-/// Response for a single active lease parsed from dnsmasq.
+/// Response for a single active lease parsed from Kea.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DhcpLeaseResponse {
@@ -708,33 +708,142 @@ pub async fn delete_static_lease(
 // GET /dhcp/leases
 // ---------------------------------------------------------------------------
 
-/// Return currently active DHCP leases parsed from the Kea memfile lease database.
-///
-/// Kea CSV format (one lease per line, first line is header):
-/// `address,hwaddr,client-id,valid-lifetime,expire,subnet-id,fqdn-fwd,fqdn-rev,hostname,state,user-context`
-///
-/// Returns an empty array when the file does not exist.
-pub async fn list_active_leases(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
-    use crate::engine::dhcp::KEA_LEASES_PATH;
+fn parse_csv_line(line: &str) -> Vec<String> {
+    let mut cols = Vec::new();
+    let mut current = String::new();
+    let mut chars = line.chars().peekable();
+    let mut in_quotes = false;
 
-    // Some distributions or package versions place the Kea memfile at slightly
-    // different paths. Try a small set of plausible locations so the API still
-    // works if Kea was configured elsewhere on disk.
-    const ALT_KEA_LEASES_PATH: &str = "/var/lib/kea/kea-leases.csv";
-
-    let try_paths = [KEA_LEASES_PATH, ALT_KEA_LEASES_PATH];
-
-    let mut content = None;
-    for path in &try_paths {
-        if let Ok(c) = tokio::fs::read_to_string(path).await {
-            content = Some(c);
-            break;
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' if in_quotes && chars.peek() == Some(&'"') => {
+                current.push('"');
+                chars.next();
+            }
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => {
+                cols.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
         }
     }
 
-    let content = match content {
-        Some(c) => c,
-        None => {
+    cols.push(current.trim().to_string());
+    cols
+}
+
+fn normalized_kea_header(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace('_', "-")
+}
+
+fn kea_column(headers: &[String], names: &[&str]) -> Option<usize> {
+    headers.iter().position(|header| {
+        let header = normalized_kea_header(header);
+        names
+            .iter()
+            .any(|name| header == normalized_kea_header(name))
+    })
+}
+
+fn kea_value<'a>(cols: &'a [String], index: Option<usize>) -> &'a str {
+    index
+        .and_then(|idx| cols.get(idx))
+        .map(String::as_str)
+        .unwrap_or("")
+}
+
+fn parse_kea4_lease_line(
+    headers: &[String],
+    line: &str,
+    now: u64,
+) -> Option<DhcpLeaseResponse> {
+    let cols = parse_csv_line(line);
+    if cols.is_empty() {
+        return None;
+    }
+
+    let address_idx = kea_column(headers, &["address"]).or(Some(0));
+    let hwaddr_idx = kea_column(headers, &["hwaddr", "hw-address"]).or(Some(1));
+    let expire_idx = kea_column(headers, &["expire"]).or(Some(4));
+    let hostname_idx = kea_column(headers, &["hostname"]);
+    let state_idx = kea_column(headers, &["state"]).or(Some(9));
+
+    let address = kea_value(&cols, address_idx);
+    let hwaddr = kea_value(&cols, hwaddr_idx);
+    if address.is_empty() || hwaddr.is_empty() {
+        return None;
+    }
+
+    let expire = kea_value(&cols, expire_idx).parse::<u64>().unwrap_or(0);
+    let state_col = kea_value(&cols, state_idx).parse::<u8>().unwrap_or(0);
+    // Kea state: 0=default(active), 1=declined, 2=expired-reclaimed.
+    let state_str = match state_col {
+        0 if expire == 0 || expire > now => "active",
+        0 => "expired",
+        1 => "declined",
+        _ => "reclaimed",
+    };
+
+    Some(DhcpLeaseResponse {
+        mac: hwaddr.to_string(),
+        ip_address: address.to_string(),
+        hostname: kea_value(&cols, hostname_idx).to_string(),
+        starts: String::new(),
+        ends: expire.to_string(),
+        state: state_str.to_string(),
+    })
+}
+
+#[cfg(test)]
+mod kea4_lease_parser_tests {
+    use super::{parse_csv_line, parse_kea4_lease_line};
+
+    #[test]
+    fn parses_legacy_kea4_lease_csv() {
+        let headers = parse_csv_line(
+            "address,hwaddr,client-id,valid-lifetime,expire,subnet-id,fqdn-fwd,fqdn-rev,hostname,state,user-context",
+        );
+        let lease = parse_kea4_lease_line(
+            &headers,
+            "192.168.1.100,aa:bb:cc:dd:ee:ff,,86400,4102444800,1,0,0,laptop,0,",
+            1_700_000_000,
+        )
+        .expect("lease should parse");
+
+        assert_eq!(lease.ip_address, "192.168.1.100");
+        assert_eq!(lease.mac, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(lease.hostname, "laptop");
+        assert_eq!(lease.state, "active");
+    }
+
+    #[test]
+    fn parses_header_variant_with_quoted_user_context() {
+        let headers = parse_csv_line(
+            "address,hwaddr,client_id,valid_lifetime,expire,subnet_id,pool_id,state,user_context,hwtype,hwaddr_source",
+        );
+        let lease = parse_kea4_lease_line(
+            &headers,
+            "192.168.1.101,11:22:33:44:55:66,,3600,4102444800,1,0,0,\"{ \"\"seen\"\": true }\",1,1",
+            1_700_000_000,
+        )
+        .expect("lease should parse");
+
+        assert_eq!(lease.ip_address, "192.168.1.101");
+        assert_eq!(lease.mac, "11:22:33:44:55:66");
+        assert_eq!(lease.state, "active");
+    }
+}
+
+/// Return DHCP leases parsed from DayShield's configured Kea memfile lease database.
+///
+/// Returns an empty array when the Kea lease file does not exist yet.
+pub async fn list_active_leases(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
+    use crate::engine::dhcp::KEA_LEASES_PATH;
+
+    let content = match tokio::fs::read_to_string(KEA_LEASES_PATH).await {
+        Ok(c) => c,
+        Err(_) => {
             return Json(serde_json::json!({ "success": true, "data": serde_json::json!([]) }));
         }
     };
@@ -744,40 +853,14 @@ pub async fn list_active_leases(State(_state): State<Arc<AppState>>) -> impl Int
         .unwrap_or_default()
         .as_secs();
 
-    // Skip the CSV header line.
-    let leases: Vec<DhcpLeaseResponse> = content
-        .lines()
-        .filter(|l| !l.starts_with("address") && !l.is_empty())
-        .filter_map(|line| {
-            // address,hwaddr,client-id,valid-lifetime,expire,subnet-id,
-            //   fqdn-fwd,fqdn-rev,hostname,state,user-context
-            let mut cols = line.splitn(11, ',');
-            let address = cols.next()?.to_string();
-            let hwaddr = cols.next()?.to_string();
-            let _client_id = cols.next();
-            let _valid_life = cols.next();
-            let expire: u64 = cols.next()?.parse().ok()?;
-            let _subnet_id = cols.next();
-            let _fqdn_fwd = cols.next();
-            let _fqdn_rev = cols.next();
-            let hostname = cols.next().unwrap_or("").to_string();
-            let state_col: u8 = cols.next().unwrap_or("0").trim().parse().unwrap_or(0);
-            // Kea state: 0=default(active), 1=declined, 2=expired-reclaimed
-            let state_str = match state_col {
-                0 if expire > now => "active",
-                0 => "expired",
-                1 => "declined",
-                _ => "reclaimed",
-            };
-            Some(DhcpLeaseResponse {
-                mac: hwaddr,
-                ip_address: address,
-                hostname,
-                starts: String::new(),
-                ends: expire.to_string(),
-                state: state_str.to_string(),
-            })
-        })
+    let mut lines = content.lines().filter(|line| !line.trim().is_empty());
+    let Some(header_line) = lines.next() else {
+        return Json(serde_json::json!({ "success": true, "data": serde_json::json!([]) }));
+    };
+    let headers = parse_csv_line(header_line);
+
+    let leases: Vec<DhcpLeaseResponse> = lines
+        .filter_map(|line| parse_kea4_lease_line(&headers, line, now))
         .collect();
 
     Json(serde_json::json!({ "success": true, "data": leases }))

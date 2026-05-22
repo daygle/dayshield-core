@@ -136,21 +136,13 @@ async fn query_journal_system(from: &str, to: &str) -> Result<Vec<LogEvent>, Log
 }
 
 async fn query_journal_firewall(from: &str, to: &str) -> Result<Vec<LogEvent>, LogsApiError> {
-    let out = Command::new("journalctl")
-        .args([
-            "--output=json",
-            "--identifier=nftables",
-            "--since",
-            from,
-            "--until",
-            to,
-        ])
-        .output()
-        .await
-        .map_err(|e| {
-            LogsApiError::Search(format!("failed to run journalctl for firewall logs: {e}"))
-        })?;
+    let mut cmd = Command::new("journalctl");
+    cmd.args(["--output=json", "--since", from, "--until", to])
+        .args(["--identifier=nftables", "--identifier=kernel"]);
 
+    let out = cmd.output().await.map_err(|e| {
+        LogsApiError::Search(format!("failed to run journalctl for firewall logs: {e}"))
+    })?;
     if !out.status.success() {
         return Err(LogsApiError::Search(format!(
             "journalctl firewall query failed: {}",
@@ -161,7 +153,12 @@ async fn query_journal_firewall(from: &str, to: &str) -> Result<Vec<LogEvent>, L
     let stdout = String::from_utf8_lossy(&out.stdout);
     Ok(stdout
         .lines()
-        .filter_map(parse_journald_firewall_line)
+        .filter_map(|line| {
+            parse_journald_firewall_line(line).or_else(|| match parse_journald_system_line(line) {
+                Some(event @ LogEvent::FirewallEvent { .. }) => Some(event),
+                _ => None,
+            })
+        })
         .collect::<Vec<_>>())
 }
 

@@ -17,7 +17,7 @@ use tokio::{
 use tracing::{info, warn};
 
 use crate::live_logs::firewall::parse_nftables_message;
-use crate::live_logs::LogEvent;
+use crate::live_logs::{journald_field_text, LogEvent};
 
 // ---------------------------------------------------------------------------
 // Public streaming function
@@ -89,20 +89,22 @@ pub(crate) fn parse_journald_system_line(line: &str) -> Option<LogEvent> {
         }
     };
 
-    let message = match obj.get("MESSAGE").and_then(|v| v.as_str()) {
+    let message = match journald_field_text(obj.get("MESSAGE")) {
         Some(m) => m.to_string(),
         None => return None,
     };
 
-    let syslog_identifier = obj.get("SYSLOG_IDENTIFIER").and_then(|v| v.as_str());
+    let syslog_identifier = journald_field_text(obj.get("SYSLOG_IDENTIFIER"));
+    let syslog_identifier = syslog_identifier.as_deref();
 
     // nftables-tagged events are handled by the dedicated firewall stream.
     if matches!(syslog_identifier, Some("nftables")) {
         return None;
     }
 
-    let timestamp =
-        parse_realtime_timestamp(obj.get("__REALTIME_TIMESTAMP").and_then(|v| v.as_str()));
+    let timestamp = parse_realtime_timestamp(
+        journald_field_text(obj.get("__REALTIME_TIMESTAMP")).as_deref(),
+    );
     let priority = parse_priority(obj.get("PRIORITY"));
 
     // Some firewall drops are emitted by the kernel logger (SYSLOG_IDENTIFIER=kernel)
@@ -116,10 +118,9 @@ pub(crate) fn parse_journald_system_line(line: &str) -> Option<LogEvent> {
     // Unit name: prefer _SYSTEMD_UNIT, fall back to SYSLOG_IDENTIFIER.
     let unit = obj
         .get("_SYSTEMD_UNIT")
-        .and_then(|v| v.as_str())
-        .or_else(|| obj.get("SYSLOG_IDENTIFIER").and_then(|v| v.as_str()))
-        .unwrap_or("unknown")
-        .to_string();
+        .and_then(|v| journald_field_text(Some(v)))
+        .or_else(|| obj.get("SYSLOG_IDENTIFIER").and_then(|v| journald_field_text(Some(v))))
+        .unwrap_or_else(|| "unknown".to_string());
 
     Some(LogEvent::SystemEvent {
         timestamp,
@@ -240,5 +241,15 @@ mod tests {
     fn test_parse_system_line_nftables_identifier_is_ignored() {
         let line = r#"{"__REALTIME_TIMESTAMP":"1705320000000000","SYSLOG_IDENTIFIER":"nftables","MESSAGE":"DROP IN=eth0 OUT= SRC=192.168.1.1 DST=10.0.0.1 PROTO=TCP SPT=1234 DPT=443"}"#;
         assert!(parse_journald_system_line(line).is_none());
+    }
+
+    #[test]
+    fn test_parse_system_line_byte_array_message() {
+        let line = r#"{"__REALTIME_TIMESTAMP":"1705320000000000","_SYSTEMD_UNIT":"sshd.service","PRIORITY":"4","MESSAGE":[70,97,105,108,101,100,32,112,97,115,115,119,111,114,100]}"#;
+        let event = parse_journald_system_line(line).expect("should parse");
+        match event {
+            LogEvent::SystemEvent { message, .. } => assert_eq!(message, "Failed password"),
+            _ => panic!("unexpected variant"),
+        }
     }
 }

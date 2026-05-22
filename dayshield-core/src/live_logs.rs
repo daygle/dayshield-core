@@ -83,3 +83,58 @@ pub enum LogEvent {
         message: String,
     },
 }
+
+/// Read a journald JSON field as text.
+///
+/// `journalctl --output=json` usually emits fields as strings, but can emit
+/// arrays for duplicate fields or byte arrays for values it cannot represent
+/// directly as JSON strings. Treating those as absent makes the log views look
+/// empty even though journal entries are present.
+pub(crate) fn journald_field_text(value: Option<&serde_json::Value>) -> Option<String> {
+    match value? {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Array(items) => decode_journald_array(items),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+fn decode_journald_array(items: &[serde_json::Value]) -> Option<String> {
+    if items.iter().all(|item| item.as_u64().is_some()) {
+        let bytes = items
+            .iter()
+            .filter_map(|item| item.as_u64())
+            .filter_map(|n| u8::try_from(n).ok())
+            .collect::<Vec<_>>();
+        return String::from_utf8(bytes).ok();
+    }
+
+    items.iter().find_map(|item| match item {
+        serde_json::Value::String(s) => Some(s.clone()),
+        _ => None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::journald_field_text;
+
+    #[test]
+    fn journald_field_text_decodes_string() {
+        let value = serde_json::json!("hello");
+        assert_eq!(journald_field_text(Some(&value)).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn journald_field_text_decodes_byte_array() {
+        let value = serde_json::json!([68, 82, 79, 80]);
+        assert_eq!(journald_field_text(Some(&value)).as_deref(), Some("DROP"));
+    }
+
+    #[test]
+    fn journald_field_text_uses_first_string_from_duplicate_array() {
+        let value = serde_json::json!(["sshd", "other"]);
+        assert_eq!(journald_field_text(Some(&value)).as_deref(), Some("sshd"));
+    }
+}

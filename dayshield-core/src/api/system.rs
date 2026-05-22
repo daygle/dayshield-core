@@ -496,7 +496,7 @@ pub async fn apply_updates(
                 .rootfs_slot_status
                 .as_ref()
                 .and_then(|slot| slot.reason.clone())
-                .unwrap_or_else(|| "A/B rootfs layout is not available".to_string());
+                .unwrap_or_else(|| "Primary/Secondary rootfs layout is not available".to_string());
             return Ok((
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
@@ -597,7 +597,7 @@ pub async fn validate_updates(
             Json(serde_json::json!({
                 "operation": "validate",
                 "success": false,
-                "message": "rootfs validation is reported through the A/B slot status",
+                "message": "rootfs validation is reported through the Primary/Secondary slot status",
                 "details": [],
                 "status": update::get_status(&state).await
             })),

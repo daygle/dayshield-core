@@ -11,7 +11,10 @@
 //! /var/lib/dayshield/rulesets/<id>/suricata.rules
 //! ```
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use tracing::debug;
@@ -22,6 +25,8 @@ use crate::rules::models::InstalledRuleset;
 pub const RULESETS_DIR: &str = "/var/lib/dayshield/rulesets";
 /// Metadata file name within the rulesets base directory.
 const METADATA_FILE: &str = "installed.json";
+/// Per-interface ruleset enablement state.
+const INTERFACE_ENABLED_FILE: &str = "interface-enabled.json";
 
 // ---------------------------------------------------------------------------
 // RulesetStore
@@ -48,6 +53,11 @@ impl RulesetStore {
     /// Return the path to the metadata JSON file.
     pub fn metadata_path(&self) -> PathBuf {
         self.base_dir.join(METADATA_FILE)
+    }
+
+    /// Return the path to the per-interface enablement JSON file.
+    pub fn interface_enabled_path(&self) -> PathBuf {
+        self.base_dir.join(INTERFACE_ENABLED_FILE)
     }
 
     /// Return the working directory for a specific ruleset id.
@@ -115,6 +125,55 @@ impl RulesetStore {
             .with_context(|| format!("failed to rename {} to {}", tmp.display(), path.display()))?;
 
         debug!("rulesets: saved {} installed rulesets", rulesets.len());
+        Ok(())
+    }
+
+    /// Load interface-scoped enabled ruleset IDs.
+    ///
+    /// JSON shape: `{ "eth0": ["et-open", "dshield"], ... }`.
+    pub fn load_interface_enabled(&self) -> Result<HashMap<String, Vec<String>>> {
+        let path = self.interface_enabled_path();
+        if !path.exists() {
+            return Ok(HashMap::new());
+        }
+
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let mut map: HashMap<String, Vec<String>> = serde_json::from_str(&raw)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+
+        for ids in map.values_mut() {
+            ids.sort();
+            ids.dedup();
+        }
+
+        Ok(map)
+    }
+
+    /// Atomically persist interface-scoped enabled ruleset IDs.
+    pub fn save_interface_enabled(&self, data: &HashMap<String, Vec<String>>) -> Result<()> {
+        let path = self.interface_enabled_path();
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create directory {}", parent.display()))?;
+        }
+
+        let mut normalized = data.clone();
+        for ids in normalized.values_mut() {
+            ids.sort();
+            ids.dedup();
+        }
+
+        let json = serde_json::to_string_pretty(&normalized)
+            .context("failed to serialise interface ruleset enablement")?;
+
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, &json)
+            .with_context(|| format!("failed to write {}", tmp.display()))?;
+        std::fs::rename(&tmp, &path)
+            .with_context(|| format!("failed to rename {} to {}", tmp.display(), path.display()))?;
+
         Ok(())
     }
 }

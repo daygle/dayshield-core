@@ -23,6 +23,7 @@ use tokio::io::AsyncBufReadExt;
 use tracing::{info, warn};
 
 use crate::{
+    api::rulesets::reconcile_interface_scoped_enablement,
     config::models::{
         ensure_ipv6_allowed, is_valid_cidr, is_valid_interface_name, validate_suricata_config,
         validate_url, SuricataConfig,
@@ -384,6 +385,12 @@ pub async fn update_config(
         .save_suricata_config(cfg.clone())
         .map_err(SuricataError::StorageError)?;
 
+    if reconcile_interface_scoped_enablement(&state)
+        .map_err(|e| SuricataError::EngineError(e.to_string()))?
+    {
+        info!("suricata: reconciled interface-scoped managed rulesets");
+    }
+
     info!("suricata: config persisted");
 
     // --- Apply -------------------------------------------------------------
@@ -731,6 +738,12 @@ pub async fn update_interface_suricata_config(
         .config_store
         .save_suricata_config(cfg.clone())
         .map_err(SuricataError::StorageError)?;
+
+    if reconcile_interface_scoped_enablement(&state)
+        .map_err(|e| SuricataError::EngineError(e.to_string()))?
+    {
+        info!("suricata: reconciled interface-scoped managed rulesets");
+    }
 
     apply_config(&cfg)
         .await

@@ -14,17 +14,18 @@
 //! | GET    | `/rulesets/:id/rules`              | List all rules in a ruleset          |
 //! | POST   | `/rulesets/:id/disabled-rules`     | Update set of disabled rule IDs      |
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
+    config::models::is_valid_interface_name,
     rules::{
         manager::RulesetManager,
         models::{CuratedSource, InstalledRuleset, RulesetStatus},
@@ -119,6 +120,11 @@ pub struct UpdateDisabledRulesRequest {
     pub ids: Vec<String>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct RulesetScopeQuery {
+    pub iface: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Mapping helpers
 // ---------------------------------------------------------------------------
@@ -148,6 +154,17 @@ fn ruleset_to_response(r: &InstalledRuleset) -> InstalledRulesetResponse {
     }
 }
 
+fn ruleset_to_response_scoped(
+    r: &InstalledRuleset,
+    scoped_enabled: Option<bool>,
+) -> InstalledRulesetResponse {
+    let mut response = ruleset_to_response(r);
+    if let Some(enabled) = scoped_enabled {
+        response.enabled = enabled;
+    }
+    response
+}
+
 fn source_to_response(s: &CuratedSource, installed_ids: &[String]) -> CuratedSourceResponse {
     CuratedSourceResponse {
         id: s.id.clone(),
@@ -168,6 +185,136 @@ fn make_manager(state: &Arc<AppState>) -> RulesetManager {
         .unwrap_or_else(|| std::path::Path::new(DEFAULT_CONFIG_DIR))
         .to_path_buf();
     RulesetManager::new(config_dir)
+}
+
+fn normalize_scope_iface(raw: Option<String>) -> Result<Option<String>, RulesetError> {
+    let Some(iface) = raw else {
+        return Ok(None);
+    };
+    let iface = iface.trim().to_string();
+    if iface.is_empty() {
+        return Ok(None);
+    }
+    if !is_valid_interface_name(&iface) {
+        return Err(RulesetError::ValidationFailed(format!(
+            "interface '{iface}' is not a valid interface name"
+        )));
+    }
+    Ok(Some(iface))
+}
+
+fn ensure_interface_seed(
+    overrides: &mut HashMap<String, Vec<String>>,
+    iface: &str,
+    rulesets: &[InstalledRuleset],
+) {
+    if overrides.contains_key(iface) {
+        return;
+    }
+
+    let mut ids = rulesets
+        .iter()
+        .filter(|ruleset| ruleset.enabled)
+        .map(|ruleset| ruleset.id.clone())
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    overrides.insert(iface.to_string(), ids);
+}
+
+fn ruleset_enabled_for_iface(
+    ruleset: &InstalledRuleset,
+    iface: Option<&str>,
+    overrides: &HashMap<String, Vec<String>>,
+) -> bool {
+    match iface {
+        Some(interface) => overrides
+            .get(interface)
+            .map(|ids| ids.iter().any(|id| id == &ruleset.id))
+            .unwrap_or(ruleset.enabled),
+        None => ruleset.enabled,
+    }
+}
+
+fn set_iface_membership(ids: &mut Vec<String>, id: &str, enabled: bool) -> bool {
+    if enabled {
+        if ids.iter().any(|existing| existing == id) {
+            return false;
+        }
+        ids.push(id.to_string());
+        ids.sort();
+        ids.dedup();
+        return true;
+    }
+
+    let original_len = ids.len();
+    ids.retain(|existing| existing != id);
+    original_len != ids.len()
+}
+
+fn apply_interface_scoped_state_to_global_enabled(
+    state: &Arc<AppState>,
+    rulesets: &mut [InstalledRuleset],
+    overrides: &HashMap<String, Vec<String>>,
+) -> Result<bool, RulesetError> {
+    let monitored_interfaces = state
+        .config_store
+        .load_suricata_config()?
+        .map(|cfg| cfg.interfaces)
+        .unwrap_or_default();
+
+    if monitored_interfaces.is_empty() {
+        return Ok(false);
+    }
+
+    let mut changed = false;
+    for ruleset in rulesets.iter_mut() {
+        let mut has_scoped_data = false;
+        let mut next_enabled = false;
+
+        for iface in &monitored_interfaces {
+            if let Some(ids) = overrides.get(iface) {
+                has_scoped_data = true;
+                if ids.iter().any(|id| id == &ruleset.id) {
+                    next_enabled = true;
+                    break;
+                }
+            }
+        }
+
+        if !has_scoped_data {
+            continue;
+        }
+
+        if ruleset.enabled != next_enabled {
+            ruleset.enabled = next_enabled;
+            changed = true;
+        }
+    }
+
+    Ok(changed)
+}
+
+pub(crate) fn reconcile_interface_scoped_enablement(
+    state: &Arc<AppState>,
+) -> Result<bool, RulesetError> {
+    let store = RulesetStore::new();
+    let mut rulesets = store.load().unwrap_or_default();
+    if rulesets.is_empty() {
+        return Ok(false);
+    }
+
+    let overrides = store.load_interface_enabled().unwrap_or_default();
+    if overrides.is_empty() {
+        return Ok(false);
+    }
+
+    if !apply_interface_scoped_state_to_global_enabled(state, &mut rulesets, &overrides)? {
+        return Ok(false);
+    }
+
+    store.save(&rulesets)?;
+    Ok(true)
 }
 
 pub(crate) async fn run_scheduled_ruleset_updates(
@@ -225,11 +372,25 @@ pub async fn list_available(
 
 /// List all installed rulesets with their current status.
 pub async fn list_installed(
+    Query(query): Query<RulesetScopeQuery>,
     State(_state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, RulesetError> {
+    let scoped_iface = normalize_scope_iface(query.iface)?;
     let rulesets = RulesetStore::new().load().unwrap_or_default();
-    let response: Vec<InstalledRulesetResponse> =
-        rulesets.iter().map(ruleset_to_response).collect();
+    let overrides = RulesetStore::new().load_interface_enabled().unwrap_or_default();
+    let response: Vec<InstalledRulesetResponse> = rulesets
+        .iter()
+        .map(|ruleset| {
+            ruleset_to_response_scoped(
+                ruleset,
+                Some(ruleset_enabled_for_iface(
+                    ruleset,
+                    scoped_iface.as_deref(),
+                    &overrides,
+                )),
+            )
+        })
+        .collect();
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -319,9 +480,57 @@ pub async fn update_ruleset(
 /// Enable an installed ruleset so Suricata includes it.
 pub async fn enable_ruleset(
     Path(id): Path<String>,
+    Query(query): Query<RulesetScopeQuery>,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, RulesetError> {
+    let scoped_iface = normalize_scope_iface(query.iface)?;
     let manager = make_manager(&state);
+
+    if let Some(iface) = scoped_iface {
+        let _ = manager.enable(&id).await.map_err(|err| {
+            let message = err.to_string();
+            if message.contains("has no local rules file") {
+                RulesetError::ValidationFailed(message)
+            } else {
+                RulesetError::OperationFailed(err)
+            }
+        })?;
+
+        let store = RulesetStore::new();
+        let mut rulesets = store.load().unwrap_or_default();
+        let idx = rulesets
+            .iter()
+            .position(|ruleset| ruleset.id == id)
+            .ok_or_else(|| RulesetError::NotFound(format!("Ruleset '{id}' not found")))?;
+
+        let mut overrides = store.load_interface_enabled().unwrap_or_default();
+        ensure_interface_seed(&mut overrides, &iface, &rulesets);
+        let ids = overrides
+            .get_mut(&iface)
+            .ok_or_else(|| RulesetError::OperationFailed(anyhow::anyhow!("failed to scope ruleset")))?;
+        let scoped_changed = set_iface_membership(ids, &id, true);
+        if scoped_changed {
+            store.save_interface_enabled(&overrides)?;
+        }
+
+        let global_changed =
+            apply_interface_scoped_state_to_global_enabled(&state, &mut rulesets, &overrides)?;
+        if global_changed {
+            store.save(&rulesets)?;
+            manager.apply_suricata_config().await?;
+        }
+
+        let scoped_enabled = overrides
+            .get(&iface)
+            .map(|items| items.iter().any(|item| item == &id))
+            .unwrap_or(rulesets[idx].enabled);
+
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "data": ruleset_to_response_scoped(&rulesets[idx], Some(scoped_enabled))
+        })));
+    }
+
     let result = manager.enable(&id).await.map_err(|err| {
         let message = err.to_string();
         if message.contains("has no local rules file") {
@@ -344,9 +553,48 @@ pub async fn enable_ruleset(
 /// Disable an installed ruleset.
 pub async fn disable_ruleset(
     Path(id): Path<String>,
+    Query(query): Query<RulesetScopeQuery>,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, RulesetError> {
+    let scoped_iface = normalize_scope_iface(query.iface)?;
     let manager = make_manager(&state);
+
+    if let Some(iface) = scoped_iface {
+        let store = RulesetStore::new();
+        let mut rulesets = store.load().unwrap_or_default();
+        let idx = rulesets
+            .iter()
+            .position(|ruleset| ruleset.id == id)
+            .ok_or_else(|| RulesetError::NotFound(format!("Ruleset '{id}' not found")))?;
+
+        let mut overrides = store.load_interface_enabled().unwrap_or_default();
+        ensure_interface_seed(&mut overrides, &iface, &rulesets);
+        let ids = overrides
+            .get_mut(&iface)
+            .ok_or_else(|| RulesetError::OperationFailed(anyhow::anyhow!("failed to scope ruleset")))?;
+        let scoped_changed = set_iface_membership(ids, &id, false);
+        if scoped_changed {
+            store.save_interface_enabled(&overrides)?;
+        }
+
+        let global_changed =
+            apply_interface_scoped_state_to_global_enabled(&state, &mut rulesets, &overrides)?;
+        if global_changed {
+            store.save(&rulesets)?;
+            manager.apply_suricata_config().await?;
+        }
+
+        let scoped_enabled = overrides
+            .get(&iface)
+            .map(|items| items.iter().any(|item| item == &id))
+            .unwrap_or(rulesets[idx].enabled);
+
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "data": ruleset_to_response_scoped(&rulesets[idx], Some(scoped_enabled))
+        })));
+    }
+
     let result = manager.disable(&id).await?;
 
     Ok(Json(serde_json::json!({

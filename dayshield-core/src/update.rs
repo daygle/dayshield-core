@@ -2795,6 +2795,7 @@ async fn apply_updates_registry(
     fs::create_dir_all(&transaction_staging)?;
 
     let mut downloads = Vec::new();
+    let mut skipped_up_to_date: Vec<String> = Vec::new();
 
     for comp in &components_to_update {
         let artifact_opt = manifest.components.iter().find(|a| match comp {
@@ -2804,6 +2805,32 @@ async fn apply_updates_registry(
         });
 
         if let Some(artifact) = artifact_opt {
+            let current_version = state_file
+                .components
+                .iter()
+                .find(|entry| entry.component == artifact.component)
+                .and_then(|entry| {
+                    entry
+                        .current_version
+                        .clone()
+                        .or_else(|| entry.last_applied_version.clone())
+                });
+
+            if current_version.as_deref() == Some(artifact.version.as_str()) {
+                skipped_up_to_date.push(format!("{}-{}", artifact.component, artifact.version));
+                append_operation_log(
+                    &mut state_file,
+                    "apply",
+                    "info",
+                    format!(
+                        "{} already at v{}; skipping apply",
+                        artifact.component, artifact.version
+                    ),
+                    Some(&artifact.component),
+                );
+                continue;
+            }
+
             let dest = transaction_staging.join(format!(
                 "{}-{}.tar.zst",
                 &artifact.component, &artifact.version
@@ -2847,9 +2874,18 @@ async fn apply_updates_registry(
             .map(|c| c.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        let message =
-            format!("no matching artifacts were published for selected components: {selected}");
+        let message = if !skipped_up_to_date.is_empty() {
+            format!("no updates available for selected components: {selected}")
+        } else {
+            format!("no matching artifacts were published for selected components: {selected}")
+        };
         details.push(message.clone());
+        if !skipped_up_to_date.is_empty() {
+            details.push(format!(
+                "already current: {}",
+                skipped_up_to_date.join(", ")
+            ));
+        }
         append_operation_log(&mut state_file, "apply", "info", &message, None);
         save_state(state, &state_file)?;
         let _ = fs::remove_dir_all(&transaction_staging);

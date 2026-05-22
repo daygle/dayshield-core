@@ -226,44 +226,59 @@ fn parse_update_component(value: Option<&str>) -> anyhow::Result<update::UpdateC
 }
 
 fn print_update_status(status: &update::UpdatesStatus) {
-    println!("DayShield update status");
+    println!("DayShield Update Status");
     println!(
-        "Last checked: {}",
+        "  Last check:             {}",
         status.last_checked_at.as_deref().unwrap_or("never")
     );
     println!(
-        "Last applied: {}",
+        "  Last applied update:    {}",
         status.last_applied_at.as_deref().unwrap_or("never")
     );
-    println!("Pending reboot: {}", yes_no(status.pending_reboot));
+    println!("  Reboot required:        {}", yes_no(status.pending_reboot));
     println!(
-        "Pending appliance rebuild: {}",
+        "  Appliance rebuild:      {}",
         yes_no(status.pending_appliance_rebuild)
     );
     if let Some(reason) = &status.appliance_rebuild_reason {
-        println!("Rebuild reason: {reason}");
+        println!("  Rebuild reason:         {reason}");
     }
     println!();
     println!("Components:");
     for component in &status.components {
+        println!("  {}", component.component);
         println!(
-            "  {:<6} current={} remote={} update={} error={}",
-            component.component,
-            component.current_version.as_deref().unwrap_or("unknown"),
-            component.remote_version.as_deref().unwrap_or("unknown"),
-            yes_no(component.update_available),
-            component.last_error.as_deref().unwrap_or("-"),
+            "    Current:   {}",
+            component.current_version.as_deref().unwrap_or("unknown")
         );
+        println!(
+            "    Available: {}",
+            component.remote_version.as_deref().unwrap_or("unknown")
+        );
+        println!("    Update:    {}", yes_no(component.update_available));
+        if let Some(error) = component.last_error.as_deref() {
+            if !error.trim().is_empty() {
+                println!("    Error:     {error}");
+            }
+        }
     }
     if let Some(slot) = &status.rootfs_slot_status {
         println!();
+        println!("Rootfs slots:");
+        println!("  Supported: {}", yes_no(slot.supported));
         println!(
-            "Rootfs slots: supported={} active={} inactive={} reason={}",
-            yes_no(slot.supported),
-            slot.active_slot.as_deref().unwrap_or("unknown"),
-            slot.inactive_slot.as_deref().unwrap_or("unknown"),
-            slot.reason.as_deref().unwrap_or("-"),
+            "  Active:    {}",
+            slot.active_slot.as_deref().unwrap_or("unknown")
         );
+        println!(
+            "  Inactive:  {}",
+            slot.inactive_slot.as_deref().unwrap_or("unknown")
+        );
+        if let Some(reason) = slot.reason.as_deref() {
+            if !reason.trim().is_empty() {
+                println!("  Note:      {reason}");
+            }
+        }
     }
     if !status.operation_logs.is_empty() {
         println!();

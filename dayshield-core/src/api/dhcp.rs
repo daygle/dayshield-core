@@ -746,7 +746,7 @@ fn kea_column(headers: &[String], names: &[&str]) -> Option<usize> {
     })
 }
 
-fn kea_value<'a>(cols: &'a [String], index: Option<usize>) -> &'a str {
+fn kea_value(cols: &[String], index: Option<usize>) -> &str {
     index
         .and_then(|idx| cols.get(idx))
         .map(String::as_str)

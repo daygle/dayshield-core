@@ -265,9 +265,7 @@ mod tests {
 
     #[test]
     fn test_parse_journald_firewall_line_valid() {
-        let line = format!(
-            r#"{{"__REALTIME_TIMESTAMP":"1705320000000000","MESSAGE":"DROP IN=eth0 OUT= SRC=192.168.1.1 DST=10.0.0.1 SPT=1234 DPT=443","SYSLOG_IDENTIFIER":"nftables"}}"#
-        );
+        let line = r#"{"__REALTIME_TIMESTAMP":"1705320000000000","MESSAGE":"DROP IN=eth0 OUT= SRC=192.168.1.1 DST=10.0.0.1 SPT=1234 DPT=443","SYSLOG_IDENTIFIER":"nftables"}"#.to_string();
         let event = parse_journald_firewall_line(&line).expect("should parse");
         match event {
             LogEvent::FirewallEvent { action, src_ip, .. } => {

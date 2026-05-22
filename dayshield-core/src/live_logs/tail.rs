@@ -167,7 +167,7 @@ mod tests {
     /// Helper: write `content` to a temp file and return its path.
     fn temp_file_with(content: &str) -> (tempfile::NamedTempFile, PathBuf) {
         let mut f = tempfile::NamedTempFile::new().expect("temp file");
-        write!(f, "{}", content).unwrap();
+        write!(f, "{content}").unwrap();
         let path = f.path().to_path_buf();
         (f, path)
     }

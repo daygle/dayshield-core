@@ -109,8 +109,7 @@ mod tests {
 
     fn alert_json(extra: &str) -> String {
         format!(
-            r#"{{"timestamp":"2024-01-15T12:00:00.000000+0000","event_type":"alert","src_ip":"10.0.0.1","dest_ip":"10.0.0.2","proto":"TCP","alert":{{"signature":"ET SCAN Nmap","severity":2{}}}}}"#,
-            extra
+            r#"{{"timestamp":"2024-01-15T12:00:00.000000+0000","event_type":"alert","src_ip":"10.0.0.1","dest_ip":"10.0.0.2","proto":"TCP","alert":{{"signature":"ET SCAN Nmap","severity":2{extra}}}}}"#
         )
     }
 

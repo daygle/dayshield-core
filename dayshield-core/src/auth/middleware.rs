@@ -7,9 +7,9 @@
 //! paths the middleware:
 //!
 //! 1. Extracts the bearer token from the `Authorization` header
-//!    (`Authorization: Bearer <token>`), from the `session` cookie, or from a
-//!    `token` URL query parameter (used by browser WebSocket clients that
-//!    cannot set custom headers).
+//!    (`Authorization: Bearer <token>`) or from the `session` cookie.
+//!    A `token` URL query parameter is accepted only on selected WebSocket
+//!    routes where browsers cannot set custom headers during handshake.
 //! 2. Validates the token signature and expiry using the HMAC-SHA256 session
 //!    key stored in `/etc/dayshield/session.key`.
 //! 3. On success, inserts an [`AuthenticatedUser`] extension into the request
@@ -46,20 +46,36 @@ use crate::auth::{model::AuthenticatedUser, session::validate_token};
 
 /// Paths that do not require an authentication token.
 ///
-/// Matching is prefix-based (a path matches if it *starts with* one of these
-/// strings, after normalising to lowercase).
+/// Matching is exact for fixed routes and scoped-prefix for selected public
+/// namespaces.
 const PUBLIC_PATHS: &[&str] = &[
     "/auth/login",
     "/auth/status",
     "/system/status",
-    "/installer/",
-    "/portal",
 ];
+
+/// Public path prefixes for scoped namespaces.
+const PUBLIC_PREFIXES: &[&str] = &["/installer/", "/portal"];
+
+/// Paths allowed to use `?token=<jwt>` transport for browser clients that
+/// cannot set custom headers during WebSocket handshake.
+const QUERY_TOKEN_ALLOWED_PATHS: &[&str] = &["/logs/ws", "/metrics/ws"];
 
 /// Returns `true` if `path` is on the public allow-list.
 fn is_public_path(path: &str) -> bool {
     let lower = path.to_lowercase();
-    PUBLIC_PATHS.iter().any(|prefix| lower.starts_with(prefix))
+    PUBLIC_PATHS.iter().any(|exact| lower == *exact)
+        || PUBLIC_PREFIXES
+            .iter()
+            .any(|prefix| lower.starts_with(prefix))
+}
+
+/// Returns `true` when a route is allowed to accept query-string token auth.
+fn allows_query_token(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    QUERY_TOKEN_ALLOWED_PATHS
+        .iter()
+        .any(|exact| lower == *exact)
 }
 
 // ---------------------------------------------------------------------------
@@ -106,9 +122,16 @@ fn token_from_query(req: &Request) -> Option<String> {
 /// Extract a token from the request, preferring the `Authorization` header
 /// over the `session` cookie, and then URL query parameter.
 fn extract_token(req: &Request) -> Option<String> {
+    let path = req.uri().path();
     token_from_header(req)
         .or_else(|| token_from_cookie(req))
-        .or_else(|| token_from_query(req))
+        .or_else(|| {
+            if allows_query_token(path) {
+                token_from_query(req)
+            } else {
+                None
+            }
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +243,7 @@ mod tests {
         Router::new()
             .route("/protected", get(dummy_handler))
             .route("/auth/login", get(dummy_handler))
+            .route("/auth/status", get(dummy_handler))
             .route("/system/status", get(dummy_handler))
             .layer(middleware::from_fn(move |req, next| {
                 let kp = key_path.clone();
@@ -257,6 +281,25 @@ mod tests {
                 Request::builder()
                     .method("GET")
                     .uri("/auth/login")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_status_route_is_public() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("session.key");
+        let app = build_app(&key_path);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/auth/status")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -315,7 +358,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn protected_route_accessible_with_query_token() {
+    async fn protected_route_rejects_query_token() {
         let dir = tempfile::tempdir().unwrap();
         let key_path = dir.path().join("session.key");
 
@@ -333,6 +376,42 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/protected?token={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn websocket_route_allows_query_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("session.key");
+
+        // Pre-create key so we can use it to sign a token.
+        let key = crate::auth::session::load_or_create_key(&key_path).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let token = crate::auth::session::create_token("admin", &key, now).unwrap();
+
+        let app = Router::new()
+            .route("/logs/ws", get(dummy_handler))
+            .layer(middleware::from_fn({
+                let kp = key_path.clone();
+                move |req, next| {
+                    let kp = kp.clone();
+                    async move { auth_middleware_with_key_path(req, next, &kp).await }
+                }
+            }));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/logs/ws?token={token}"))
                     .body(Body::empty())
                     .unwrap(),
             )

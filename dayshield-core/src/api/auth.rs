@@ -11,6 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use axum::{
+    extract::Request,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -22,7 +23,7 @@ use tracing::info;
 use crate::auth::{
     model::{AuthError, AuthenticatedUser},
     password::{hash_password, verify_password},
-    session::{create_token_with_lifetime, load_or_create_key, DEFAULT_KEY_PATH},
+    session::{create_token_with_lifetime, load_or_create_key, validate_token, DEFAULT_KEY_PATH},
     storage::{load_user, update_password, DEFAULT_ADMIN_PATH},
 };
 use crate::state::AppState;
@@ -353,15 +354,56 @@ pub struct AuthStatusResponse {
 
 /// Return the current authentication status.
 ///
-/// If the middleware has injected an [`AuthenticatedUser`] extension, the
-/// request is authenticated.
-pub async fn status(user: Option<Extension<AuthenticatedUser>>) -> impl IntoResponse {
-    match user {
-        Some(Extension(u)) => Json(AuthStatusResponse {
+/// This endpoint remains public and inspects optional credentials from the
+/// request so clients can check whether their current token is valid.
+pub async fn status(req: Request) -> impl IntoResponse {
+    // Evaluate current token explicitly so the endpoint can report both
+    // authenticated and unauthenticated states without relying on middleware.
+    let token = {
+        let from_header = req
+            .headers()
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(ToOwned::to_owned);
+
+        let from_cookie = req
+            .headers()
+            .get(axum::http::header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|cookie_header| {
+                cookie_header
+                    .split(';')
+                    .map(str::trim)
+                    .find_map(|part| part.strip_prefix("session=").map(ToOwned::to_owned))
+            });
+
+        from_header.or(from_cookie)
+    };
+
+    let Some(token) = token else {
+        return Json(AuthStatusResponse {
+            authenticated: false,
+            username: None,
+        });
+    };
+
+    let key = match load_or_create_key(Path::new(DEFAULT_KEY_PATH)) {
+        Ok(k) => k,
+        Err(_) => {
+            return Json(AuthStatusResponse {
+                authenticated: false,
+                username: None,
+            });
+        }
+    };
+
+    match validate_token(&token, &key) {
+        Ok(claims) => Json(AuthStatusResponse {
             authenticated: true,
-            username: Some(u.username),
+            username: Some(claims.sub),
         }),
-        None => Json(AuthStatusResponse {
+        Err(_) => Json(AuthStatusResponse {
             authenticated: false,
             username: None,
         }),

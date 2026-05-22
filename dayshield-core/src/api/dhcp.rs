@@ -717,9 +717,24 @@ pub async fn delete_static_lease(
 pub async fn list_active_leases(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
     use crate::engine::dhcp::KEA_LEASES_PATH;
 
-    let content = match tokio::fs::read_to_string(KEA_LEASES_PATH).await {
-        Ok(c) => c,
-        Err(_) => {
+    // Some distributions or package versions place the Kea memfile at slightly
+    // different paths. Try a small set of plausible locations so the API still
+    // works if Kea was configured elsewhere on disk.
+    const ALT_KEA_LEASES_PATH: &str = "/var/lib/kea/kea-leases.csv";
+
+    let try_paths = [KEA_LEASES_PATH, ALT_KEA_LEASES_PATH];
+
+    let mut content = None;
+    for path in &try_paths {
+        if let Ok(c) = tokio::fs::read_to_string(path).await {
+            content = Some(c);
+            break;
+        }
+    }
+
+    let content = match content {
+        Some(c) => c,
+        None => {
             return Json(serde_json::json!({ "success": true, "data": serde_json::json!([]) }));
         }
     };

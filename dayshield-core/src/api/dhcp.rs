@@ -18,7 +18,7 @@
 use std::{net::Ipv6Addr, sync::Arc};
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
@@ -134,7 +134,7 @@ pub struct CreateStaticLeaseRequest {
 }
 
 /// Response for a single active lease parsed from Kea.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DhcpLeaseResponse {
     pub mac: String,
@@ -143,6 +143,17 @@ pub struct DhcpLeaseResponse {
     pub starts: String,
     pub ends: String,
     pub state: String,
+}
+
+/// Query parameters accepted by lease-list endpoints.
+///
+/// Older UI builds call `GET /dhcp?iface=<name>` while the newer API uses
+/// `GET /dhcp/leases`. Keep both forms wired to the same lease reader.
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DhcpLeaseQuery {
+    pub iface: Option<String>,
+    pub interface: Option<String>,
 }
 
 /// Pool view response (one per DhcpScope).
@@ -795,9 +806,49 @@ fn parse_kea4_lease_line(
     })
 }
 
+async fn read_kea4_leases() -> Vec<DhcpLeaseResponse> {
+    use crate::engine::dhcp::KEA_LEASES_PATH;
+
+    let content = match tokio::fs::read_to_string(KEA_LEASES_PATH).await {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut lines = content.lines().filter(|line| !line.trim().is_empty());
+    let Some(header_line) = lines.next() else {
+        return vec![];
+    };
+    let headers = parse_csv_line(header_line);
+
+    lines
+        .filter_map(|line| parse_kea4_lease_line(&headers, line, now))
+        .collect()
+}
+
+fn requested_dhcp_iface(query: &DhcpLeaseQuery) -> Option<&str> {
+    query
+        .iface
+        .as_deref()
+        .or(query.interface.as_deref())
+        .map(str::trim)
+        .filter(|iface| !iface.is_empty())
+}
+
+fn dhcp_config_matches_requested_iface(cfg: Option<&DhcpConfig>, requested_iface: &str) -> bool {
+    cfg.map(|cfg| cfg.interface.trim().is_empty() || cfg.interface == requested_iface)
+        .unwrap_or(true)
+}
+
 #[cfg(test)]
 mod kea4_lease_parser_tests {
-    use super::{parse_csv_line, parse_kea4_lease_line};
+    use super::{
+        dhcp_config_matches_requested_iface, parse_csv_line, parse_kea4_lease_line, DhcpConfig,
+    };
 
     #[test]
     fn parses_legacy_kea4_lease_csv() {
@@ -833,37 +884,54 @@ mod kea4_lease_parser_tests {
         assert_eq!(lease.mac, "11:22:33:44:55:66");
         assert_eq!(lease.state, "active");
     }
+
+    #[test]
+    fn requested_iface_matches_empty_or_same_config_interface() {
+        let empty = DhcpConfig {
+            enabled: true,
+            interface: String::new(),
+            scopes: vec![],
+        };
+        let ens19 = DhcpConfig {
+            enabled: true,
+            interface: "ens19".to_string(),
+            scopes: vec![],
+        };
+
+        assert!(dhcp_config_matches_requested_iface(Some(&empty), "ens19"));
+        assert!(dhcp_config_matches_requested_iface(Some(&ens19), "ens19"));
+        assert!(!dhcp_config_matches_requested_iface(Some(&ens19), "ens20"));
+        assert!(dhcp_config_matches_requested_iface(None, "ens19"));
+    }
 }
 
 /// Return DHCP leases parsed from DayShield's configured Kea memfile lease database.
 ///
 /// Returns an empty array when the Kea lease file does not exist yet.
-pub async fn list_active_leases(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
-    use crate::engine::dhcp::KEA_LEASES_PATH;
+pub async fn list_active_leases(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<DhcpLeaseQuery>,
+) -> impl IntoResponse {
+    let mut leases = read_kea4_leases().await;
 
-    let content = match tokio::fs::read_to_string(KEA_LEASES_PATH).await {
-        Ok(c) => c,
-        Err(_) => {
-            return Json(serde_json::json!({ "success": true, "data": serde_json::json!([]) }));
+    if let Some(iface) = requested_dhcp_iface(&query) {
+        match state.config_store.load_dhcp_config() {
+            Ok(cfg) if !dhcp_config_matches_requested_iface(cfg.as_ref(), iface) => {
+                leases.clear();
+            }
+            Err(error) => {
+                warn!(error = %error, "dhcp: could not load config while filtering leases by interface");
+            }
+            _ => {}
         }
-    };
+    }
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let mut lines = content.lines().filter(|line| !line.trim().is_empty());
-    let Some(header_line) = lines.next() else {
-        return Json(serde_json::json!({ "success": true, "data": serde_json::json!([]) }));
-    };
-    let headers = parse_csv_line(header_line);
-
-    let leases: Vec<DhcpLeaseResponse> = lines
-        .filter_map(|line| parse_kea4_lease_line(&headers, line, now))
-        .collect();
-
-    Json(serde_json::json!({ "success": true, "data": leases }))
+    Json(serde_json::json!({
+        "success": true,
+        "data": leases,
+        "leases": leases,
+        "clients": leases,
+    }))
 }
 
 // ---------------------------------------------------------------------------

@@ -85,6 +85,7 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `GET  /dns/overrides`                                 - list DNS host and domain overrides
 /// - `POST /dns/overrides`                                 - create a DNS override
 /// - `DELETE /dns/overrides/{name}`                        - delete a DNS override
+/// - `GET  /dhcp?iface=...`                                - compatibility alias for DHCP leases
 /// - `GET  /dhcp/config`                                   - get DHCP (Kea) configuration
 /// - `POST /dhcp/config`                                   - update DHCP (Kea) configuration
 /// - `GET  /suricata/config`                               - get Suricata configuration
@@ -116,6 +117,7 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `POST /acme/config`                                   - update ACME certificate configuration
 /// - `POST /acme/issue`                                    - trigger certificate issuance / renewal
 /// - `GET  /acme/status`                                   - get certificate status for primary domain
+/// - `GET  /logs`                                          - compatibility alias for historical log search
 /// - `GET  /logs/ws`                                       - live log stream (WebSocket upgrade)
 /// - `GET  /logs/search?from=...&to=...`                   - historical log search by date/time range
 /// - `GET  /metrics`                                       - latest metrics snapshot (JSON)
@@ -272,6 +274,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/dynamic-dns/status", get(dynamic_dns::get_status))
         .route("/dynamic-dns/update", post(dynamic_dns::trigger_update))
         // DHCP
+        .route("/dhcp", get(dhcp::list_active_leases))
         .route("/dhcp/config", get(dhcp::get_config))
         .route("/dhcp/config", post(dhcp::update_config))
         .route("/dhcp6/config", get(dhcp::get_config_v6))
@@ -411,7 +414,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/acme/issue", post(acme::issue_certificates))
         .route("/acme/status", get(acme::get_certificate_status))
         // Live logs WebSocket
+        .route("/logs", get(logs::search_logs))
         .route("/logs/ws", get(logs::ws_handler))
+        .route("/logs/live", get(logs::ws_handler))
+        .route("/live-logs", get(logs::ws_handler))
         .route("/logs/search", get(logs::search_logs))
         // Metrics REST API
         .route("/metrics", get(metrics::get_latest))

@@ -9,7 +9,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use tokio::process::Command;
 use tracing::warn;
@@ -21,10 +21,12 @@ use crate::live_logs::{
 
 #[derive(Debug, Deserialize)]
 pub struct SearchLogsQuery {
-    pub from: String,
-    pub to: String,
+    pub from: Option<String>,
+    pub to: Option<String>,
     pub source: Option<String>,
     pub q: Option<String>,
+    pub query: Option<String>,
+    pub search: Option<String>,
     pub limit: Option<usize>,
 }
 
@@ -50,14 +52,56 @@ impl IntoResponse for LogsApiError {
     }
 }
 
-fn parse_iso8601(value: &str, field: &str) -> Result<DateTime<Utc>, LogsApiError> {
+fn parse_log_timestamp(value: &str, field: &str) -> Result<DateTime<Utc>, LogsApiError> {
     DateTime::parse_from_rfc3339(value)
         .map(|dt| dt.with_timezone(&Utc))
+        .or_else(|_| parse_unix_timestamp(value).ok_or(()))
         .map_err(|_| {
             LogsApiError::Validation(format!(
-                "invalid {field} timestamp (expected RFC3339): {value}"
+                "invalid {field} timestamp (expected RFC3339 or Unix timestamp): {value}"
             ))
         })
+}
+
+fn parse_unix_timestamp(value: &str) -> Option<DateTime<Utc>> {
+    let parsed = value.parse::<i64>().ok()?;
+    let seconds = if parsed.abs() >= 1_000_000_000_000 {
+        parsed / 1000
+    } else {
+        parsed
+    };
+
+    DateTime::from_timestamp(seconds, 0)
+}
+
+fn resolve_search_range(
+    query: &SearchLogsQuery,
+) -> Result<(DateTime<Utc>, DateTime<Utc>), LogsApiError> {
+    let to = match query.to.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        Some(value) => parse_log_timestamp(value, "to")?,
+        None => Utc::now(),
+    };
+    let from = match query
+        .from
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        Some(value) => parse_log_timestamp(value, "from")?,
+        None => to - Duration::hours(24),
+    };
+
+    Ok((from, to))
+}
+
+fn search_needle(query: &SearchLogsQuery) -> Option<String> {
+    query
+        .q
+        .as_ref()
+        .or(query.query.as_ref())
+        .or(query.search.as_ref())
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| !value.is_empty())
 }
 
 fn parse_event_ts(event: &LogEvent) -> Option<DateTime<Utc>> {
@@ -198,16 +242,15 @@ pub async fn ws_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
 /// Handler: search historical logs in a selected date/time range.
 ///
 /// Query params:
-/// - `from` (required, RFC3339)
-/// - `to` (required, RFC3339)
+/// - `from` (optional, RFC3339 or Unix timestamp; defaults to 24 hours before `to`)
+/// - `to` (optional, RFC3339 or Unix timestamp; defaults to now)
 /// - `source` (optional: all|system|firewall|suricata, default all)
-/// - `q` (optional case-insensitive contains search)
+/// - `q`, `query`, or `search` (optional case-insensitive contains search)
 /// - `limit` (optional max items, default 5000, hard cap 20000)
 pub async fn search_logs(
     Query(query): Query<SearchLogsQuery>,
 ) -> Result<impl IntoResponse, LogsApiError> {
-    let from = parse_iso8601(&query.from, "from")?;
-    let to = parse_iso8601(&query.to, "to")?;
+    let (from, to) = resolve_search_range(&query)?;
     if to < from {
         return Err(LogsApiError::Validation(
             "to must be greater than or equal to from".to_string(),
@@ -222,7 +265,7 @@ pub async fn search_logs(
         )));
     }
 
-    let q = query.q.as_ref().map(|v| v.to_lowercase());
+    let q = search_needle(&query);
     let limit = query.limit.unwrap_or(5000).min(20000);
 
     let mut events = Vec::<LogEvent>::new();
@@ -265,6 +308,56 @@ pub async fn search_logs(
     Ok(Json(serde_json::json!({
         "success": true,
         "data": events,
+        "logs": events,
         "count": events.len(),
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_log_timestamp_accepts_rfc3339() {
+        let parsed = parse_log_timestamp("2026-05-23T02:03:04Z", "from").unwrap();
+        assert_eq!(parsed.to_rfc3339(), "2026-05-23T02:03:04+00:00");
+    }
+
+    #[test]
+    fn parse_log_timestamp_accepts_unix_millis() {
+        let parsed = parse_log_timestamp("1779501784000", "from").unwrap();
+        assert_eq!(parsed.to_rfc3339(), "2026-05-23T02:03:04+00:00");
+    }
+
+    #[test]
+    fn resolve_search_range_defaults_from_to_last_24_hours() {
+        let query = SearchLogsQuery {
+            from: None,
+            to: Some("2026-05-23T02:03:04Z".to_string()),
+            source: None,
+            q: None,
+            query: None,
+            search: None,
+            limit: None,
+        };
+
+        let (from, to) = resolve_search_range(&query).unwrap();
+        assert_eq!(to.to_rfc3339(), "2026-05-23T02:03:04+00:00");
+        assert_eq!((to - from).num_hours(), 24);
+    }
+
+    #[test]
+    fn search_needle_accepts_compat_query_names() {
+        let query = SearchLogsQuery {
+            from: None,
+            to: None,
+            source: None,
+            q: None,
+            query: Some(" DROP ".to_string()),
+            search: None,
+            limit: None,
+        };
+
+        assert_eq!(search_needle(&query).as_deref(), Some("drop"));
+    }
 }

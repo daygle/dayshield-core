@@ -59,7 +59,12 @@ const PUBLIC_PREFIXES: &[&str] = &["/installer/", "/portal"];
 
 /// Paths allowed to use `?token=<jwt>` transport for browser clients that
 /// cannot set custom headers during WebSocket handshake.
-const QUERY_TOKEN_ALLOWED_PATHS: &[&str] = &["/logs/ws", "/metrics/ws"];
+const QUERY_TOKEN_ALLOWED_PATHS: &[&str] = &[
+    "/logs/ws",
+    "/logs/live",
+    "/live-logs",
+    "/metrics/ws",
+];
 
 /// Returns `true` if `path` is on the public allow-list.
 fn is_public_path(path: &str) -> bool {

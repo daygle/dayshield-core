@@ -54,6 +54,9 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `POST /auth/change-password`                          - change the admin password
 /// - `GET  /auth/status`                                   - authentication status
 /// - `GET  /system/status`                                 - overall system health and version information
+/// - `GET  /system/services`                               - list manageable service runtimes
+/// - `GET  /system/services/{service}`                     - get one manageable service runtime
+/// - `POST /system/services/{service}/{action}`             - start, stop, or restart one service
 /// - `GET  /system/config`                                 - host-level settings (hostname, timezone, NTP…)
 /// - `PUT  /system/config`                                 - update host-level settings
 /// - `POST /system/reboot`                                 - trigger immediate system reboot
@@ -178,6 +181,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/auth/status", get(auth::status))
         // System
         .route("/system/status", get(system::get_status))
+        .route("/system/services", get(system::list_services))
+        .route("/system/services/{service}", get(system::get_service))
+        .route(
+            "/system/services/{service}/{action}",
+            post(system::control_service),
+        )
         .route("/system/config", get(system::get_config))
         .route("/system/config", put(system::update_config))
         .route("/system/reboot", post(system::reboot))

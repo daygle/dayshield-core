@@ -1,6 +1,9 @@
 //! System endpoints.
 //!
 //! - `GET  /system/status`   - overall health and version
+//! - `GET  /system/services` - list manageable service runtimes
+//! - `GET  /system/services/{service}` - get one manageable service runtime
+//! - `POST /system/services/{service}/{action}` - start/stop/restart a service
 //! - `GET  /system/config`   - host-level settings (hostname, timezone, NTP…)
 //! - `PUT  /system/config`   - update host-level settings
 //! - `POST /system/reboot`   - schedule an immediate systemctl reboot
@@ -16,7 +19,12 @@
 
 use std::{collections::BTreeSet, fs, path::Path, sync::Arc};
 
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    extract::{Path as AxumPath, State},
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,7 +36,9 @@ use crate::{
         dns::apply_config_with_ipv6 as apply_dns_config, interfaces::refresh_router_advertisements,
         ipv6::apply_ipv6_setting,
     },
-    state::AppState,
+    state::{
+        AppState, SVC_CLOUDFLARED, SVC_CROWDSEC, SVC_DHCP, SVC_DNS, SVC_NFTABLES, SVC_SURICATA,
+    },
     update::{self, UpdateComponent, UpdateSettings},
 };
 
@@ -38,6 +48,12 @@ use crate::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum SystemApiError {
+    #[error("not found: {0}")]
+    NotFound(String),
+
+    #[error("validation error: {0}")]
+    ValidationFailed(String),
+
     #[error("storage error: {0:#}")]
     StorageError(#[from] anyhow::Error),
 
@@ -51,8 +67,15 @@ const SSH_AUTHORIZED_KEYS_PATH: &str = "/root/.ssh/authorized_keys";
 
 impl IntoResponse for SystemApiError {
     fn into_response(self) -> axum::response::Response {
+        let status = match &self {
+            SystemApiError::NotFound(_) => StatusCode::NOT_FOUND,
+            SystemApiError::ValidationFailed(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            SystemApiError::StorageError(_) | SystemApiError::CommandError(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        };
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            status,
             Json(serde_json::json!({ "error": self.to_string() })),
         )
             .into_response()
@@ -87,6 +110,595 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse
         services_healthy: all_healthy,
         service_count: count,
     })
+}
+
+// ---------------------------------------------------------------------------
+// GET /system/services
+// GET /system/services/{service}
+// POST /system/services/{service}/{action}
+// ---------------------------------------------------------------------------
+
+const SVC_NTP: &str = "ntp";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServiceAction {
+    Start,
+    Stop,
+    Restart,
+}
+
+impl ServiceAction {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "start" => Some(Self::Start),
+            "stop" => Some(Self::Stop),
+            "restart" => Some(Self::Restart),
+            _ => None,
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Stop => "stop",
+            Self::Restart => "restart",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Start => "Start",
+            Self::Stop => "Stop",
+            Self::Restart => "Restart",
+        }
+    }
+
+    fn systemctl_verb(self) -> &'static str {
+        self.id()
+    }
+
+    fn variant(self) -> &'static str {
+        match self {
+            Self::Start => "primary",
+            Self::Stop => "danger",
+            Self::Restart => "neutral",
+        }
+    }
+
+    fn requires_confirmation(self) -> bool {
+        matches!(self, Self::Stop)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ServiceDefinition {
+    id: &'static str,
+    title: &'static str,
+    category: &'static str,
+    description: &'static str,
+}
+
+const SERVICE_DEFINITIONS: &[ServiceDefinition] = &[
+    ServiceDefinition {
+        id: SVC_NFTABLES,
+        title: "Firewall",
+        category: "security",
+        description: "nftables packet filtering and NAT enforcement",
+    },
+    ServiceDefinition {
+        id: SVC_DNS,
+        title: "DNS",
+        category: "services",
+        description: "Unbound recursive DNS and DNS-over-TLS listener",
+    },
+    ServiceDefinition {
+        id: SVC_DHCP,
+        title: "DHCP",
+        category: "services",
+        description: "Kea DHCPv4 and DHCPv6 address assignment",
+    },
+    ServiceDefinition {
+        id: SVC_SURICATA,
+        title: "Suricata",
+        category: "security",
+        description: "Suricata intrusion detection and prevention engine",
+    },
+    ServiceDefinition {
+        id: SVC_CROWDSEC,
+        title: "CrowdSec",
+        category: "security",
+        description: "CrowdSec local agent used by DayShield decisions",
+    },
+    ServiceDefinition {
+        id: SVC_CLOUDFLARED,
+        title: "Cloudflared",
+        category: "services",
+        description: "Cloudflare Tunnel connector",
+    },
+    ServiceDefinition {
+        id: SVC_NTP,
+        title: "NTP",
+        category: "services",
+        description: "systemd-timesyncd or chrony time synchronisation",
+    },
+];
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceListResponse {
+    pub generated_at: String,
+    pub services: Vec<ServiceRuntimeStatus>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceRuntimeStatus {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub category: &'static str,
+    pub description: &'static str,
+    pub configured: bool,
+    pub status: &'static str,
+    pub status_label: String,
+    pub configured_units: Vec<String>,
+    pub units: Vec<ServiceUnitStatus>,
+    pub actions: Vec<ServiceActionDescriptor>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceUnitStatus {
+    pub unit: String,
+    pub available: bool,
+    pub running: bool,
+    pub load_state: String,
+    pub active_state: String,
+    pub sub_state: String,
+    pub unit_file_state: String,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceActionDescriptor {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub method: &'static str,
+    pub href: String,
+    pub variant: &'static str,
+    pub requires_confirmation: bool,
+    pub enabled: bool,
+    pub disabled_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceActionResponse {
+    pub action: &'static str,
+    pub message: String,
+    pub affected_units: Vec<String>,
+    pub service: ServiceRuntimeStatus,
+}
+
+/// Handler: return all services that support direct runtime controls.
+pub async fn list_services(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, SystemApiError> {
+    let mut services = Vec::with_capacity(SERVICE_DEFINITIONS.len());
+    for def in SERVICE_DEFINITIONS {
+        services.push(build_service_status(&state, def).await?);
+    }
+
+    Ok(Json(ServiceListResponse {
+        generated_at: Utc::now().to_rfc3339(),
+        services,
+    }))
+}
+
+/// Handler: return live runtime status for one manageable service.
+pub async fn get_service(
+    AxumPath(service): AxumPath<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, SystemApiError> {
+    let def = find_service_definition(&service)?;
+    Ok(Json(build_service_status(&state, def).await?))
+}
+
+/// Handler: run a whitelisted service action through systemctl.
+pub async fn control_service(
+    AxumPath((service, action)): AxumPath<(String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, SystemApiError> {
+    let def = find_service_definition(&service)?;
+    let action = ServiceAction::parse(&action).ok_or_else(|| {
+        SystemApiError::ValidationFailed(
+            "unsupported service action; expected start, stop, or restart".to_string(),
+        )
+    })?;
+    let target_units = action_units(&state, def.id, action).await?;
+
+    info!(
+        service = def.id,
+        action = action.id(),
+        units = ?target_units,
+        "system: service action requested"
+    );
+
+    for unit in &target_units {
+        run_systemctl_unit(action, unit).await?;
+    }
+
+    let status = build_service_status(&state, def).await?;
+    update_service_health(&state, def.id, &status).await;
+
+    Ok(Json(ServiceActionResponse {
+        action: action.id(),
+        message: format!(
+            "{} {} completed",
+            def.title,
+            action.label().to_ascii_lowercase()
+        ),
+        affected_units: target_units.into_iter().map(str::to_string).collect(),
+        service: status,
+    }))
+}
+
+fn find_service_definition(service: &str) -> Result<&'static ServiceDefinition, SystemApiError> {
+    SERVICE_DEFINITIONS
+        .iter()
+        .find(|def| def.id.eq_ignore_ascii_case(service.trim()))
+        .ok_or_else(|| SystemApiError::NotFound(format!("unknown manageable service: {service}")))
+}
+
+async fn build_service_status(
+    state: &Arc<AppState>,
+    def: &'static ServiceDefinition,
+) -> Result<ServiceRuntimeStatus, SystemApiError> {
+    let all_units = all_service_units(def.id);
+    let configured_units = configured_service_units(state, def.id).await?;
+    let mut units = Vec::with_capacity(all_units.len());
+    for unit in all_units {
+        units.push(read_unit_status(unit).await);
+    }
+
+    let configured = !configured_units.is_empty();
+    let (status, status_label) = summarize_service_status(configured, &configured_units, &units);
+    let actions = service_action_descriptors(def.id, configured, &units);
+
+    Ok(ServiceRuntimeStatus {
+        id: def.id,
+        title: def.title,
+        category: def.category,
+        description: def.description,
+        configured,
+        status,
+        status_label,
+        configured_units: configured_units.into_iter().map(str::to_string).collect(),
+        units,
+        actions,
+        updated_at: Utc::now().to_rfc3339(),
+    })
+}
+
+fn all_service_units(service_id: &str) -> Vec<&'static str> {
+    match service_id {
+        SVC_NFTABLES => vec!["nftables.service"],
+        SVC_DNS => vec!["unbound.service"],
+        SVC_DHCP => vec!["kea-dhcp4-server.service", "kea-dhcp6-server.service"],
+        SVC_SURICATA => vec!["suricata.service"],
+        SVC_CROWDSEC => vec!["crowdsec.service"],
+        SVC_CLOUDFLARED => vec!["cloudflared.service"],
+        SVC_NTP => vec![
+            "systemd-timesyncd.service",
+            "chrony.service",
+            "chronyd.service",
+        ],
+        _ => vec![],
+    }
+}
+
+async fn configured_service_units(
+    state: &Arc<AppState>,
+    service_id: &str,
+) -> Result<Vec<&'static str>, SystemApiError> {
+    match service_id {
+        SVC_NFTABLES => Ok(vec!["nftables.service"]),
+        SVC_DNS => {
+            let enabled = state
+                .config_store
+                .load_dns_config()
+                .map_err(SystemApiError::StorageError)?
+                .unwrap_or_default()
+                .enabled;
+            Ok(if enabled {
+                vec!["unbound.service"]
+            } else {
+                vec![]
+            })
+        }
+        SVC_DHCP => {
+            let mut units = Vec::new();
+            let dhcp_enabled = state
+                .config_store
+                .load_dhcp_config()
+                .map_err(SystemApiError::StorageError)?
+                .map(|cfg| cfg.enabled)
+                .unwrap_or(false);
+            if dhcp_enabled {
+                units.push("kea-dhcp4-server.service");
+            }
+
+            let dhcp6_enabled = state
+                .config_store
+                .load_dhcp6_config()
+                .map_err(SystemApiError::StorageError)?
+                .map(|cfg| cfg.enabled)
+                .unwrap_or(false);
+            if dhcp6_enabled {
+                units.push("kea-dhcp6-server.service");
+            }
+            Ok(units)
+        }
+        SVC_SURICATA => {
+            let enabled = state
+                .config_store
+                .load_suricata_config()
+                .map_err(SystemApiError::StorageError)?
+                .map(|cfg| cfg.enabled)
+                .unwrap_or(false);
+            Ok(if enabled {
+                vec!["suricata.service"]
+            } else {
+                vec![]
+            })
+        }
+        SVC_CROWDSEC => {
+            let enabled = state
+                .config_store
+                .load_crowdsec_config()
+                .map_err(SystemApiError::StorageError)?
+                .map(|cfg| cfg.enabled)
+                .unwrap_or(false);
+            Ok(if enabled {
+                vec!["crowdsec.service"]
+            } else {
+                vec![]
+            })
+        }
+        SVC_CLOUDFLARED => {
+            let enabled = state
+                .config_store
+                .load_cloudflared_config()
+                .map_err(SystemApiError::StorageError)?
+                .unwrap_or_default()
+                .enabled;
+            Ok(if enabled {
+                vec!["cloudflared.service"]
+            } else {
+                vec![]
+            })
+        }
+        SVC_NTP => {
+            let cfg = crate::ntp::config::load(&state.config_store)
+                .map_err(SystemApiError::StorageError)?;
+            if !cfg.enabled {
+                return Ok(vec![]);
+            }
+            if cfg.serve_clients {
+                Ok(first_available_unit(&["chrony.service", "chronyd.service"])
+                    .await
+                    .into_iter()
+                    .collect())
+            } else if let Some(unit) = first_available_unit(&[
+                "systemd-timesyncd.service",
+                "chrony.service",
+                "chronyd.service",
+            ])
+            .await
+            {
+                Ok(vec![unit])
+            } else {
+                Ok(vec![])
+            }
+        }
+        _ => Ok(vec![]),
+    }
+}
+
+async fn first_available_unit(candidates: &[&'static str]) -> Option<&'static str> {
+    for unit in candidates {
+        if read_unit_status(unit).await.available {
+            return Some(*unit);
+        }
+    }
+    None
+}
+
+async fn action_units(
+    state: &Arc<AppState>,
+    service_id: &str,
+    action: ServiceAction,
+) -> Result<Vec<&'static str>, SystemApiError> {
+    if matches!(action, ServiceAction::Stop) {
+        let mut units = Vec::new();
+        for unit in all_service_units(service_id) {
+            if read_unit_status(unit).await.available {
+                units.push(unit);
+            }
+        }
+        if units.is_empty() {
+            return Err(SystemApiError::ValidationFailed(format!(
+                "{service_id} has no available systemd units to stop"
+            )));
+        }
+        return Ok(units);
+    }
+
+    let units = configured_service_units(state, service_id).await?;
+    if units.is_empty() {
+        return Err(SystemApiError::ValidationFailed(format!(
+            "{service_id} is disabled or has no available configured service unit"
+        )));
+    }
+    Ok(units)
+}
+
+async fn run_systemctl_unit(action: ServiceAction, unit: &str) -> Result<(), SystemApiError> {
+    let output = tokio::process::Command::new("systemctl")
+        .args([action.systemctl_verb(), unit])
+        .output()
+        .await
+        .map_err(|err| SystemApiError::CommandError(format!("failed to spawn systemctl: {err}")))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() { stderr } else { stdout };
+    Err(SystemApiError::CommandError(if detail.is_empty() {
+        format!("systemctl {} {unit} failed", action.systemctl_verb())
+    } else {
+        format!(
+            "systemctl {} {unit} failed: {detail}",
+            action.systemctl_verb()
+        )
+    }))
+}
+
+async fn read_unit_status(unit: &str) -> ServiceUnitStatus {
+    let mut status = ServiceUnitStatus {
+        unit: unit.to_string(),
+        available: false,
+        running: false,
+        load_state: "unknown".to_string(),
+        active_state: "unknown".to_string(),
+        sub_state: "unknown".to_string(),
+        unit_file_state: "unknown".to_string(),
+        last_error: None,
+    };
+
+    match tokio::process::Command::new("systemctl")
+        .args([
+            "show",
+            unit,
+            "--property=LoadState,ActiveState,SubState,UnitFileState",
+            "--no-pager",
+        ])
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if let Some(value) = line.strip_prefix("LoadState=") {
+                    status.load_state = value.trim().to_string();
+                } else if let Some(value) = line.strip_prefix("ActiveState=") {
+                    status.active_state = value.trim().to_string();
+                } else if let Some(value) = line.strip_prefix("SubState=") {
+                    status.sub_state = value.trim().to_string();
+                } else if let Some(value) = line.strip_prefix("UnitFileState=") {
+                    status.unit_file_state = value.trim().to_string();
+                }
+            }
+            status.available = status.load_state != "not-found";
+            status.running = status.active_state == "active";
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            status.last_error = Some(if stderr.is_empty() {
+                format!("systemctl show {unit} failed")
+            } else {
+                stderr
+            });
+        }
+        Err(err) => {
+            status.last_error = Some(format!("failed to query systemctl: {err}"));
+        }
+    }
+
+    status
+}
+
+fn summarize_service_status(
+    configured: bool,
+    configured_units: &[&'static str],
+    units: &[ServiceUnitStatus],
+) -> (&'static str, String) {
+    if !configured {
+        return ("notConfigured", "Disabled in configuration".to_string());
+    }
+
+    let relevant = units
+        .iter()
+        .filter(|unit| configured_units.contains(&unit.unit.as_str()))
+        .collect::<Vec<_>>();
+
+    if relevant.is_empty() {
+        return ("unknown", "Runtime unit could not be resolved".to_string());
+    }
+
+    if relevant.iter().any(|unit| !unit.available) {
+        return ("missing", "Configured unit is not installed".to_string());
+    }
+
+    let running = relevant.iter().filter(|unit| unit.running).count();
+    match running {
+        0 => ("stopped", "Configured service is stopped".to_string()),
+        n if n == relevant.len() => ("running", "Running".to_string()),
+        n => (
+            "degraded",
+            format!("{n}/{} configured units running", relevant.len()),
+        ),
+    }
+}
+
+fn service_action_descriptors(
+    service_id: &'static str,
+    configured: bool,
+    units: &[ServiceUnitStatus],
+) -> Vec<ServiceActionDescriptor> {
+    let has_available_unit = units.iter().any(|unit| unit.available);
+    [
+        ServiceAction::Start,
+        ServiceAction::Stop,
+        ServiceAction::Restart,
+    ]
+    .into_iter()
+    .map(|action| {
+        let disabled_reason = match action {
+            ServiceAction::Start | ServiceAction::Restart if !configured => {
+                Some("Enable this service in configuration before using this action".to_string())
+            }
+            ServiceAction::Stop if !has_available_unit => {
+                Some("No systemd unit is available for this service".to_string())
+            }
+            _ => None,
+        };
+        ServiceActionDescriptor {
+            id: action.id(),
+            label: action.label(),
+            method: "POST",
+            href: format!("/system/services/{service_id}/{}", action.id()),
+            variant: action.variant(),
+            requires_confirmation: action.requires_confirmation(),
+            enabled: disabled_reason.is_none(),
+            disabled_reason,
+        }
+    })
+    .collect()
+}
+
+async fn update_service_health(
+    state: &Arc<AppState>,
+    service_id: &str,
+    status: &ServiceRuntimeStatus,
+) {
+    let healthy = status.status == "running";
+    let mut map = state.services.write().await;
+    map.insert(service_id.to_string(), healthy);
 }
 
 // ---------------------------------------------------------------------------
@@ -175,15 +787,24 @@ pub async fn update_config(
     Ok(Json(settings))
 }
 
-fn validate_system_settings(state: &AppState, settings: &SystemSettings) -> Result<(), SystemApiError> {
+fn validate_system_settings(
+    state: &AppState,
+    settings: &SystemSettings,
+) -> Result<(), SystemApiError> {
     if settings.hostname.trim().is_empty() {
-        return Err(SystemApiError::CommandError("hostname must not be empty".into()));
+        return Err(SystemApiError::CommandError(
+            "hostname must not be empty".into(),
+        ));
     }
     if settings.ssh_port == 0 {
-        return Err(SystemApiError::CommandError("ssh_port must be between 1 and 65535".into()));
+        return Err(SystemApiError::CommandError(
+            "ssh_port must be between 1 and 65535".into(),
+        ));
     }
     if settings.web_port == 0 {
-        return Err(SystemApiError::CommandError("web_port must be between 1 and 65535".into()));
+        return Err(SystemApiError::CommandError(
+            "web_port must be between 1 and 65535".into(),
+        ));
     }
     if settings.ssh_port == settings.web_port {
         return Err(SystemApiError::CommandError(
@@ -191,7 +812,10 @@ fn validate_system_settings(state: &AppState, settings: &SystemSettings) -> Resu
         ));
     }
 
-    let cfg = state.config_store.load().map_err(SystemApiError::StorageError)?;
+    let cfg = state
+        .config_store
+        .load()
+        .map_err(SystemApiError::StorageError)?;
     let known_interfaces = cfg
         .interfaces
         .iter()
@@ -218,8 +842,12 @@ async fn apply_ssh_settings(
     state: &AppState,
     settings: &SystemSettings,
 ) -> Result<(), SystemApiError> {
-    let full_cfg = state.config_store.load().map_err(SystemApiError::StorageError)?;
-    let listen_addresses = resolve_ssh_listen_addresses(&settings.ssh_listen_interfaces, &full_cfg.interfaces).await;
+    let full_cfg = state
+        .config_store
+        .load()
+        .map_err(SystemApiError::StorageError)?;
+    let listen_addresses =
+        resolve_ssh_listen_addresses(&settings.ssh_listen_interfaces, &full_cfg.interfaces).await;
     render_and_write_ssh_config(settings, &listen_addresses)?;
     write_authorized_keys(&settings.ssh_authorized_keys)?;
 
@@ -247,13 +875,21 @@ fn render_and_write_ssh_config(
     rendered.push_str("\n# Authentication\n");
     rendered.push_str(&format!(
         "PermitRootLogin {}\n",
-        if settings.ssh_permit_root_login { "yes" } else { "no" }
+        if settings.ssh_permit_root_login {
+            "yes"
+        } else {
+            "no"
+        }
     ));
     rendered.push_str("PubkeyAuthentication yes\n");
     rendered.push_str("AuthorizedKeysFile .ssh/authorized_keys\n");
     rendered.push_str(&format!(
         "PasswordAuthentication {}\n",
-        if settings.ssh_password_authentication { "yes" } else { "no" }
+        if settings.ssh_password_authentication {
+            "yes"
+        } else {
+            "no"
+        }
     ));
     rendered.push_str("PermitEmptyPasswords no\n");
     rendered.push_str("ChallengeResponseAuthentication no\n");
@@ -277,9 +913,8 @@ fn render_and_write_ssh_config(
     rendered.push_str("ClientAliveCountMax 2\n\n");
     rendered.push_str("Subsystem sftp /usr/lib/openssh/sftp-server\n");
 
-    fs::write(SSHD_CONFIG_PATH, rendered).map_err(|err| {
-        SystemApiError::CommandError(format!("failed to write sshd config: {err}"))
-    })
+    fs::write(SSHD_CONFIG_PATH, rendered)
+        .map_err(|err| SystemApiError::CommandError(format!("failed to write sshd config: {err}")))
 }
 
 fn write_authorized_keys(keys: &[String]) -> Result<(), SystemApiError> {
@@ -316,7 +951,10 @@ fn write_authorized_keys(keys: &[String]) -> Result<(), SystemApiError> {
     Ok(())
 }
 
-async fn resolve_ssh_listen_addresses(selected_interfaces: &[String], interfaces: &[crate::config::models::Interface]) -> Vec<String> {
+async fn resolve_ssh_listen_addresses(
+    selected_interfaces: &[String],
+    interfaces: &[crate::config::models::Interface],
+) -> Vec<String> {
     let mut addresses = BTreeSet::new();
     for iface_name in selected_interfaces {
         if let Ok(output) = tokio::process::Command::new("ip")
@@ -328,7 +966,8 @@ async fn resolve_ssh_listen_addresses(selected_interfaces: &[String], interfaces
                 if let Ok(value) = serde_json::from_slice::<Value>(&output.stdout) {
                     if let Some(items) = value.as_array() {
                         for item in items {
-                            if let Some(addr_info) = item.get("addr_info").and_then(Value::as_array) {
+                            if let Some(addr_info) = item.get("addr_info").and_then(Value::as_array)
+                            {
                                 for addr in addr_info {
                                     if let Some(local) = addr.get("local").and_then(Value::as_str) {
                                         addresses.insert(local.to_string());
@@ -362,7 +1001,10 @@ async fn run_systemctl<const N: usize>(args: [&str; N]) -> Result<(), SystemApiE
         return Ok(());
     }
     if args.last() == Some(&"ssh") {
-        let mut fallback = args.iter().map(|value| value.to_string()).collect::<Vec<_>>();
+        let mut fallback = args
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>();
         if let Some(last) = fallback.last_mut() {
             *last = "sshd".to_string();
         }
@@ -370,7 +1012,9 @@ async fn run_systemctl<const N: usize>(args: [&str; N]) -> Result<(), SystemApiE
             .args(&fallback)
             .output()
             .await
-            .map_err(|err| SystemApiError::CommandError(format!("failed to spawn systemctl fallback: {err}")))?;
+            .map_err(|err| {
+                SystemApiError::CommandError(format!("failed to spawn systemctl fallback: {err}"))
+            })?;
         if fallback_output.status.success() {
             return Ok(());
         }
@@ -616,4 +1260,91 @@ pub async fn mark_appliance_rebuild_complete(
 ) -> Result<impl IntoResponse, SystemApiError> {
     update::mark_appliance_rebuild_complete(&state).map_err(SystemApiError::StorageError)?;
     Ok(Json(update::get_status(&state).await))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unit_status(unit: &str, available: bool, running: bool) -> ServiceUnitStatus {
+        ServiceUnitStatus {
+            unit: unit.to_string(),
+            available,
+            running,
+            load_state: if available { "loaded" } else { "not-found" }.to_string(),
+            active_state: if running { "active" } else { "inactive" }.to_string(),
+            sub_state: if running { "running" } else { "dead" }.to_string(),
+            unit_file_state: "enabled".to_string(),
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn service_action_parser_accepts_supported_actions() {
+        assert_eq!(ServiceAction::parse("start"), Some(ServiceAction::Start));
+        assert_eq!(ServiceAction::parse("STOP"), Some(ServiceAction::Stop));
+        assert_eq!(
+            ServiceAction::parse("restart"),
+            Some(ServiceAction::Restart)
+        );
+        assert_eq!(ServiceAction::parse("reload"), None);
+    }
+
+    #[test]
+    fn service_action_descriptors_are_ui_ready() {
+        let units = vec![unit_status("unbound.service", true, true)];
+        let actions = service_action_descriptors(SVC_DNS, true, &units);
+
+        let stop = actions
+            .iter()
+            .find(|action| action.id == "stop")
+            .expect("stop action missing");
+        assert_eq!(stop.href, "/system/services/dns/stop");
+        assert_eq!(stop.variant, "danger");
+        assert!(stop.requires_confirmation);
+        assert!(stop.enabled);
+
+        let disabled_actions = service_action_descriptors(SVC_DNS, false, &units);
+        let start = disabled_actions
+            .iter()
+            .find(|action| action.id == "start")
+            .expect("start action missing");
+        assert!(!start.enabled);
+        assert!(start.disabled_reason.is_some());
+    }
+
+    #[test]
+    fn summarize_service_status_reports_degraded_multi_unit_services() {
+        let units = vec![
+            unit_status("kea-dhcp4-server.service", true, true),
+            unit_status("kea-dhcp6-server.service", true, false),
+        ];
+        let (status, label) = summarize_service_status(
+            true,
+            &["kea-dhcp4-server.service", "kea-dhcp6-server.service"],
+            &units,
+        );
+
+        assert_eq!(status, "degraded");
+        assert_eq!(label, "1/2 configured units running");
+    }
+
+    #[test]
+    fn summarize_service_status_distinguishes_disabled_and_missing() {
+        let disabled = summarize_service_status(false, &[], &[]);
+        assert_eq!(disabled.0, "notConfigured");
+
+        let units = vec![unit_status("suricata.service", false, false)];
+        let missing = summarize_service_status(true, &["suricata.service"], &units);
+        assert_eq!(missing.0, "missing");
+    }
+
+    #[test]
+    fn service_definitions_are_whitelisted() {
+        assert_eq!(find_service_definition("DNS").unwrap().id, SVC_DNS);
+        assert!(matches!(
+            find_service_definition("anything-else"),
+            Err(SystemApiError::NotFound(_))
+        ));
+    }
 }

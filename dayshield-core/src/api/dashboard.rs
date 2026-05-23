@@ -61,6 +61,8 @@ pub struct DashboardCard {
     pub summary: String,
     pub metrics: Vec<DashboardCardMetric>,
     pub links: Vec<DashboardCardLink>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_control: Option<DashboardCardServiceControl>,
     pub order: u16,
 }
 
@@ -74,6 +76,25 @@ pub struct DashboardCardMetric {
 pub struct DashboardCardLink {
     pub label: &'static str,
     pub href: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardCardServiceControl {
+    pub service_id: &'static str,
+    pub status_href: String,
+    pub actions: Vec<DashboardCardServiceAction>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardCardServiceAction {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub method: &'static str,
+    pub href: String,
+    pub variant: &'static str,
+    pub requires_confirmation: bool,
 }
 
 struct DashboardCardInputs<'a> {
@@ -314,31 +335,34 @@ fn build_dashboard_cards(inputs: DashboardCardInputs<'_>) -> Vec<DashboardCard> 
         .snapshot
         .map(|s| s.firewall.state_count)
         .unwrap_or_default();
-    cards.push(card(
-        40,
-        "firewall",
-        "Firewall",
-        "Firewall Policy",
-        "security",
-        firewall_status,
-        firewall_label,
-        "Stateful packet filtering with global defaults, aliases, schedules, and anti-lockout"
-            .to_string(),
-        vec![
-            metric("Rules", cfg.firewall_rules.len()),
-            metric("Enabled", enabled_firewall_rules),
-            metric("Aliases", cfg.firewall_aliases.len()),
-            metric("States", state_count),
-            metric(
-                "Anti-lockout",
-                yes_no(firewall_settings.management_anti_lockout),
-            ),
-        ],
-        vec![
-            link("Rules", "/firewall/rules"),
-            link("Settings", "/firewall/settings"),
-            link("Aliases", "/firewall/aliases"),
-        ],
+    cards.push(with_service_control(
+        card(
+            40,
+            "firewall",
+            "Firewall",
+            "Firewall Policy",
+            "security",
+            firewall_status,
+            firewall_label,
+            "Stateful packet filtering with global defaults, aliases, schedules, and anti-lockout"
+                .to_string(),
+            vec![
+                metric("Rules", cfg.firewall_rules.len()),
+                metric("Enabled", enabled_firewall_rules),
+                metric("Aliases", cfg.firewall_aliases.len()),
+                metric("States", state_count),
+                metric(
+                    "Anti-lockout",
+                    yes_no(firewall_settings.management_anti_lockout),
+                ),
+            ],
+            vec![
+                link("Rules", "/firewall/rules"),
+                link("Settings", "/firewall/settings"),
+                link("Aliases", "/firewall/aliases"),
+            ],
+        ),
+        SVC_NFTABLES,
     ));
 
     cards.push(nat_card(50, &nat));
@@ -356,108 +380,117 @@ fn build_dashboard_cards(inputs: DashboardCardInputs<'_>) -> Vec<DashboardCard> 
         .sum();
     let (dns_status, dns_label) =
         service_status(inputs.services, SVC_DNS, dns.enabled, "Resolver active");
-    cards.push(card(
-        60,
-        "dns",
-        "DNS",
-        "Recursive DNS",
-        "services",
-        dns_status,
-        dns_label,
-        "Unbound resolver, forwarders, DNSSEC, local records, and per-interface blocklists"
-            .to_string(),
-        vec![
-            metric("Port", dns.port),
-            metric("Forwarders", dns.forwarders.len()),
-            metric("Local records", dns.local_records.len()),
-            metric("Blocklists", dns_blocklists),
-            metric("DNSSEC", yes_no(dns.dnssec)),
-        ],
-        vec![
-            link("DNS config", "/dns/config"),
-            link("DNS overrides", "/dns/overrides"),
-        ],
+    cards.push(with_service_control(
+        card(
+            60,
+            "dns",
+            "DNS",
+            "Recursive DNS",
+            "services",
+            dns_status,
+            dns_label,
+            "Unbound resolver, forwarders, DNSSEC, local records, and per-interface blocklists"
+                .to_string(),
+            vec![
+                metric("Port", dns.port),
+                metric("Forwarders", dns.forwarders.len()),
+                metric("Local records", dns.local_records.len()),
+                metric("Blocklists", dns_blocklists),
+                metric("DNSSEC", yes_no(dns.dnssec)),
+            ],
+            vec![
+                link("DNS config", "/dns/config"),
+                link("DNS overrides", "/dns/overrides"),
+            ],
+        ),
+        SVC_DNS,
     ));
 
     let dot_ready = dot.cert_pem.is_some() && dot.key_pem.is_some() || dot.acme_domain.is_some();
-    cards.push(card(
-        70,
-        "dns-over-tls",
-        "DNS-over-TLS",
-        "DoT Listener",
-        "services",
-        if !dot.enabled {
-            "disabled"
-        } else if dot_ready {
-            "ok"
-        } else {
-            "warning"
-        },
-        if !dot.enabled {
-            "Disabled".to_string()
-        } else if dot_ready {
-            "TLS material configured".to_string()
-        } else {
-            "Certificate needed".to_string()
-        },
-        "Encrypted DNS listener backed by static certificate material or ACME".to_string(),
-        vec![
-            metric("Port", dot.port),
-            metric("LAN only", yes_no(dot.lan_only)),
-            metric(
-                "Certificate",
-                if dot.acme_domain.is_some() {
-                    "ACME"
-                } else if dot_ready {
-                    "Static"
-                } else {
-                    "Missing"
-                },
-            ),
-        ],
-        vec![
-            link("DoT config", "/dns/dot/config"),
-            link("ACME config", "/acme/config"),
-        ],
+    cards.push(with_service_control(
+        card(
+            70,
+            "dns-over-tls",
+            "DNS-over-TLS",
+            "DoT Listener",
+            "services",
+            if !dot.enabled {
+                "disabled"
+            } else if dot_ready {
+                "ok"
+            } else {
+                "warning"
+            },
+            if !dot.enabled {
+                "Disabled".to_string()
+            } else if dot_ready {
+                "TLS material configured".to_string()
+            } else {
+                "Certificate needed".to_string()
+            },
+            "Encrypted DNS listener backed by static certificate material or ACME".to_string(),
+            vec![
+                metric("Port", dot.port),
+                metric("LAN only", yes_no(dot.lan_only)),
+                metric(
+                    "Certificate",
+                    if dot.acme_domain.is_some() {
+                        "ACME"
+                    } else if dot_ready {
+                        "Static"
+                    } else {
+                        "Missing"
+                    },
+                ),
+            ],
+            vec![
+                link("DoT config", "/dns/dot/config"),
+                link("ACME config", "/acme/config"),
+            ],
+        ),
+        SVC_DNS,
     ));
 
     let dhcp_enabled = dhcp.enabled || dhcp6.enabled;
     let (dhcp_status, dhcp_label) =
         service_status(inputs.services, SVC_DHCP, dhcp_enabled, "DHCP active");
-    cards.push(card(
-        80,
-        "dhcp",
-        "DHCP",
-        "DHCPv4 / DHCPv6",
-        "services",
-        dhcp_status,
-        dhcp_label,
-        "Kea/dnsmasq address assignment, lease pools, static reservations, and DHCPv6 scopes"
-            .to_string(),
-        vec![
-            metric("IPv4 scopes", dhcp.scopes.len()),
-            metric(
-                "IPv4 reservations",
-                dhcp.scopes
-                    .iter()
-                    .map(|scope| scope.reservations.len())
-                    .sum::<usize>(),
-            ),
-            metric("IPv6 scopes", dhcp6.scopes.len()),
-            metric(
-                "IPv6 reservations",
-                dhcp6
-                    .scopes
-                    .iter()
-                    .map(|scope| scope.reservations.len())
-                    .sum::<usize>(),
-            ),
-        ],
-        vec![
-            link("DHCPv4 config", "/dhcp/config"),
-            link("DHCPv6 config", "/dhcp6/config"),
-            link("Leases", "/dhcp/leases"),
-        ],
+    cards.push(with_service_control(
+        card(
+            80,
+            "dhcp",
+            "DHCP",
+            "DHCPv4 / DHCPv6",
+            "services",
+            dhcp_status,
+            dhcp_label,
+            "Kea/dnsmasq address assignment, lease pools, static reservations, and DHCPv6 scopes"
+                .to_string(),
+            vec![
+                metric("IPv4 scopes", dhcp.scopes.len()),
+                metric(
+                    "IPv4 reservations",
+                    dhcp.scopes
+                        .iter()
+                        .map(|scope| scope.reservations.len())
+                        .sum::<usize>(),
+                ),
+                metric("IPv6 scopes", dhcp6.scopes.len()),
+                metric(
+                    "IPv6 reservations",
+                    dhcp6
+                        .scopes
+                        .iter()
+                        .map(|scope| scope.reservations.len())
+                        .sum::<usize>(),
+                ),
+            ],
+            vec![
+                link("DHCPv4 config", "/dhcp/config"),
+                link("DHCPv6 config", "/dhcp6/config"),
+                link("Leases", "/dhcp/leases"),
+            ],
+        ),
+        SVC_DHCP,
     ));
 
     let wg_enabled = cfg
@@ -500,27 +533,30 @@ fn build_dashboard_cards(inputs: DashboardCardInputs<'_>) -> Vec<DashboardCard> 
         suricata.enabled,
         "IDS/IPS active",
     );
-    cards.push(card(
-        100,
-        "suricata",
-        "Suricata",
-        "IDS / IPS",
-        "security",
-        suricata_status,
-        suricata_label,
-        "Network intrusion detection or prevention, monitored interfaces, and alert logs"
-            .to_string(),
-        vec![
-            metric("Mode", suricata.mode.to_uppercase()),
-            metric("Interfaces", suricata.interfaces.len()),
-            metric("Rule sources", suricata.rule_sources.len()),
-            metric("Alerts/min", suricata_alerts),
-        ],
-        vec![
-            link("Suricata config", "/suricata/config"),
-            link("Alerts", "/suricata/alerts"),
-            link("Rule sources", "/suricata/rulesets"),
-        ],
+    cards.push(with_service_control(
+        card(
+            100,
+            "suricata",
+            "Suricata",
+            "IDS / IPS",
+            "security",
+            suricata_status,
+            suricata_label,
+            "Network intrusion detection or prevention, monitored interfaces, and alert logs"
+                .to_string(),
+            vec![
+                metric("Mode", suricata.mode.to_uppercase()),
+                metric("Interfaces", suricata.interfaces.len()),
+                metric("Rule sources", suricata.rule_sources.len()),
+                metric("Alerts/min", suricata_alerts),
+            ],
+            vec![
+                link("Suricata config", "/suricata/config"),
+                link("Alerts", "/suricata/alerts"),
+                link("Rule sources", "/suricata/rulesets"),
+            ],
+        ),
+        SVC_SURICATA,
     ));
 
     let ruleset_updates = inputs
@@ -585,30 +621,33 @@ fn build_dashboard_cards(inputs: DashboardCardInputs<'_>) -> Vec<DashboardCard> 
         crowdsec_enabled,
         "Bouncer active",
     );
-    cards.push(card(
-        120,
-        "crowdsec",
-        "CrowdSec",
-        "CrowdSec Bouncer",
-        "security",
-        crowdsec_status,
-        crowdsec_label,
-        "CrowdSec Local API decisions synchronized into DayShield enforcement".to_string(),
-        vec![
-            metric("Configured", yes_no(crowdsec_enabled)),
-            metric("Decisions", inputs.active_crowdsec_decisions),
-            metric(
-                "Poll seconds",
-                crowdsec
-                    .as_ref()
-                    .map(|cfg| cfg.update_interval.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-            ),
-        ],
-        vec![
-            link("CrowdSec config", "/crowdsec/config"),
-            link("Decisions", "/crowdsec/decisions"),
-        ],
+    cards.push(with_service_control(
+        card(
+            120,
+            "crowdsec",
+            "CrowdSec",
+            "CrowdSec Bouncer",
+            "security",
+            crowdsec_status,
+            crowdsec_label,
+            "CrowdSec Local API decisions synchronized into DayShield enforcement".to_string(),
+            vec![
+                metric("Configured", yes_no(crowdsec_enabled)),
+                metric("Decisions", inputs.active_crowdsec_decisions),
+                metric(
+                    "Poll seconds",
+                    crowdsec
+                        .as_ref()
+                        .map(|cfg| cfg.update_interval.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                ),
+            ],
+            vec![
+                link("CrowdSec config", "/crowdsec/config"),
+                link("Decisions", "/crowdsec/decisions"),
+            ],
+        ),
+        SVC_CROWDSEC,
     ));
 
     let enabled_honeypots = honeypots
@@ -791,33 +830,36 @@ fn build_dashboard_cards(inputs: DashboardCardInputs<'_>) -> Vec<DashboardCard> 
         cloudflared.enabled,
         "Tunnel active",
     );
-    cards.push(card(
-        170,
-        "cloudflared",
-        "Cloudflared",
-        "Cloudflare Tunnel",
-        "services",
-        if cloudflared.enabled && !cloudflared_ready {
-            "warning"
-        } else {
-            cloudflared_status
-        },
-        if cloudflared.enabled && !cloudflared_ready {
-            "Tunnel configuration incomplete".to_string()
-        } else {
-            cloudflared_label
-        },
-        "Outbound Cloudflare Tunnel publishing selected local services without inbound NAT"
-            .to_string(),
-        vec![
-            metric("Ingress", cloudflared.ingress.len()),
-            metric("Token", yes_no(cloudflared_configured)),
-            metric("Log level", cloudflared.log_level),
-        ],
-        vec![
-            link("Cloudflared config", "/cloudflared/config"),
-            link("Status", "/cloudflared/status"),
-        ],
+    cards.push(with_service_control(
+        card(
+            170,
+            "cloudflared",
+            "Cloudflared",
+            "Cloudflare Tunnel",
+            "services",
+            if cloudflared.enabled && !cloudflared_ready {
+                "warning"
+            } else {
+                cloudflared_status
+            },
+            if cloudflared.enabled && !cloudflared_ready {
+                "Tunnel configuration incomplete".to_string()
+            } else {
+                cloudflared_label
+            },
+            "Outbound Cloudflare Tunnel publishing selected local services without inbound NAT"
+                .to_string(),
+            vec![
+                metric("Ingress", cloudflared.ingress.len()),
+                metric("Token", yes_no(cloudflared_configured)),
+                metric("Log level", cloudflared.log_level),
+            ],
+            vec![
+                link("Cloudflared config", "/cloudflared/config"),
+                link("Status", "/cloudflared/status"),
+            ],
+        ),
+        SVC_CLOUDFLARED,
     ));
 
     let portal_ready = !captive_portal.interfaces.is_empty();
@@ -859,36 +901,39 @@ fn build_dashboard_cards(inputs: DashboardCardInputs<'_>) -> Vec<DashboardCard> 
         ],
     ));
 
-    cards.push(card(
-        190,
+    cards.push(with_service_control(
+        card(
+            190,
+            "ntp",
+            "NTP",
+            "Time Sync",
+            "services",
+            if !ntp.enabled {
+                "disabled"
+            } else if ntp.upstream_servers.is_empty() {
+                "warning"
+            } else {
+                "ok"
+            },
+            if !ntp.enabled {
+                "Disabled".to_string()
+            } else if ntp.upstream_servers.is_empty() {
+                "No upstream servers".to_string()
+            } else {
+                "Time sync configured".to_string()
+            },
+            "Host clock synchronization and optional LAN NTP service".to_string(),
+            vec![
+                metric("Upstreams", ntp.upstream_servers.len()),
+                metric("Serve clients", yes_no(ntp.serve_clients)),
+                metric("Listen interfaces", ntp.listen_interfaces.len()),
+            ],
+            vec![
+                link("NTP config", "/ntp/config"),
+                link("NTP status", "/ntp/status"),
+            ],
+        ),
         "ntp",
-        "NTP",
-        "Time Sync",
-        "services",
-        if !ntp.enabled {
-            "disabled"
-        } else if ntp.upstream_servers.is_empty() {
-            "warning"
-        } else {
-            "ok"
-        },
-        if !ntp.enabled {
-            "Disabled".to_string()
-        } else if ntp.upstream_servers.is_empty() {
-            "No upstream servers".to_string()
-        } else {
-            "Time sync configured".to_string()
-        },
-        "Host clock synchronization and optional LAN NTP service".to_string(),
-        vec![
-            metric("Upstreams", ntp.upstream_servers.len()),
-            metric("Serve clients", yes_no(ntp.serve_clients)),
-            metric("Listen interfaces", ntp.listen_interfaces.len()),
-        ],
-        vec![
-            link("NTP config", "/ntp/config"),
-            link("NTP status", "/ntp/status"),
-        ],
     ));
 
     cards.push(card(
@@ -1150,8 +1195,38 @@ fn card(
         summary: summary.into(),
         metrics,
         links,
+        service_control: None,
         order,
     }
+}
+
+fn with_service_control(mut card: DashboardCard, service_id: &'static str) -> DashboardCard {
+    card.service_control = Some(DashboardCardServiceControl {
+        service_id,
+        status_href: format!("/system/services/{service_id}"),
+        actions: ["start", "stop", "restart"]
+            .into_iter()
+            .map(|action| DashboardCardServiceAction {
+                id: action,
+                label: match action {
+                    "start" => "Start",
+                    "stop" => "Stop",
+                    "restart" => "Restart",
+                    _ => action,
+                },
+                method: "POST",
+                href: format!("/system/services/{service_id}/{action}"),
+                variant: match action {
+                    "start" => "primary",
+                    "stop" => "danger",
+                    "restart" => "neutral",
+                    _ => "neutral",
+                },
+                requires_confirmation: action == "stop",
+            })
+            .collect(),
+    });
+    card
 }
 
 fn metric(label: &'static str, value: impl ToString) -> DashboardCardMetric {
@@ -1438,6 +1513,41 @@ mod tests {
         assert!(cards
             .windows(2)
             .all(|window| window[0].order < window[1].order));
+    }
+
+    #[test]
+    fn dashboard_service_cards_expose_runtime_controls() {
+        let cards = test_cards();
+        let expected = [
+            ("firewall", SVC_NFTABLES),
+            ("dns", SVC_DNS),
+            ("dns-over-tls", SVC_DNS),
+            ("dhcp", SVC_DHCP),
+            ("suricata", SVC_SURICATA),
+            ("crowdsec", SVC_CROWDSEC),
+            ("cloudflared", SVC_CLOUDFLARED),
+            ("ntp", "ntp"),
+        ];
+
+        for (card_id, service_id) in expected {
+            let card = cards
+                .iter()
+                .find(|card| card.id == card_id)
+                .unwrap_or_else(|| panic!("missing dashboard card: {card_id}"));
+            let control = card
+                .service_control
+                .as_ref()
+                .unwrap_or_else(|| panic!("missing service control for {card_id}"));
+            assert_eq!(control.service_id, service_id);
+            assert_eq!(
+                control.status_href,
+                format!("/system/services/{service_id}")
+            );
+            assert_eq!(control.actions.len(), 3);
+            assert!(control.actions.iter().any(|action| {
+                action.id == "stop" && action.variant == "danger" && action.requires_confirmation
+            }));
+        }
     }
 
     #[test]

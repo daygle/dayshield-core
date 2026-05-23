@@ -38,6 +38,7 @@ use crate::{
     },
     state::{
         AppState, SVC_CLOUDFLARED, SVC_CROWDSEC, SVC_DHCP, SVC_DNS, SVC_NFTABLES, SVC_SURICATA,
+        SVC_VPN,
     },
     update::{self, UpdateComponent, UpdateSettings},
 };
@@ -214,6 +215,12 @@ const SERVICE_DEFINITIONS: &[ServiceDefinition] = &[
         title: "Cloudflared",
         category: "services",
         description: "Cloudflare Tunnel connector",
+    },
+    ServiceDefinition {
+        id: SVC_VPN,
+        title: "VPN",
+        category: "services",
+        description: "WireGuard VPN tunnel management",
     },
     ServiceDefinition {
         id: SVC_NTP,

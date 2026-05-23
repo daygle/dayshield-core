@@ -2635,9 +2635,96 @@ async fn build_component_status(
     }
 }
 
+async fn bootstrap_missing_registry_remote_versions(
+    state: &AppState,
+    settings: &UpdateSettings,
+    state_file: &mut UpdateStateFile,
+) {
+    if settings.update_mode != "registry" {
+        return;
+    }
+
+    let has_missing_remote = ALL_REPO_COMPONENTS.iter().any(|component| {
+        find_component_state(state_file, *component)
+            .and_then(|saved| saved.remote_version.as_ref())
+            .is_none()
+    });
+
+    if !has_missing_remote || state_file.last_checked_at.is_some() {
+        return;
+    }
+
+    match query_registry_with_component_fallbacks(settings).await {
+        Ok(manifest) => {
+            for artifact in manifest.components {
+                let component = match artifact.component.as_str() {
+                    "core" => RepoComponent::Core,
+                    "ui" => RepoComponent::Ui,
+                    "rootfs" => RepoComponent::Rootfs,
+                    _ => continue,
+                };
+
+                let comp_state = ensure_component_state(state_file, component);
+                if comp_state.current_version.is_none() {
+                    comp_state.current_version = comp_state
+                        .last_applied_version
+                        .clone()
+                        .or_else(|| Some(built_appliance_version()));
+                }
+
+                let update_available = comp_state
+                    .current_version
+                    .as_ref()
+                    .map(|current| current != &artifact.version)
+                    .unwrap_or(false);
+
+                comp_state.remote_version = Some(artifact.version.clone());
+                comp_state.update_available = update_available;
+                comp_state.last_error = None;
+            }
+
+            if let Some(rootfs_state) = find_component_state(state_file, RepoComponent::Rootfs) {
+                let rootfs_update_available = rootfs_state.update_available;
+                let rootfs_remote_version = rootfs_state.remote_version.clone();
+
+                if rootfs_update_available {
+                    let slot_status = rootfs_slot_status(settings, state_file);
+                    if slot_status.as_ref().map(|s| s.supported).unwrap_or(false) {
+                        clear_appliance_rebuild_required(state_file);
+                    } else {
+                        let reason = slot_status
+                            .and_then(|s| s.reason)
+                            .unwrap_or_else(|| {
+                                "Primary/Secondary rootfs slot layout is not available".to_string()
+                            });
+                        state_file.pending_appliance_rebuild = true;
+                        state_file.appliance_rebuild_reason = Some(format!(
+                            "Root filesystem image v{} is available, but in-place rootfs updates require a Primary/Secondary root layout with shared /boot: {}.",
+                            rootfs_remote_version.as_deref().unwrap_or("unknown"),
+                            reason
+                        ));
+                        state_file.appliance_rebuild_marked_at = None;
+                    }
+                } else {
+                    clear_appliance_rebuild_required(state_file);
+                }
+            }
+
+            if let Err(err) = save_state(state, state_file) {
+                warn!(error = %err, "updates: failed to persist bootstrapped registry remote version state");
+            }
+        }
+        Err(err) => {
+            warn!(error = %err, "updates: failed to bootstrap registry remote versions for status display");
+        }
+    }
+}
+
 pub async fn get_status(state: &AppState) -> UpdatesStatus {
     let settings = load_settings(state);
-    let state_file = load_state(state);
+    let mut state_file = load_state(state);
+
+    bootstrap_missing_registry_remote_versions(state, &settings, &mut state_file).await;
 
     let core = build_component_status(&settings, &state_file, RepoComponent::Core).await;
     let ui = build_component_status(&settings, &state_file, RepoComponent::Ui).await;

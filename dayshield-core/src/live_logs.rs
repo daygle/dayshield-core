@@ -457,12 +457,12 @@ mod tests {
             timestamp: "2026-05-23T02:03:04Z".into(),
             unit: "dayshield-core.service".into(),
             priority: Some(6),
-            message: "WireGuard peer updated".into(),
+            message: "WireGuard handshake established".into(),
         };
 
         let payload = event.to_client_payload();
         assert_eq!(payload["source"], "vpn");
         assert_eq!(payload["level"], "info");
-        assert_eq!(payload["message"], "WireGuard peer updated");
+        assert_eq!(payload["message"], "WireGuard handshake established");
     }
 }

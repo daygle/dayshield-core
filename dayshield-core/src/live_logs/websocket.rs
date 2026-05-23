@@ -176,7 +176,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "system_event");
         assert_eq!(v["source"], "system");
-        assert_eq!(v["level"], "error");
+        assert_eq!(v["level"], "warning");
         assert_eq!(v["unit"], "sshd.service");
         assert_eq!(v["priority"], 4);
     }

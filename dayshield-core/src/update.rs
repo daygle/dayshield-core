@@ -2172,7 +2172,25 @@ async fn copy_persistent_path(mount_dir: &Path, path: &str) -> Result<()> {
     }
 
     let mount_dir_arg = mount_dir.to_string_lossy().to_string();
-    run_system_command("cp", &["-a", "--parents", path, &mount_dir_arg]).await?;
+    if source.is_dir() && mount_dir.starts_with(source) {
+        // The mount point can be inside the source directory (for example,
+        // the inactive rootfs slot is mounted under /var/lib/dayshield/update/rootfs-slot).
+        // In that case, copying the whole source path would recurse into the mounted target.
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            let entry_path = entry.path();
+            if mount_dir.starts_with(&entry_path) {
+                continue;
+            }
+            run_system_command(
+                "cp",
+                &["-a", "--parents", &entry_path.to_string_lossy(), &mount_dir_arg],
+            )
+            .await?;
+        }
+    } else {
+        run_system_command("cp", &["-a", "--parents", path, &mount_dir_arg]).await?;
+    }
     Ok(())
 }
 

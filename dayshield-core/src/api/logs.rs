@@ -305,11 +305,17 @@ pub async fn search_logs(
         events = events.split_off(events.len() - limit);
     }
 
+    let events = events
+        .iter()
+        .map(LogEvent::to_client_payload)
+        .collect::<Vec<_>>();
+    let count = events.len();
+
     Ok(Json(serde_json::json!({
         "success": true,
-        "data": events,
+        "data": events.clone(),
         "logs": events,
-        "count": events.len(),
+        "count": count,
     })))
 }
 

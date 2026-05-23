@@ -25,6 +25,7 @@
 use std::sync::Arc;
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use serde_json::json;
 use tracing::{info, warn};
 
 use crate::{
@@ -270,6 +271,42 @@ pub async fn get_certificate_status(
         cert_exists,
         needs_renewal,
     }))
+}
+
+/// Handler: delete the certificate and private key files for the primary ACME domain.
+pub async fn delete_certificate(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, AcmeApiError> {
+    let cfg = state
+        .config_store
+        .load_acme_config()
+        .map_err(AcmeApiError::StorageError)?
+        .ok_or_else(|| AcmeApiError::EngineError("ACME config is not configured".into()))?;
+
+    let primary = cfg
+        .domains
+        .first()
+        .cloned()
+        .ok_or_else(|| AcmeApiError::EngineError("No ACME domain configured".into()))?;
+
+    let engine = AcmeEngine::new(cfg);
+    let cert_path = engine.cert_path(&primary);
+    let key_path = engine.key_path(&primary);
+    let mut deleted = false;
+
+    if cert_path.exists() {
+        std::fs::remove_file(&cert_path)
+            .map_err(|err| AcmeApiError::EngineError(format!("failed to delete cert file: {err}")))?;
+        deleted = true;
+    }
+    if key_path.exists() {
+        std::fs::remove_file(&key_path)
+            .map_err(|err| AcmeApiError::EngineError(format!("failed to delete key file: {err}")))?;
+        deleted = true;
+    }
+
+    info!(domain = %primary, deleted, "acme: deleted certificate files");
+    Ok(Json(json!({ "success": true, "data": null })))
 }
 
 // ---------------------------------------------------------------------------

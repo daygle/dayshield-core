@@ -422,6 +422,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/acme/config", post(acme::update_config))
         .route("/acme/issue", post(acme::issue_certificates))
         .route("/acme/status", get(acme::get_certificate_status))
+        .route("/acme/cert", delete(acme::delete_certificate))
         // Live logs WebSocket
         .route("/logs", get(logs::search_logs))
         .route("/logs/ws", get(logs::ws_handler))

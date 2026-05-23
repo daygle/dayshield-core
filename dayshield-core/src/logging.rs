@@ -155,7 +155,7 @@ pub fn init_with_config(config: &LoggingConfig) {
     if use_json {
         let subscriber = Registry::default()
             .with(filter_layer)
-            .with(fmt::layer().json().with_target(true));
+            .with(fmt::layer().json().with_target(true).with_ansi(false));
         if use_syslog {
             subscriber.with(SyslogLayer::new()).try_init().ok();
         } else {
@@ -164,7 +164,7 @@ pub fn init_with_config(config: &LoggingConfig) {
     } else {
         let subscriber = Registry::default()
             .with(filter_layer)
-            .with(fmt::layer().with_target(true));
+            .with(fmt::layer().with_target(true).with_ansi(false));
         if use_syslog {
             subscriber.with(SyslogLayer::new()).try_init().ok();
         } else {

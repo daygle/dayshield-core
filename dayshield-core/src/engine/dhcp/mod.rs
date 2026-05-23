@@ -111,11 +111,7 @@ pub fn generate_config(config: &DhcpConfig) -> String {
             "subnet4": subnets,
             "loggers": [{
                 "name": "kea-dhcp4",
-                "output_options": [{
-                    "output": "/var/log/kea/kea-dhcp4.log",
-                    "maxsize": 1048576,
-                    "maxver": 3
-                }],
+                "output-options": [{ "output": "stdout" }],
                 "severity": "INFO",
                 "debuglevel": 0
             }]
@@ -265,6 +261,15 @@ mod tests {
         let cfg = base_config();
         let out = generate_config(&cfg);
         assert!(out.contains("service-sockets-require-all"));
+    }
+
+    #[test]
+    fn generate_config_uses_runtime_leases_and_stdout_logging() {
+        let cfg = base_config();
+        let out = generate_config(&cfg);
+        assert!(out.contains("/run/dayshield/kea/kea-leases4.csv"));
+        assert!(out.contains("\"output\": \"stdout\""));
+        assert!(!out.contains("/var/log/kea"));
     }
 
     #[test]

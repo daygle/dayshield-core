@@ -8,7 +8,7 @@
 //! Each JSON line is parsed to extract the unit name and log message and is
 //! forwarded as a [`LogEvent::SystemEvent`].
 
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
@@ -93,6 +93,7 @@ pub(crate) fn parse_journald_system_line(line: &str) -> Option<LogEvent> {
         Some(m) => m.to_string(),
         None => return None,
     };
+    let message = strip_ansi_codes(&message);
 
     let syslog_identifier = journald_field_text(obj.get("SYSLOG_IDENTIFIER"));
     let syslog_identifier = syslog_identifier.as_deref();
@@ -102,9 +103,8 @@ pub(crate) fn parse_journald_system_line(line: &str) -> Option<LogEvent> {
         return None;
     }
 
-    let timestamp = parse_realtime_timestamp(
-        journald_field_text(obj.get("__REALTIME_TIMESTAMP")).as_deref(),
-    );
+    let timestamp =
+        parse_realtime_timestamp(journald_field_text(obj.get("__REALTIME_TIMESTAMP")).as_deref());
     let priority = parse_priority(obj.get("PRIORITY"));
 
     // Some firewall drops are emitted by the kernel logger (SYSLOG_IDENTIFIER=kernel)
@@ -116,11 +116,22 @@ pub(crate) fn parse_journald_system_line(line: &str) -> Option<LogEvent> {
     }
 
     // Unit name: prefer _SYSTEMD_UNIT, fall back to SYSLOG_IDENTIFIER.
-    let unit = obj
+    let mut unit = obj
         .get("_SYSTEMD_UNIT")
         .and_then(|v| journald_field_text(Some(v)))
-        .or_else(|| obj.get("SYSLOG_IDENTIFIER").and_then(|v| journald_field_text(Some(v))))
+        .or_else(|| {
+            obj.get("SYSLOG_IDENTIFIER")
+                .and_then(|v| journald_field_text(Some(v)))
+        })
         .unwrap_or_else(|| "unknown".to_string());
+    let mut priority = priority;
+    let mut message = message;
+
+    if let Some(formatted) = parse_tracing_formatted_line(&message) {
+        unit = formatted.target;
+        priority = Some(formatted.priority);
+        message = formatted.message;
+    }
 
     Some(LogEvent::SystemEvent {
         timestamp,
@@ -135,6 +146,85 @@ fn looks_like_nftables_message(message: &str) -> bool {
         && message.contains("SRC=")
         && message.contains("DST=")
         && message.contains("PROTO=")
+}
+
+struct TracingFormattedLine {
+    target: String,
+    priority: u8,
+    message: String,
+}
+
+fn parse_tracing_formatted_line(message: &str) -> Option<TracingFormattedLine> {
+    let trimmed = message.trim_start();
+    let (timestamp, rest) = split_first_token(trimmed)?;
+    DateTime::parse_from_rfc3339(timestamp).ok()?;
+
+    let (level, rest) = split_first_token(rest.trim_start())?;
+    let priority = tracing_level_priority(level)?;
+
+    let (target, message) = rest.trim_start().split_once(": ")?;
+    if target.contains(char::is_whitespace) || target.is_empty() {
+        return None;
+    }
+
+    Some(TracingFormattedLine {
+        target: target.to_string(),
+        priority,
+        message: message.trim().to_string(),
+    })
+}
+
+fn split_first_token(value: &str) -> Option<(&str, &str)> {
+    let idx = value.find(char::is_whitespace)?;
+    Some((&value[..idx], &value[idx..]))
+}
+
+fn tracing_level_priority(level: &str) -> Option<u8> {
+    match level {
+        "ERROR" => Some(3),
+        "WARN" => Some(4),
+        "INFO" => Some(6),
+        "DEBUG" | "TRACE" => Some(7),
+        _ => None,
+    }
+}
+
+fn strip_ansi_codes(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            out.push(ch);
+            continue;
+        }
+
+        match chars.peek().copied() {
+            Some('[') => {
+                chars.next();
+                for code in chars.by_ref() {
+                    if ('@'..='~').contains(&code) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                chars.next();
+                while let Some(code) = chars.next() {
+                    if code == '\u{7}' {
+                        break;
+                    }
+                    if code == '\u{1b}' && matches!(chars.peek(), Some('\\')) {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    out
 }
 
 /// Convert a journald `__REALTIME_TIMESTAMP` (microseconds since epoch) to an
@@ -249,6 +339,47 @@ mod tests {
         let event = parse_journald_system_line(line).expect("should parse");
         match event {
             LogEvent::SystemEvent { message, .. } => assert_eq!(message, "Failed password"),
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_parse_system_line_strips_ansi_tracing_format() {
+        let line = r#"{"__REALTIME_TIMESTAMP":"1779501788101989","_SYSTEMD_UNIT":"dayshield-core.service","PRIORITY":"6","MESSAGE":"\u001b[2m2026-05-23T12:22:28.101989Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mdayshield_core::engine::nftables\u001b[0m\u001b[2m:\u001b[0m nftables: ruleset generated (1449 bytes) \u001b[3mfw_rules\u001b[0m\u001b[2m=\u001b[0m1 \u001b[3mnat_rules\u001b[0m\u001b[2m=\u001b[0m1"}"#;
+        let event = parse_journald_system_line(line).expect("should parse");
+        match event {
+            LogEvent::SystemEvent {
+                unit,
+                priority,
+                message,
+                ..
+            } => {
+                assert_eq!(unit, "dayshield_core::engine::nftables");
+                assert_eq!(priority, Some(6));
+                assert_eq!(
+                    message,
+                    "nftables: ruleset generated (1449 bytes) fw_rules=1 nat_rules=1"
+                );
+            }
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_parse_system_line_extracts_warn_priority_from_tracing_format() {
+        let line = r#"{"__REALTIME_TIMESTAMP":"1779501818858069","_SYSTEMD_UNIT":"dayshield-core.service","PRIORITY":"6","MESSAGE":"2026-05-23T12:23:38.858069Z  WARN dayshield_core::api::wireguard: wireguard: invalid interface name name="}"#;
+        let event = parse_journald_system_line(line).expect("should parse");
+        match event {
+            LogEvent::SystemEvent {
+                unit,
+                priority,
+                message,
+                ..
+            } => {
+                assert_eq!(unit, "dayshield_core::api::wireguard");
+                assert_eq!(priority, Some(4));
+                assert_eq!(message, "wireguard: invalid interface name name=");
+            }
             _ => panic!("unexpected variant"),
         }
     }

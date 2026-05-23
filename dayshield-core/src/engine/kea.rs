@@ -15,18 +15,15 @@ use tracing::{info, warn};
 
 pub const CONFIG_DIR: &str = "/etc/kea";
 pub const DAYSHIELD_CONFIG_DIR: &str = "/etc/dayshield";
-pub const DATA_DIR: &str = "/var/lib/kea";
-pub const LOG_DIR: &str = "/var/log/kea";
+pub const DATA_DIR: &str = "/run/dayshield/kea";
 
 pub const DHCP4_DAYSHIELD_CONF_PATH: &str = "/etc/dayshield/kea-dhcp4.conf";
 pub const DHCP4_SYSTEM_CONF_PATH: &str = "/etc/kea/kea-dhcp4.conf";
-pub const DHCP4_LEASES_PATH: &str = "/var/lib/kea/kea-leases4.csv";
-pub const DHCP4_LOG_PATH: &str = "/var/log/kea/kea-dhcp4.log";
+pub const DHCP4_LEASES_PATH: &str = "/run/dayshield/kea/kea-leases4.csv";
 
 pub const DHCP6_DAYSHIELD_CONF_PATH: &str = "/etc/dayshield/kea-dhcp6.conf";
 pub const DHCP6_SYSTEM_CONF_PATH: &str = "/etc/kea/kea-dhcp6.conf";
-pub const DHCP6_LEASES_PATH: &str = "/var/lib/kea/kea-leases6.csv";
-pub const DHCP6_LOG_PATH: &str = "/var/log/kea/kea-dhcp6.log";
+pub const DHCP6_LEASES_PATH: &str = "/run/dayshield/kea/kea-leases6.csv";
 
 const DHCP4_SERVICE_CANDIDATES: &[&str] = &[
     "isc-kea-dhcp4-server.service",
@@ -89,13 +86,6 @@ impl KeaServer {
         match self {
             Self::Dhcp4 => DHCP4_LEASES_PATH,
             Self::Dhcp6 => DHCP6_LEASES_PATH,
-        }
-    }
-
-    fn log_path(self) -> &'static str {
-        match self {
-            Self::Dhcp4 => DHCP4_LOG_PATH,
-            Self::Dhcp6 => DHCP6_LOG_PATH,
         }
     }
 
@@ -183,43 +173,45 @@ async fn prepare_runtime(server: KeaServer) -> Result<()> {
 
     std::fs::create_dir_all(CONFIG_DIR).context("failed to create /etc/kea")?;
     std::fs::create_dir_all(DAYSHIELD_CONFIG_DIR).context("failed to create /etc/dayshield")?;
-    std::fs::create_dir_all(DATA_DIR).context("failed to create /var/lib/kea")?;
-    std::fs::create_dir_all(LOG_DIR).context("failed to create /var/log/kea")?;
+    std::fs::create_dir_all(DATA_DIR).context("failed to create /run/dayshield/kea")?;
 
     set_directory_permissions_best_effort(CONFIG_DIR);
     set_directory_permissions_best_effort(DAYSHIELD_CONFIG_DIR);
     set_directory_permissions_best_effort(DATA_DIR);
-    set_directory_permissions_best_effort(LOG_DIR);
 
     #[cfg(unix)]
-    sync_runtime_owner(server).await?;
+    sync_runtime_owner(server).await;
 
     Ok(())
 }
 
 #[cfg(unix)]
-async fn sync_runtime_owner(server: KeaServer) -> Result<()> {
+async fn sync_runtime_owner(server: KeaServer) {
     let Some(unit) = resolve_service_unit(server).await.ok() else {
         warn!(
             service = server.label(),
             tried = ?server.service_candidates(),
             "kea: could not resolve service unit before ownership sync"
         );
-        return Ok(());
+        return;
     };
     let Some(user) = service_user(unit).await else {
-        return Ok(());
+        return;
     };
 
-    for path in [DATA_DIR, LOG_DIR, server.lease_path(), server.log_path()] {
+    for path in [DATA_DIR, server.lease_path()] {
         if Path::new(path).exists() {
-            chown_path(&user, path)
-                .await
-                .with_context(|| format!("failed to make {path} writable by {user}"))?;
+            if let Err(error) = chown_path(&user, path).await {
+                warn!(
+                    service = server.label(),
+                    path,
+                    user,
+                    error = %error,
+                    "kea: continuing after ownership repair failed"
+                );
+            }
         }
     }
-
-    Ok(())
 }
 
 #[cfg(unix)]
@@ -419,6 +411,18 @@ mod tests {
         assert_eq!(
             KeaServer::Dhcp6.system_config_path(),
             "/etc/kea/kea-dhcp6.conf"
+        );
+    }
+
+    #[test]
+    fn lease_paths_use_runtime_storage() {
+        assert_eq!(
+            KeaServer::Dhcp4.lease_path(),
+            "/run/dayshield/kea/kea-leases4.csv"
+        );
+        assert_eq!(
+            KeaServer::Dhcp6.lease_path(),
+            "/run/dayshield/kea/kea-leases6.csv"
         );
     }
 }

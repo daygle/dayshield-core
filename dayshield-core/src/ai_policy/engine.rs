@@ -16,7 +16,7 @@ use tracing::warn;
 use crate::{
     ai_policy::{
         auto_enforcer::{apply_suggestion_to_rules, undo_change, AppliedChange},
-        event_classifier::{classify_event, is_private_ipv4},
+        event_classifier::{classify_event, is_scoped_allow_event},
         intent_resolver::{resolve_intent, ResolvedIntent},
         models::{
             ApplySuggestionRequest, ApplySuggestionResponse, AutomationMode, AutomationSettings,
@@ -927,17 +927,7 @@ fn build_traffic_candidates(recent: &[Event], intents: &[Intent]) -> Vec<Traffic
 }
 
 fn is_scoped_allow_candidate(event: &Event, intents: &[Intent]) -> bool {
-    if !is_private_ipv4(&event.src_ip) {
-        return false;
-    }
-
-    let protocol = event.protocol.trim();
-    if protocol.is_empty() || protocol.eq_ignore_ascii_case("any") {
-        return false;
-    }
-    if (protocol.eq_ignore_ascii_case("tcp") || protocol.eq_ignore_ascii_case("udp"))
-        && event.dest_port.is_none()
-    {
+    if !is_scoped_allow_event(event) {
         return false;
     }
 

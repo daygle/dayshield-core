@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256};
 
 use crate::ai_policy::{
-    event_classifier::EventClass,
+    event_classifier::{is_scoped_allow_event, EventClass},
     models::{Decision, DecisionAction, Event, Suggestion},
 };
 
@@ -10,7 +10,7 @@ pub fn build_suggestion(event: Event, classes: &[EventClass]) -> Suggestion {
         || event.action.eq_ignore_ascii_case("reject")
         || event.action.eq_ignore_ascii_case("block");
 
-    let scoped_allow_candidate = is_scoped_allow_candidate(&event, classes);
+    let scoped_allow_candidate = is_scoped_allow_event(&event);
 
     let (action, reason, confidence) = if classes.contains(&EventClass::PortScan) {
         (
@@ -118,22 +118,6 @@ fn stable_suggestion_id(event: &Event, decision: &Decision) -> String {
         .iter()
         .map(|b| format!("{:02x}", b))
         .collect()
-}
-
-fn is_scoped_allow_candidate(event: &Event, classes: &[EventClass]) -> bool {
-    if !classes.contains(&EventClass::LanDevice) {
-        return false;
-    }
-    let protocol = event.protocol.trim();
-    if protocol.is_empty() || protocol.eq_ignore_ascii_case("any") {
-        return false;
-    }
-    if (protocol.eq_ignore_ascii_case("tcp") || protocol.eq_ignore_ascii_case("udp"))
-        && event.dest_port.is_none()
-    {
-        return false;
-    }
-    true
 }
 
 #[cfg(test)]

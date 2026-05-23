@@ -10,6 +10,8 @@ pub fn build_suggestion(event: Event, classes: &[EventClass]) -> Suggestion {
         || event.action.eq_ignore_ascii_case("reject")
         || event.action.eq_ignore_ascii_case("block");
 
+    let scoped_allow_candidate = is_scoped_allow_candidate(&event, classes);
+
     let (action, reason, confidence) = if classes.contains(&EventClass::PortScan) {
         (
             DecisionAction::SuggestDeny,
@@ -23,11 +25,20 @@ pub fn build_suggestion(event: Event, classes: &[EventClass]) -> Suggestion {
             0.85_f32,
         )
     } else if classes.contains(&EventClass::LanDevice) {
-        (
-            DecisionAction::SuggestAllow,
-            "Likely LAN-origin traffic blocked unexpectedly".to_string(),
-            0.65_f32,
-        )
+        if scoped_allow_candidate && is_blocked {
+            (
+                DecisionAction::SuggestAllow,
+                "Likely LAN-origin traffic blocked unexpectedly".to_string(),
+                0.65_f32,
+            )
+        } else {
+            (
+                DecisionAction::EditRule,
+                "LAN traffic observed but missing enough scope for a safe allow recommendation"
+                    .to_string(),
+                0.58_f32,
+            )
+        }
     } else if classes.contains(&EventClass::NewService) {
         if is_blocked {
             (
@@ -36,12 +47,19 @@ pub fn build_suggestion(event: Event, classes: &[EventClass]) -> Suggestion {
                     .to_string(),
                 0.6_f32,
             )
-        } else {
+        } else if scoped_allow_candidate {
             (
                 DecisionAction::SuggestAllow,
-                "Observed new permitted traffic; suggest creating a scoped allow rule"
+                "Observed new permitted LAN traffic; suggest creating a scoped allow rule"
                     .to_string(),
-                0.68_f32,
+                0.62_f32,
+            )
+        } else {
+            (
+                DecisionAction::EditRule,
+                "Observed new permitted traffic without trusted scope; suggest refining existing rules"
+                    .to_string(),
+                0.55_f32,
             )
         }
     } else {
@@ -53,10 +71,10 @@ pub fn build_suggestion(event: Event, classes: &[EventClass]) -> Suggestion {
             )
         } else {
             (
-                DecisionAction::SuggestAllow,
-                "Observed permitted traffic without an explicit intent; review whether a scoped allow rule should exist"
+                DecisionAction::EditRule,
+                "Observed permitted traffic without an explicit intent; suggest refining existing rules instead of broad allows"
                     .to_string(),
-                0.52_f32,
+                0.48_f32,
             )
         }
     };
@@ -100,4 +118,69 @@ fn stable_suggestion_id(event: &Event, decision: &Decision) -> String {
         .iter()
         .map(|b| format!("{:02x}", b))
         .collect()
+}
+
+fn is_scoped_allow_candidate(event: &Event, classes: &[EventClass]) -> bool {
+    if !classes.contains(&EventClass::LanDevice) {
+        return false;
+    }
+    let protocol = event.protocol.trim();
+    if protocol.is_empty() || protocol.eq_ignore_ascii_case("any") {
+        return false;
+    }
+    if (protocol.eq_ignore_ascii_case("tcp") || protocol.eq_ignore_ascii_case("udp"))
+        && event.dest_port.is_none()
+    {
+        return false;
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_event(action: &str) -> Event {
+        Event {
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            direction: "inbound".to_string(),
+            action: action.to_string(),
+            src_ip: "10.0.0.2".to_string(),
+            dest_ip: "10.0.0.1".to_string(),
+            protocol: "tcp".to_string(),
+            src_port: Some(51515),
+            dest_port: Some(443),
+            iface: "lan0".to_string(),
+        }
+    }
+
+    #[test]
+    fn non_lan_permitted_traffic_prefers_edit_rule() {
+        let mut event = base_event("ACCEPT");
+        event.src_ip = "203.0.113.5".to_string();
+
+        let suggestion = build_suggestion(event, &[]);
+
+        assert!(matches!(suggestion.decision.action, DecisionAction::EditRule));
+    }
+
+    #[test]
+    fn lan_blocked_scoped_traffic_can_suggest_allow() {
+        let suggestion = build_suggestion(base_event("DROP"), &[EventClass::LanDevice]);
+
+        assert!(matches!(
+            suggestion.decision.action,
+            DecisionAction::SuggestAllow
+        ));
+    }
+
+    #[test]
+    fn lan_without_port_is_not_allow_candidate() {
+        let mut event = base_event("DROP");
+        event.dest_port = None;
+
+        let suggestion = build_suggestion(event, &[EventClass::LanDevice]);
+
+        assert!(matches!(suggestion.decision.action, DecisionAction::EditRule));
+    }
 }

@@ -1,28 +1,18 @@
 //! DHCPv6 engine - manages the Kea DHCPv6 server.
 //!
 //! This module translates a [`Dhcp6Config`] into a Kea DHCPv6 JSON
-//! configuration and manages kea-dhcp6-server lifecycle.
+//! configuration and asks the shared Kea runtime helper to validate and restart
+//! the server.
 
-use std::{io::ErrorKind, path::Path};
-
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::json;
-use tokio::process::Command;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::config::models::{normalize_ipv6_cidr, Dhcp6Config};
-
-/// Path where the Kea DHCPv6 configuration file is written.
-const KEA6_CONF_PATH: &str = "/etc/dayshield/kea-dhcp6.conf";
-
-/// Compatibility path expected by the distro kea-dhcp6-server unit.
-const KEA6_SYSTEM_CONF_PATH: &str = "/etc/kea/kea-dhcp6.conf";
+use crate::engine::kea::{self, KeaServer};
 
 /// Path to the Kea DHCPv6 memfile lease database.
-pub const KEA6_LEASES_PATH: &str = "/var/lib/kea/kea-leases6.csv";
+pub const KEA6_LEASES_PATH: &str = kea::DHCP6_LEASES_PATH;
 
 /// Generate a complete Kea DHCPv6 JSON configuration as a `String`.
 pub fn generate_config(config: &Dhcp6Config) -> String {
@@ -85,7 +75,7 @@ pub fn generate_config(config: &Dhcp6Config) -> String {
         "Dhcp6": {
             "interfaces-config": {
                 "interfaces": interfaces,
-                "dhcp-socket-type": "raw"
+                "service-sockets-require-all": true
             },
             "lease-database": {
                 "type": "memfile",
@@ -124,107 +114,11 @@ pub async fn apply_config(config: &Dhcp6Config) -> Result<()> {
     );
 
     if !config.enabled {
-        info!("dhcp6: service disabled - stopping kea-dhcp6-server");
-        let _ = Command::new("systemctl")
-            .args(["disable", "--now", "kea-dhcp6-server"])
-            .output()
-            .await;
-        remove_config_if_exists(KEA6_CONF_PATH)?;
-        remove_config_if_exists(KEA6_SYSTEM_CONF_PATH)?;
-        return Ok(());
+        return kea::apply_config(KeaServer::Dhcp6, false, None).await;
     }
-
-    std::fs::create_dir_all("/etc/kea").context("failed to create /etc/kea")?;
-    #[cfg(unix)]
-    set_directory_permissions_best_effort("/etc/kea");
-    std::fs::create_dir_all("/var/log/kea").context("failed to create /var/log/kea")?;
 
     let conf_str = generate_config(config);
-    write_config_atomic(KEA6_CONF_PATH, &conf_str).context("failed to write kea-dhcp6.conf")?;
-    #[cfg(unix)]
-    std::fs::set_permissions(KEA6_CONF_PATH, std::fs::Permissions::from_mode(0o644))
-        .context("failed to chmod kea-dhcp6.conf")?;
-
-    write_config_atomic(KEA6_SYSTEM_CONF_PATH, &conf_str).context(
-        "failed to mirror kea-dhcp6.conf to system path \
-         (check dayshield.service sandbox: ReadWritePaths should include /etc/kea)",
-    )?;
-    #[cfg(unix)]
-    std::fs::set_permissions(
-        KEA6_SYSTEM_CONF_PATH,
-        std::fs::Permissions::from_mode(0o644),
-    )
-    .context("failed to chmod system kea-dhcp6.conf")?;
-
-    info!(
-        path = KEA6_CONF_PATH,
-        system_path = KEA6_SYSTEM_CONF_PATH,
-        "dhcp6: kea-dhcp6.conf written"
-    );
-
-    let enable_out = Command::new("systemctl")
-        .args(["enable", "kea-dhcp6-server"])
-        .output()
-        .await
-        .context("failed to enable kea-dhcp6-server")?;
-
-    if !enable_out.status.success() {
-        let stderr = String::from_utf8_lossy(&enable_out.stderr);
-        anyhow::bail!("systemctl enable kea-dhcp6-server failed: {stderr}");
-    }
-
-    restart_kea6().await
-}
-
-fn write_config_atomic(path: &str, content: &str) -> Result<()> {
-    let tmp = format!("{path}.tmp");
-
-    if let Some(parent) = Path::new(path).parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create parent directory for {path}"))?;
-    }
-
-    std::fs::write(&tmp, content).with_context(|| format!("write temp config {tmp}"))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("rename {tmp} -> {path}"))?;
-
-    Ok(())
-}
-
-fn remove_config_if_exists(path: &str) -> Result<()> {
-    match std::fs::remove_file(path) {
-        Ok(()) => {
-            info!(path, "dhcp6: removed stale kea-dhcp6.conf");
-            Ok(())
-        }
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err).with_context(|| format!("failed to remove stale config {path}")),
-    }
-}
-
-#[cfg(unix)]
-fn set_directory_permissions_best_effort(path: &str) {
-    // The packaged Kea directory is commonly owned by root or the distro's Kea
-    // package. If DayShield can write the config file, failure to chmod the
-    // existing directory should not block DHCP saves.
-    if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)) {
-        warn!(path, error = %error, "dhcp6: continuing after directory chmod failed");
-    }
-}
-
-async fn restart_kea6() -> Result<()> {
-    let out = Command::new("systemctl")
-        .args(["restart", "kea-dhcp6-server"])
-        .output()
-        .await
-        .context("failed to spawn systemctl restart kea-dhcp6-server")?;
-
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        anyhow::bail!("systemctl restart kea-dhcp6-server failed: {stderr}");
-    }
-
-    info!("dhcp6: kea-dhcp6-server restarted");
-    Ok(())
+    kea::apply_config(KeaServer::Dhcp6, true, Some(&conf_str)).await
 }
 
 #[cfg(test)]
@@ -264,5 +158,13 @@ mod tests {
         let out = generate_config(&cfg);
         assert!(out.contains("\"subnet\": \"fd00:1::/64\""));
         assert!(!out.contains("\"subnet\": \"fd00:1::1/64\""));
+    }
+
+    #[test]
+    fn generate_config_omits_dhcpv4_socket_type() {
+        let cfg = base_config();
+        let out = generate_config(&cfg);
+        assert!(!out.contains("dhcp-socket-type"));
+        assert!(out.contains("service-sockets-require-all"));
     }
 }

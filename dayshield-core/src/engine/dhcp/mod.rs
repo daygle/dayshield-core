@@ -3,38 +3,24 @@
 //! # Overview
 //!
 //! This module translates a [`DhcpConfig`] into a Kea DHCPv4 JSON configuration
-//! and manages the kea-dhcp4-server process lifecycle (restart on config change).
+//! and asks the shared Kea runtime helper to validate and restart the server.
 //!
 //! # Functions
 //!
 //! | Function            | Purpose                                              |
 //! |---------------------|------------------------------------------------------|
 //! | [`generate_config`] | Build a complete Kea DHCPv4 JSON config string.      |
-//! | [`apply_config`]    | Write config to disk and restart kea-dhcp4-server.   |
+//! | [`apply_config`]    | Validate, install, and restart the DHCPv4 server.    |
 
-use std::{io::ErrorKind, path::Path};
-
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::json;
-use tokio::process::Command;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::config::models::{normalize_ipv4_cidr, DhcpConfig};
-
-/// Path where the Kea DHCPv4 configuration file is written.
-const KEA_CONF_PATH: &str = "/etc/dayshield/kea-dhcp4.conf";
-
-/// Compatibility path expected by the distro kea-dhcp4-server unit.
-const KEA_SYSTEM_CONF_PATH: &str = "/etc/kea/kea-dhcp4.conf";
+use crate::engine::kea::{self, KeaServer};
 
 /// Path to the Kea memfile lease database.
-pub const KEA_LEASES_PATH: &str = "/var/lib/kea/kea-leases4.csv";
-
-/// Directory that contains Kea's memfile lease databases.
-const KEA_DATA_DIR: &str = "/var/lib/kea";
+pub const KEA_LEASES_PATH: &str = kea::DHCP4_LEASES_PATH;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -105,7 +91,8 @@ pub fn generate_config(config: &DhcpConfig) -> String {
         "Dhcp4": {
             "interfaces-config": {
                 "interfaces": interfaces,
-                "dhcp-socket-type": "raw"
+                "dhcp-socket-type": "raw",
+                "service-sockets-require-all": true
             },
             "lease-database": {
                 "type": "memfile",
@@ -142,8 +129,8 @@ pub fn generate_config(config: &DhcpConfig) -> String {
 ///
 /// Steps:
 /// 1. Generate `kea-dhcp4.conf` via [`generate_config`].
-/// 2. Write the file atomically to [`KEA_CONF_PATH`].
-/// 3. Restart `kea-dhcp4-server` via systemctl (Kea does not support SIGHUP).
+/// 2. Validate and install it via the shared Kea runtime helper.
+/// 3. Restart the resolved Kea DHCPv4 systemd unit.
 ///
 /// # Errors
 ///
@@ -157,117 +144,11 @@ pub async fn apply_config(config: &DhcpConfig) -> Result<()> {
     );
 
     if !config.enabled {
-        info!("dhcp: service disabled - stopping kea-dhcp4-server");
-        let _ = Command::new("systemctl")
-            .args(["disable", "--now", "kea-dhcp4-server"])
-            .output()
-            .await;
-        remove_config_if_exists(KEA_CONF_PATH)?;
-        remove_config_if_exists(KEA_SYSTEM_CONF_PATH)?;
-        return Ok(());
+        return kea::apply_config(KeaServer::Dhcp4, false, None).await;
     }
-
-    std::fs::create_dir_all("/etc/kea").context("failed to create /etc/kea")?;
-    #[cfg(unix)]
-    set_directory_permissions_best_effort("/etc/kea");
-    std::fs::create_dir_all("/var/log/kea").context("failed to create /var/log/kea")?;
-    std::fs::create_dir_all(KEA_DATA_DIR).context("failed to create /var/lib/kea")?;
-    #[cfg(unix)]
-    set_directory_permissions_best_effort(KEA_DATA_DIR);
 
     let conf_str = generate_config(config);
-    write_config_atomic(KEA_CONF_PATH, &conf_str).context("failed to write kea-dhcp4.conf")?;
-    #[cfg(unix)]
-    std::fs::set_permissions(KEA_CONF_PATH, std::fs::Permissions::from_mode(0o644))
-        .context("failed to chmod kea-dhcp4.conf")?;
-
-    // Keep Kea's packaged default path in sync with valid JSON so distro units
-    // that read /etc/kea/kea-dhcp4.conf always parse successfully.
-    write_config_atomic(KEA_SYSTEM_CONF_PATH, &conf_str).context(
-        "failed to mirror kea-dhcp4.conf to system path \
-         (check dayshield.service sandbox: ReadWritePaths should include /etc/kea)",
-    )?;
-    #[cfg(unix)]
-    std::fs::set_permissions(KEA_SYSTEM_CONF_PATH, std::fs::Permissions::from_mode(0o644))
-        .context("failed to chmod system kea-dhcp4.conf")?;
-
-    info!(
-        path = KEA_CONF_PATH,
-        system_path = KEA_SYSTEM_CONF_PATH,
-        "dhcp: kea-dhcp4.conf written"
-    );
-
-    let enable_out = Command::new("systemctl")
-        .args(["enable", "kea-dhcp4-server"])
-        .output()
-        .await
-        .context("failed to enable kea-dhcp4-server")?;
-
-    if !enable_out.status.success() {
-        let stderr = String::from_utf8_lossy(&enable_out.stderr);
-        anyhow::bail!("systemctl enable kea-dhcp4-server failed: {stderr}");
-    }
-
-    restart_kea().await
-}
-
-// ---------------------------------------------------------------------------
-// Private helpers
-// ---------------------------------------------------------------------------
-
-/// Write `content` to `path` using an atomic rename.
-fn write_config_atomic(path: &str, content: &str) -> Result<()> {
-    let tmp = format!("{path}.tmp");
-
-    if let Some(parent) = Path::new(path).parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create directory {}", parent.display()))?;
-    }
-
-    std::fs::write(&tmp, content)
-        .with_context(|| format!("failed to write temporary file {tmp}"))?;
-
-    std::fs::rename(&tmp, path).with_context(|| format!("failed to rename {tmp} to {path}"))?;
-
-    Ok(())
-}
-
-fn remove_config_if_exists(path: &str) -> Result<()> {
-    match std::fs::remove_file(path) {
-        Ok(()) => {
-            info!(path, "dhcp: removed stale kea-dhcp4.conf");
-            Ok(())
-        }
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err).with_context(|| format!("failed to remove stale config {path}")),
-    }
-}
-
-#[cfg(unix)]
-fn set_directory_permissions_best_effort(path: &str) {
-    // The packaged Kea directory is commonly owned by root or the distro's Kea
-    // package. If DayShield can write the config file, failure to chmod the
-    // existing directory should not block DHCP saves.
-    if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)) {
-        warn!(path, error = %error, "dhcp: continuing after directory chmod failed");
-    }
-}
-
-/// Restart the kea-dhcp4-server service via systemctl.
-async fn restart_kea() -> Result<()> {
-    let out = Command::new("systemctl")
-        .args(["restart", "kea-dhcp4-server"])
-        .output()
-        .await
-        .context("failed to spawn systemctl")?;
-
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        anyhow::bail!("systemctl restart kea-dhcp4-server failed: {stderr}");
-    }
-
-    info!("dhcp: kea-dhcp4-server restarted");
-    Ok(())
+    kea::apply_config(KeaServer::Dhcp4, true, Some(&conf_str)).await
 }
 
 // ---------------------------------------------------------------------------
@@ -377,6 +258,13 @@ mod tests {
         let cfg = base_config();
         let out = generate_config(&cfg);
         assert!(out.contains("eth1"));
+    }
+
+    #[test]
+    fn generate_config_requires_configured_sockets() {
+        let cfg = base_config();
+        let out = generate_config(&cfg);
+        assert!(out.contains("service-sockets-require-all"));
     }
 
     #[test]

@@ -22,6 +22,7 @@ pub mod dns;
 pub mod gateway;
 pub mod interfaces;
 pub mod ipv6;
+pub mod kea;
 pub mod nftables;
 pub mod prefix_delegation;
 pub mod radvd;

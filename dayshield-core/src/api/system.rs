@@ -34,7 +34,7 @@ use crate::{
     config::models::SystemSettings,
     engine::{
         dns::apply_config_with_ipv6 as apply_dns_config, interfaces::refresh_router_advertisements,
-        ipv6::apply_ipv6_setting,
+        ipv6::apply_ipv6_setting, kea,
     },
     state::{
         AppState, SVC_CLOUDFLARED, SVC_CROWDSEC, SVC_DHCP, SVC_DNS, SVC_NFTABLES, SVC_SURICATA,
@@ -385,7 +385,11 @@ fn all_service_units(service_id: &str) -> Vec<&'static str> {
     match service_id {
         SVC_NFTABLES => vec!["nftables.service"],
         SVC_DNS => vec!["unbound.service"],
-        SVC_DHCP => vec!["kea-dhcp4-server.service", "kea-dhcp6-server.service"],
+        SVC_DHCP => kea::dhcp4_service_candidates()
+            .iter()
+            .chain(kea::dhcp6_service_candidates().iter())
+            .copied()
+            .collect(),
         SVC_SURICATA => vec!["suricata.service"],
         SVC_CROWDSEC => vec!["crowdsec.service"],
         SVC_CLOUDFLARED => vec!["cloudflared.service"],
@@ -426,7 +430,11 @@ async fn configured_service_units(
                 .map(|cfg| cfg.enabled)
                 .unwrap_or(false);
             if dhcp_enabled {
-                units.push("kea-dhcp4-server.service");
+                units.push(
+                    first_available_unit(kea::dhcp4_service_candidates())
+                        .await
+                        .unwrap_or(kea::dhcp4_service_candidates()[0]),
+                );
             }
 
             let dhcp6_enabled = state
@@ -436,7 +444,11 @@ async fn configured_service_units(
                 .map(|cfg| cfg.enabled)
                 .unwrap_or(false);
             if dhcp6_enabled {
-                units.push("kea-dhcp6-server.service");
+                units.push(
+                    first_available_unit(kea::dhcp6_service_candidates())
+                        .await
+                        .unwrap_or(kea::dhcp6_service_candidates()[0]),
+                );
             }
             Ok(units)
         }
@@ -628,7 +640,7 @@ fn summarize_service_status(
     units: &[ServiceUnitStatus],
 ) -> (&'static str, String) {
     if !configured {
-        return ("notConfigured", "Disabled in configuration".to_string());
+        return ("notConfigured", "Disabled".to_string());
     }
 
     let relevant = units

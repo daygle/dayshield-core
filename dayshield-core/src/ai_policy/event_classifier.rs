@@ -53,6 +53,22 @@ pub fn is_private_ipv4(ip: &str) -> bool {
         .unwrap_or(false)
 }
 
+pub fn is_scoped_allow_event(event: &Event) -> bool {
+    if !is_private_ipv4(&event.src_ip) {
+        return false;
+    }
+    let protocol = event.protocol.trim();
+    if protocol.is_empty() || protocol.eq_ignore_ascii_case("any") {
+        return false;
+    }
+    if (protocol.eq_ignore_ascii_case("tcp") || protocol.eq_ignore_ascii_case("udp"))
+        && event.dest_port.is_none()
+    {
+        return false;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,5 +94,28 @@ mod tests {
         }
         let classes = classify_event(&base, &recent);
         assert!(classes.contains(&EventClass::PortScan));
+    }
+
+    #[test]
+    fn scoped_allow_event_requires_private_source_and_service_scope() {
+        let mut event = Event {
+            timestamp: "2026-01-01T00:00:00Z".into(),
+            direction: "inbound".into(),
+            action: "ACCEPT".into(),
+            src_ip: "10.0.0.10".into(),
+            dest_ip: "10.0.0.1".into(),
+            protocol: "TCP".into(),
+            src_port: Some(50000),
+            dest_port: Some(443),
+            iface: "lan0".into(),
+        };
+        assert!(is_scoped_allow_event(&event));
+
+        event.src_ip = "203.0.113.10".into();
+        assert!(!is_scoped_allow_event(&event));
+
+        event.src_ip = "10.0.0.10".into();
+        event.dest_port = None;
+        assert!(!is_scoped_allow_event(&event));
     }
 }

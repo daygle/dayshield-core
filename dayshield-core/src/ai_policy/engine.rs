@@ -16,7 +16,7 @@ use tracing::warn;
 use crate::{
     ai_policy::{
         auto_enforcer::{apply_suggestion_to_rules, undo_change, AppliedChange},
-        event_classifier::classify_event,
+        event_classifier::{classify_event, is_scoped_allow_event},
         intent_resolver::{resolve_intent, ResolvedIntent},
         models::{
             ApplySuggestionRequest, ApplySuggestionResponse, AutomationMode, AutomationSettings,
@@ -865,13 +865,25 @@ fn build_traffic_candidates(recent: &[Event], intents: &[Intent]) -> Vec<Traffic
                         None,
                     )
                 } else {
-                    (
-                        DecisionAction::SuggestAllow,
-                        0.5,
-                        "Observed permitted traffic without a matching intent".to_string(),
-                        None,
-                        None,
-                    )
+                    let scoped_allow_candidate =
+                        is_scoped_allow_candidate(&aggregate.exemplar, intents);
+                    if scoped_allow_candidate {
+                        (
+                            DecisionAction::SuggestAllow,
+                            0.5,
+                            "Observed permitted LAN traffic without a matching intent; verify and add a scoped allow rule".to_string(),
+                            None,
+                            None,
+                        )
+                    } else {
+                        (
+                            DecisionAction::EditRule,
+                            0.42,
+                            "Observed permitted traffic without trusted scope; refine existing rules before allowing".to_string(),
+                            None,
+                            None,
+                        )
+                    }
                 };
 
             let mut hasher = Sha256::new();
@@ -912,6 +924,21 @@ fn build_traffic_candidates(recent: &[Event], intents: &[Intent]) -> Vec<Traffic
 
     candidates.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
     candidates
+}
+
+fn is_scoped_allow_candidate(event: &Event, intents: &[Intent]) -> bool {
+    if !is_scoped_allow_event(event) {
+        return false;
+    }
+
+    intents.iter().any(|intent| {
+        intent.lan_only
+            || intent
+                .condition
+                .traffic_scope
+                .as_deref()
+                .is_some_and(|scope| scope.eq_ignore_ascii_case("lan"))
+    })
 }
 
 fn now_rfc3339() -> String {
@@ -1278,6 +1305,30 @@ mod tests {
 
         let all = engine.list_traffic_candidates(None).await;
         assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn traffic_candidates_without_lan_scope_prefer_edit_rule() {
+        let dir = tempdir().unwrap();
+        let engine = AiPolicyEngine::with_paths(
+            dir.path().join("suggestions.json"),
+            dir.path().join("actions.log"),
+            dir.path().join("intents.json"),
+            dir.path().join("mode.json"),
+            dir.path().join("automation_settings.json"),
+        );
+
+        {
+            let mut events = engine.recent_events.write().await;
+            events.push(test_event("wan0", "203.0.113.10", "10.0.0.1"));
+        }
+
+        let candidates = engine.list_traffic_candidates(None).await;
+        assert_eq!(candidates.len(), 1);
+        assert!(matches!(
+            candidates[0].recommended_action,
+            DecisionAction::EditRule
+        ));
     }
 
     fn test_intent(name: &str, iface: Option<&str>) -> Intent {

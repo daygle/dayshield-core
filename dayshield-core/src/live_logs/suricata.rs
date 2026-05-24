@@ -71,7 +71,14 @@ pub async fn stream_suricata(tx: Sender<LogEvent>) {
 /// Parse a single eve.json line and return a [`LogEvent::SuricataAlert`] if
 /// the line represents an alert, or `None` otherwise.
 pub(crate) fn parse_eve_line(line: &str) -> Option<LogEvent> {
-    let record: EveRecord = match serde_json::from_str(line) {
+    // Some tail/read paths can deliver blank or NUL-padded records; normalize
+    // before parsing so we do not warn on harmless transport artifacts.
+    let normalized = line.trim_matches(|c: char| c.is_whitespace() || c == '\0');
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let record: EveRecord = match serde_json::from_str(normalized) {
         Ok(r) => r,
         Err(e) => {
             warn!(error = %e, "suricata: failed to parse eve.json line");
@@ -145,6 +152,17 @@ mod tests {
     #[test]
     fn test_parse_invalid_json_returns_none() {
         assert!(parse_eve_line("not json").is_none());
+    }
+
+    #[test]
+    fn test_parse_blank_line_returns_none() {
+        assert!(parse_eve_line("   ").is_none());
+    }
+
+    #[test]
+    fn test_parse_nul_padded_alert_line() {
+        let line = format!("\0{}\0", alert_json(""));
+        assert!(parse_eve_line(&line).is_some());
     }
 
     #[test]

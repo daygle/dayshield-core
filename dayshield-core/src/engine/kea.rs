@@ -274,8 +274,25 @@ async fn test_config(server: KeaServer, path: &str) -> Result<()> {
 
 async fn enable_and_restart(server: KeaServer) -> Result<()> {
     let unit = resolve_service_unit(server).await?;
-    run_systemctl(&["enable", unit]).await?;
-    run_systemctl(&["restart", unit]).await?;
+
+    if let Err(error) = run_systemctl(&["enable", unit]).await {
+        warn!(
+            service = server.label(),
+            unit,
+            error = %error,
+            "kea: systemctl enable failed; continuing with runtime start"
+        );
+    }
+
+    if let Err(error) = run_systemctl(&["restart", unit]).await {
+        warn!(
+            service = server.label(),
+            unit,
+            error = %error,
+            "kea: systemctl restart failed; trying start"
+        );
+        run_systemctl(&["start", unit]).await?;
+    }
 
     info!(
         service = server.label(),

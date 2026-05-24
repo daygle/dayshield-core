@@ -665,7 +665,7 @@ fn summarize_service_status(
 
     let running = relevant.iter().filter(|unit| unit.running).count();
     match running {
-        0 => ("stopped", "Configured service is stopped".to_string()),
+        0 => ("stopped", "Stopped".to_string()),
         n if n == relevant.len() => ("running", "Running".to_string()),
         n => (
             "degraded",

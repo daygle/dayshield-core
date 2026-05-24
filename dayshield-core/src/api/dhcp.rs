@@ -973,12 +973,17 @@ pub async fn list_active_leases(
     State(state): State<Arc<AppState>>,
     Query(query): Query<DhcpLeaseQuery>,
 ) -> impl IntoResponse {
-    let mut leases = read_kea4_leases().await;
+    let leases = read_kea4_leases().await;
 
     if let Some(iface) = requested_dhcp_iface(&query) {
         match state.config_store.load_dhcp_config() {
             Ok(cfg) if !dhcp_config_matches_requested_iface(cfg.as_ref(), iface) => {
-                leases.clear();
+                warn!(
+                    requested_iface = %iface,
+                    configured_iface = cfg.as_ref().map(|c| c.interface.as_str()).unwrap_or(""),
+                    leases = leases.len(),
+                    "dhcp: requested interface does not match configured DHCP interface; returning leases without hard filtering"
+                );
             }
             Err(error) => {
                 warn!(error = %error, "dhcp: could not load config while filtering leases by interface");

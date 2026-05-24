@@ -95,29 +95,3 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Optional manifest update trigger
-        env:
-          MANIFEST_REPO_TOKEN: ${{ secrets['MANIFEST_REPO_TOKEN'] }}
-          MANIFEST_REPO: daygle/dayshield-updates
-        run: |
-          set -euo pipefail
-          if [ -z "${MANIFEST_REPO_TOKEN:-}" ]; then
-            echo "MANIFEST_REPO_TOKEN is not set; skipping manifest dispatch."
-            echo "Update central manifest manually or add MANIFEST_REPO_TOKEN with access to ${MANIFEST_REPO}."
-            exit 0
-          fi
-
-          curl -sSf -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${MANIFEST_REPO_TOKEN}" \
-            "https://api.github.com/repos/${MANIFEST_REPO}/dispatches" \
-            -d @- <<EOF
-          {
-            "event_type": "component-release-published",
-            "client_payload": {
-              "component": "core",
-              "repo": "${{ github.repository }}",
-              "tag": "${{ steps.version.outputs.VERSION }}"
-            }
-          }
-          EOF

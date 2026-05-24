@@ -12,6 +12,6 @@ use crate::state::AppState;
 
 pub async fn start_background_tasks(state: Arc<AppState>) {
     state
-        .ai_policy_engine
+        .ai_firewall_engine
         .start_background_tasks(Arc::clone(&state));
 }

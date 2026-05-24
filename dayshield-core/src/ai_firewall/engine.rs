@@ -14,7 +14,7 @@ use tokio::sync::RwLock;
 use tracing::warn;
 
 use crate::{
-    ai_policy::{
+    ai_firewall::{
         auto_enforcer::{apply_suggestion_to_rules, undo_change, AppliedChange},
         event_classifier::{classify_event, is_block_action, is_scoped_allow_event},
         intent_resolver::{resolve_intent, ResolvedIntent},
@@ -216,7 +216,7 @@ impl AiPolicyEngine {
 
             while let Some(event) = rx.recv().await {
                 if let Err(e) = this.handle_log_event(&state, event).await {
-                    warn!(error = %e, "ai_policy: failed to handle firewall log event");
+                    warn!(error = %e, "ai_firewall: failed to handle firewall log event");
                 }
             }
         });
@@ -1322,7 +1322,7 @@ fn materialize_action(action: DecisionAction) -> DecisionAction {
 
 fn should_generate_suggestion(
     event: &Event,
-    classes: &[crate::ai_policy::event_classifier::EventClass],
+    classes: &[crate::ai_firewall::event_classifier::EventClass],
     resolved_intent: Option<&ResolvedIntent>,
 ) -> bool {
     if resolved_intent.is_some() {
@@ -1333,9 +1333,9 @@ fn should_generate_suggestion(
         return true;
     }
 
-    classes.contains(&crate::ai_policy::event_classifier::EventClass::PortScan)
-        || classes.contains(&crate::ai_policy::event_classifier::EventClass::RepeatedAttempts)
-        || classes.contains(&crate::ai_policy::event_classifier::EventClass::NewService)
+    classes.contains(&crate::ai_firewall::event_classifier::EventClass::PortScan)
+        || classes.contains(&crate::ai_firewall::event_classifier::EventClass::RepeatedAttempts)
+        || classes.contains(&crate::ai_firewall::event_classifier::EventClass::NewService)
 }
 
 fn build_traffic_candidates(recent: &[Event], intents: &[Intent]) -> Vec<TrafficCandidate> {
@@ -1953,7 +1953,7 @@ mod tests {
             description: None,
             enabled: true,
             desired_action: DecisionAction::Allow,
-            condition: crate::ai_policy::models::IntentCondition {
+            condition: crate::ai_firewall::models::IntentCondition {
                 iface: iface.map(str::to_string),
                 ..Default::default()
             },

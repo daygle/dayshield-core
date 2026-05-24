@@ -7,7 +7,7 @@ use axum::{
     Json,
 };
 
-use crate::ai_policy::models::{
+use crate::ai_firewall::models::{
     ApplySuggestionRequest, AutomationSettings, ModeRequest, SetIntentsRequest,
     ZeroTrustBootstrapRequest,
 };
@@ -176,7 +176,7 @@ pub async fn get_suggestions(
     Query(query): Query<InterfaceQuery>,
 ) -> Result<impl IntoResponse, AiApiError> {
     let suggestions = state
-        .ai_policy_engine
+        .ai_firewall_engine
         .list_suggestions(&state, selected_iface(query.iface, &headers))
         .await?;
     Ok(Json(suggestions))
@@ -190,7 +190,7 @@ pub async fn get_traffic_candidates(
 ) -> Result<impl IntoResponse, AiApiError> {
     Ok(Json(
         state
-            .ai_policy_engine
+            .ai_firewall_engine
             .list_traffic_candidates(selected_iface(query.iface, &headers))
             .await,
     ))
@@ -202,7 +202,7 @@ pub async fn apply_suggestion(
     Json(req): Json<ApplySuggestionRequest>,
 ) -> Result<impl IntoResponse, AiApiError> {
     let response = state
-        .ai_policy_engine
+        .ai_firewall_engine
         .apply_suggestion(&state, req, false)
         .await?;
     Ok(Json(response))
@@ -216,7 +216,7 @@ pub async fn get_intents(
 ) -> Result<impl IntoResponse, AiApiError> {
     Ok(Json(
         state
-            .ai_policy_engine
+            .ai_firewall_engine
             .get_intents(selected_iface(query.iface, &headers))
             .await,
     ))
@@ -230,7 +230,7 @@ pub async fn set_intents(
     Json(req): Json<SetIntentsRequest>,
 ) -> Result<impl IntoResponse, AiApiError> {
     let intents = state
-        .ai_policy_engine
+        .ai_firewall_engine
         .set_intents(req, selected_iface(query.iface, &headers))
         .await?;
     Ok(Json(intents))
@@ -244,7 +244,7 @@ pub async fn get_automation_settings(
 ) -> Result<impl IntoResponse, AiApiError> {
     Ok(Json(
         state
-            .ai_policy_engine
+            .ai_firewall_engine
             .get_automation_settings(selected_iface(query.iface, &headers))
             .await,
     ))
@@ -258,7 +258,7 @@ pub async fn set_automation_settings(
     Json(settings): Json<AutomationSettings>,
 ) -> Result<impl IntoResponse, AiApiError> {
     let settings = state
-        .ai_policy_engine
+        .ai_firewall_engine
         .set_automation_settings(settings, selected_iface(query.iface, &headers))
         .await?;
     Ok(Json(settings))
@@ -272,7 +272,7 @@ pub async fn get_mode(
 ) -> Result<impl IntoResponse, AiApiError> {
     Ok(Json(
         state
-            .ai_policy_engine
+            .ai_firewall_engine
             .get_mode(selected_iface(query.iface, &headers))
             .await,
     ))
@@ -286,7 +286,7 @@ pub async fn set_mode(
     Json(req): Json<ModeRequest>,
 ) -> Result<impl IntoResponse, AiApiError> {
     let mode = state
-        .ai_policy_engine
+        .ai_firewall_engine
         .set_mode(req, selected_iface(query.iface, &headers))
         .await?;
     Ok(Json(mode))
@@ -299,7 +299,7 @@ pub async fn bootstrap_zero_trust(
     Query(query): Query<InterfaceQuery>,
 ) -> Result<impl IntoResponse, AiApiError> {
     let response = state
-        .ai_policy_engine
+        .ai_firewall_engine
         .bootstrap_zero_trust(
             &state,
             ZeroTrustBootstrapRequest::default(),
@@ -316,7 +316,7 @@ pub async fn undo_last_action(
     Query(query): Query<InterfaceQuery>,
 ) -> Result<impl IntoResponse, AiApiError> {
     let response = state
-        .ai_policy_engine
+        .ai_firewall_engine
         .undo_last_action(&state, selected_iface(query.iface, &headers))
         .await?;
     Ok(Json(response))
@@ -330,7 +330,7 @@ pub async fn get_action_history(
 ) -> Result<impl IntoResponse, AiApiError> {
     Ok(Json(
         state
-            .ai_policy_engine
+            .ai_firewall_engine
             .list_action_history(selected_iface(query.iface, &headers))
             .await,
     ))

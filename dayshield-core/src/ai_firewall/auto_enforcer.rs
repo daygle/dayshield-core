@@ -2,7 +2,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    ai_policy::models::{DecisionAction, Suggestion},
+    ai_firewall::models::{DecisionAction, Suggestion},
     config::models::{
         Action, FirewallAddressFamily, FirewallDirection, FirewallRule, FirewallStateLimits,
         Protocol,

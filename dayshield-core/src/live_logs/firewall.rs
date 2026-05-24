@@ -20,17 +20,23 @@
 //! message before the `IN=` field.  This module extracts the prefix and
 //! normalises it to the `action` field.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use chrono::{DateTime, TimeZone, Utc};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
     sync::mpsc::Sender,
+    time::{Duration, Instant},
 };
 use tracing::{info, warn};
 
 use crate::live_logs::{journald_field_text, LogEvent};
+
+static FIREWALL_JOURNAL_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // Public streaming function
@@ -43,7 +49,9 @@ use crate::live_logs::{journald_field_text, LogEvent};
 /// process exits unexpectedly.
 pub async fn stream_firewall(tx: Sender<LogEvent>) {
     if !journal_has_firewall_entries().await {
-        warn!("firewall: journald has no nftables/kernel entries; using dmesg fallback");
+        if !FIREWALL_JOURNAL_FALLBACK_WARNED.swap(true, Ordering::Relaxed) {
+            warn!("firewall: journald has no nftables/kernel entries; using dmesg fallback");
+        }
         stream_dmesg_firewall(tx).await;
         return;
     }
@@ -125,8 +133,13 @@ async fn stream_journal_firewall(tx: Sender<LogEvent>) {
 }
 
 async fn stream_dmesg_firewall(tx: Sender<LogEvent>) {
+    let mut immediate_exit_count: u32 = 0;
+
     loop {
         info!("firewall: starting dmesg fallback stream");
+
+        let started_at = Instant::now();
+        let mut saw_any_line = false;
 
         let mut child = match Command::new("dmesg")
             .args(["--follow", "--time-format=iso"])
@@ -137,7 +150,7 @@ async fn stream_dmesg_firewall(tx: Sender<LogEvent>) {
             Ok(c) => c,
             Err(e) => {
                 warn!(error = %e, "firewall: failed to spawn dmesg, retrying in 5s");
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             }
         };
@@ -148,6 +161,7 @@ async fn stream_dmesg_firewall(tx: Sender<LogEvent>) {
         loop {
             match reader.next_line().await {
                 Ok(Some(line)) => {
+                    saw_any_line = true;
                     if let Some(event) = parse_dmesg_firewall_line(&line) {
                         if tx.send(event).await.is_err() {
                             let _ = child.kill().await;
@@ -156,7 +170,23 @@ async fn stream_dmesg_firewall(tx: Sender<LogEvent>) {
                     }
                 }
                 Ok(None) => {
-                    info!("firewall: dmesg exited, restarting");
+                    let immediate_exit = !saw_any_line && started_at.elapsed() < Duration::from_secs(2);
+                    if immediate_exit {
+                        immediate_exit_count = immediate_exit_count.saturating_add(1);
+                        let delay_secs = 2_u64.pow(immediate_exit_count.min(8));
+                        warn!(
+                            attempt = immediate_exit_count,
+                            delay_secs,
+                            "firewall: dmesg exited immediately; likely unavailable (permissions/kernel access), backing off"
+                        );
+                        let _ = child.kill().await;
+                        tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+                    } else {
+                        immediate_exit_count = 0;
+                        info!("firewall: dmesg exited, restarting");
+                        let _ = child.kill().await;
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
                     break;
                 }
                 Err(e) => {
@@ -167,7 +197,6 @@ async fn stream_dmesg_firewall(tx: Sender<LogEvent>) {
         }
 
         let _ = child.kill().await;
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     }
 }
 

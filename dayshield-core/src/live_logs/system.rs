@@ -10,6 +10,8 @@
 //! Each JSON line is parsed to extract the unit name and log message and is
 //! forwarded as a [`LogEvent::SystemEvent`].
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use chrono::{DateTime, TimeZone, Utc};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
@@ -22,6 +24,7 @@ use crate::live_logs::firewall::parse_nftables_message;
 use crate::live_logs::{journald_field_text, tail::FileTailer, LogEvent};
 
 const DAYSHIELD_CORE_LOG_PATH: &str = "/var/log/dayshield/core.log";
+static SYSTEM_JOURNAL_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // Public streaming function
@@ -33,10 +36,12 @@ const DAYSHIELD_CORE_LOG_PATH: &str = "/var/log/dayshield/core.log";
 /// processes its output line by line.  Restarts automatically on exit.
 pub async fn stream_system(tx: Sender<LogEvent>) {
     if !journal_has_system_entries().await {
-        warn!(
-            path = DAYSHIELD_CORE_LOG_PATH,
-            "system: journald has no readable entries; tailing DayShield log file"
-        );
+        if !SYSTEM_JOURNAL_FALLBACK_WARNED.swap(true, Ordering::Relaxed) {
+            warn!(
+                path = DAYSHIELD_CORE_LOG_PATH,
+                "system: journald has no readable entries; tailing DayShield log file"
+            );
+        }
         stream_core_log_file(tx).await;
         return;
     }

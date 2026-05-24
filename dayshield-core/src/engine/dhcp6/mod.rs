@@ -39,6 +39,20 @@ pub fn generate_config(config: &Dhcp6Config) -> String {
             .reservations
             .iter()
             .map(|r| {
+                let mut reservation_option_data = Vec::new();
+                if !r.dns_servers.is_empty() {
+                    reservation_option_data.push(json!({
+                        "name": "dns-servers",
+                        "data": r.dns_servers.join(", ")
+                    }));
+                }
+                if !r.ntp_servers.is_empty() {
+                    reservation_option_data.push(json!({
+                        "name": "sntp-servers",
+                        "data": r.ntp_servers.join(", ")
+                    }));
+                }
+
                 let mut entry = json!({
                     "duid": r.duid,
                     "ip-addresses": [r.ip_address],
@@ -47,6 +61,9 @@ pub fn generate_config(config: &Dhcp6Config) -> String {
                     if !hn.is_empty() {
                         entry["hostname"] = json!(hn);
                     }
+                }
+                if !reservation_option_data.is_empty() {
+                    entry["option-data"] = json!(reservation_option_data);
                 }
                 entry
             })
@@ -171,5 +188,23 @@ mod tests {
         assert!(out.contains("/var/lib/kea/kea-leases6.csv"));
         assert!(out.contains("\"output\": \"stdout\""));
         assert!(!out.contains("/var/log/kea"));
+    }
+
+    #[test]
+    fn generate_config_static_reservation_with_dns_and_ntp_overrides() {
+        let mut cfg = base_config();
+        cfg.scopes[0].reservations.push(crate::config::models::Dhcp6Reservation {
+            id: Uuid::new_v4(),
+            duid: "00:03:00:01:aa:bb:cc:dd:ee:ff".into(),
+            ip_address: "fd00:1::50".into(),
+            hostname: Some("sensor".into()),
+            dns_servers: vec!["fd00:1::1".into()],
+            ntp_servers: vec!["fd00:1::2".into()],
+            description: String::new(),
+        });
+        let out = generate_config(&cfg);
+        assert!(out.contains("dns-servers"));
+        assert!(out.contains("sntp-servers"));
+        assert!(out.contains("fd00:1::50"));
     }
 }

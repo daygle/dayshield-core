@@ -4,7 +4,11 @@
 //! runtime chores: preparing Kea directories, validating generated config,
 //! mirroring it to the distro path, and controlling the systemd unit.
 
-use std::{io::ErrorKind, path::Path};
+use std::{
+    io::ErrorKind,
+    path::Path,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -24,6 +28,8 @@ pub const DHCP4_LEASES_PATH: &str = "/var/lib/kea/kea-leases4.csv";
 pub const DHCP6_DAYSHIELD_CONF_PATH: &str = "/etc/dayshield/kea-dhcp6.conf";
 pub const DHCP6_SYSTEM_CONF_PATH: &str = "/etc/kea/kea-dhcp6.conf";
 pub const DHCP6_LEASES_PATH: &str = "/var/lib/kea/kea-leases6.csv";
+
+static KEA_DIR_CHMOD_WARNED: AtomicBool = AtomicBool::new(false);
 
 const DHCP4_SERVICE_CANDIDATES: &[&str] = &[
     "isc-kea-dhcp4-server.service",
@@ -317,7 +323,9 @@ fn remove_config_if_exists(path: &str) -> Result<()> {
 #[cfg(unix)]
 fn set_directory_permissions_best_effort(path: &str) {
     if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)) {
-        warn!(path, error = %error, "kea: continuing after directory chmod failed");
+        if !KEA_DIR_CHMOD_WARNED.swap(true, Ordering::Relaxed) {
+            warn!(path, error = %error, "kea: continuing after directory chmod failed");
+        }
     }
 }
 

@@ -18,7 +18,10 @@
 use std::{
     collections::HashMap,
     net::{Ipv4Addr, Ipv6Addr},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use axum::{
@@ -42,6 +45,8 @@ use crate::{
     engine::{dhcp::apply_config as apply_dhcp4_config, dhcp6::apply_config as apply_dhcp6_config},
     state::AppState,
 };
+
+static DHCP_NEIGHBOR_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -125,6 +130,8 @@ pub struct DhcpStaticLeaseResponse {
     pub mac: String,
     pub ip_address: String,
     pub hostname: String,
+    pub dns_servers: Vec<String>,
+    pub ntp_servers: Vec<String>,
     pub description: String,
 }
 
@@ -135,6 +142,8 @@ pub struct CreateStaticLeaseRequest {
     pub mac: String,
     pub ip_address: String,
     pub hostname: Option<String>,
+    pub dns_servers: Option<Vec<String>>,
+    pub ntp_servers: Option<Vec<String>>,
     pub description: Option<String>,
 }
 
@@ -236,6 +245,26 @@ fn normalize_requested_subnet(subnet: Option<&str>) -> Result<Option<String>, Dh
     normalize_ipv4_cidr(subnet)
         .map(Some)
         .ok_or_else(|| DhcpError::ValidationFailed(format!("invalid subnet: {subnet}")))
+}
+
+fn normalize_and_validate_ipv4_overrides(
+    values: Option<Vec<String>>,
+    field_name: &str,
+) -> Result<Vec<String>, DhcpError> {
+    let mut normalized = Vec::new();
+    for raw in values.unwrap_or_default() {
+        let value = raw.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if !is_valid_ipv4_addr(value) {
+            return Err(DhcpError::ValidationFailed(format!(
+                "invalid {field_name} address: {value}"
+            )));
+        }
+        normalized.push(value.to_string());
+    }
+    Ok(normalized)
 }
 
 /// Derive a /24 subnet mask from a CIDR prefix, e.g. `192.168.1.0/24` → `255.255.255.0`.
@@ -576,6 +605,8 @@ pub async fn list_static_leases(
             mac: r.mac_address.clone(),
             ip_address: r.ip_address.clone(),
             hostname: r.hostname.clone().unwrap_or_default(),
+            dns_servers: r.dns_servers.clone(),
+            ntp_servers: r.ntp_servers.clone(),
             description: r.description.clone(),
         })
         .collect();
@@ -612,6 +643,10 @@ pub async fn create_static_lease(
             req.ip_address
         )));
     }
+    let dns_servers =
+        normalize_and_validate_ipv4_overrides(req.dns_servers.clone(), "DNS override server")?;
+    let ntp_servers =
+        normalize_and_validate_ipv4_overrides(req.ntp_servers.clone(), "NTP override server")?;
 
     let mut cfg = state
         .config_store
@@ -640,6 +675,8 @@ pub async fn create_static_lease(
         hostname: req.hostname.filter(|h| !h.is_empty()),
         mac_address: req.mac.clone(),
         ip_address: req.ip_address.clone(),
+        dns_servers,
+        ntp_servers,
         description: req.description.unwrap_or_default(),
     };
 
@@ -648,6 +685,8 @@ pub async fn create_static_lease(
         mac: reservation.mac_address.clone(),
         ip_address: reservation.ip_address.clone(),
         hostname: reservation.hostname.clone().unwrap_or_default(),
+        dns_servers: reservation.dns_servers.clone(),
+        ntp_servers: reservation.ntp_servers.clone(),
         description: reservation.description.clone(),
     };
 
@@ -1149,6 +1188,8 @@ mod kea4_lease_parser_tests {
                     mac_address: "aa:bb:cc:dd:ee:ff".to_string(),
                     ip_address: "192.168.20.50".to_string(),
                     hostname: Some("printer".to_string()),
+                    dns_servers: vec![],
+                    ntp_servers: vec![],
                     description: String::new(),
                 }],
             }],
@@ -1188,10 +1229,12 @@ pub async fn list_active_leases(
         )
         .await;
         if !fallback.is_empty() {
-            warn!(
-                leases = fallback.len(),
-                "dhcp: Kea lease files contained no active rows; using neighbor-table fallback"
-            );
+            if !DHCP_NEIGHBOR_FALLBACK_WARNED.swap(true, Ordering::Relaxed) {
+                warn!(
+                    leases = fallback.len(),
+                    "dhcp: Kea lease files contained no active rows; using neighbor-table fallback"
+                );
+            }
             leases = fallback;
             lease_source = "neighbor";
         }
@@ -1481,6 +1524,8 @@ pub async fn list_interface_static_leases(
                 mac: r.mac_address.clone(),
                 ip_address: r.ip_address.clone(),
                 hostname: r.hostname.clone().unwrap_or_default(),
+                dns_servers: r.dns_servers.clone(),
+                ntp_servers: r.ntp_servers.clone(),
                 description: r.description.clone(),
             })
             .collect()
@@ -1522,6 +1567,10 @@ pub async fn create_interface_static_lease(
             req.ip_address
         )));
     }
+    let dns_servers =
+        normalize_and_validate_ipv4_overrides(req.dns_servers.clone(), "DNS override server")?;
+    let ntp_servers =
+        normalize_and_validate_ipv4_overrides(req.ntp_servers.clone(), "NTP override server")?;
 
     let mut cfg = state
         .config_store
@@ -1562,6 +1611,8 @@ pub async fn create_interface_static_lease(
         hostname: req.hostname.filter(|h| !h.is_empty()),
         mac_address: req.mac.clone(),
         ip_address: req.ip_address.clone(),
+        dns_servers,
+        ntp_servers,
         description: req.description.unwrap_or_default(),
     };
 
@@ -1570,6 +1621,8 @@ pub async fn create_interface_static_lease(
         mac: reservation.mac_address.clone(),
         ip_address: reservation.ip_address.clone(),
         hostname: reservation.hostname.clone().unwrap_or_default(),
+        dns_servers: reservation.dns_servers.clone(),
+        ntp_servers: reservation.ntp_servers.clone(),
         description: reservation.description.clone(),
     };
 
@@ -1664,6 +1717,8 @@ pub struct Dhcp6StaticLeaseResponse {
     pub duid: String,
     pub ip_address: String,
     pub hostname: String,
+    pub dns_servers: Vec<String>,
+    pub ntp_servers: Vec<String>,
     pub description: String,
 }
 
@@ -1678,6 +1733,8 @@ pub struct CreateDhcp6StaticLeaseRequest {
     pub mac: Option<String>,
     pub ip_address: String,
     pub hostname: Option<String>,
+    pub dns_servers: Option<Vec<String>>,
+    pub ntp_servers: Option<Vec<String>>,
     pub description: Option<String>,
 }
 
@@ -1768,6 +1825,26 @@ fn normalize_requested_subnet_v6(subnet: Option<&str>) -> Result<Option<String>,
     normalize_ipv6_cidr(subnet)
         .map(Some)
         .ok_or_else(|| DhcpError::ValidationFailed(format!("invalid subnet: {subnet}")))
+}
+
+fn normalize_and_validate_ipv6_overrides(
+    values: Option<Vec<String>>,
+    field_name: &str,
+) -> Result<Vec<String>, DhcpError> {
+    let mut normalized = Vec::new();
+    for raw in values.unwrap_or_default() {
+        let value = raw.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if !is_valid_ipv6_addr(value) {
+            return Err(DhcpError::ValidationFailed(format!(
+                "invalid {field_name} address: {value}"
+            )));
+        }
+        normalized.push(value.to_string());
+    }
+    Ok(normalized)
 }
 
 fn normalize_dhcp6_config_subnets(cfg: &mut Dhcp6Config) {
@@ -1867,6 +1944,22 @@ fn validate_dhcp6_scope(scope: &Dhcp6Scope) -> Result<(), DhcpError> {
                 "reservation IPv6 address {} is outside subnet {}",
                 reservation.ip_address, scope.subnet
             )));
+        }
+        for dns in &reservation.dns_servers {
+            if !is_valid_ipv6_addr(dns) {
+                return Err(DhcpError::ValidationFailed(format!(
+                    "invalid DNS override server in reservation {}: {}",
+                    reservation.id, dns
+                )));
+            }
+        }
+        for ntp in &reservation.ntp_servers {
+            if !is_valid_ipv6_addr(ntp) {
+                return Err(DhcpError::ValidationFailed(format!(
+                    "invalid NTP override server in reservation {}: {}",
+                    reservation.id, ntp
+                )));
+            }
         }
     }
     Ok(())
@@ -1984,6 +2077,8 @@ fn dhcp6_static_response(reservation: &Dhcp6Reservation) -> Dhcp6StaticLeaseResp
         duid: reservation.duid.clone(),
         ip_address: reservation.ip_address.clone(),
         hostname: reservation.hostname.clone().unwrap_or_default(),
+        dns_servers: reservation.dns_servers.clone(),
+        ntp_servers: reservation.ntp_servers.clone(),
         description: reservation.description.clone(),
     }
 }
@@ -2034,6 +2129,10 @@ fn add_dhcp6_reservation(
 
     let duid = normalize_dhcp6_reservation_duid(&req)?;
     let ip_address = req.ip_address.trim().to_string();
+    let dns_servers =
+        normalize_and_validate_ipv6_overrides(req.dns_servers.clone(), "DNS override server")?;
+    let ntp_servers =
+        normalize_and_validate_ipv6_overrides(req.ntp_servers.clone(), "NTP override server")?;
 
     if !is_valid_ipv6_addr(&ip_address) {
         return Err(DhcpError::ValidationFailed(format!(
@@ -2088,6 +2187,8 @@ fn add_dhcp6_reservation(
             .hostname
             .map(|h| h.trim().to_string())
             .filter(|h| !h.is_empty()),
+        dns_servers,
+        ntp_servers,
         description: req.description.unwrap_or_default().trim().to_string(),
     };
 
@@ -2239,13 +2340,7 @@ pub async fn list_dhcp6_static_leases(
         .scopes
         .iter()
         .flat_map(|s| s.reservations.iter())
-        .map(|r| Dhcp6StaticLeaseResponse {
-            id: r.id.to_string(),
-            duid: r.duid.clone(),
-            ip_address: r.ip_address.clone(),
-            hostname: r.hostname.clone().unwrap_or_default(),
-            description: r.description.clone(),
-        })
+        .map(dhcp6_static_response)
         .collect();
 
     Ok(Json(serde_json::json!({ "success": true, "data": leases })))

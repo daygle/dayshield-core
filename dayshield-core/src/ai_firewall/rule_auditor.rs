@@ -1,7 +1,7 @@
 use std::net::Ipv4Addr;
 
 use crate::{
-    ai_policy::models::{Intent, RuleAudit},
+    ai_firewall::models::{Intent, RuleAudit},
     config::models::{Action, FirewallAddressFamily, FirewallRule, Protocol},
 };
 

@@ -1,4 +1,4 @@
-use crate::ai_policy::{
+use crate::ai_firewall::{
     event_classifier::is_private_ipv4,
     models::{DecisionAction, Event, Intent},
 };

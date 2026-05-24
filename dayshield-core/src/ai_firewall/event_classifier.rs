@@ -1,6 +1,6 @@
 use std::net::Ipv4Addr;
 
-use crate::ai_policy::models::Event;
+use crate::ai_firewall::models::Event;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventClass {

@@ -1720,6 +1720,12 @@ pub struct DhcpReservation {
     pub hostname: Option<String>,
     pub mac_address: String,
     pub ip_address: String,
+    /// Optional per-client DNS servers override.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dns_servers: Vec<String>,
+    /// Optional per-client NTP servers override.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ntp_servers: Vec<String>,
     /// Optional human-readable label for this reservation.
     #[serde(default)]
     pub description: String,
@@ -1770,6 +1776,12 @@ pub struct Dhcp6Reservation {
     /// Optional hostname hint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
+    /// Optional per-client DNS servers override.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dns_servers: Vec<String>,
+    /// Optional per-client NTP servers override.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ntp_servers: Vec<String>,
     /// Human-readable note.
     #[serde(default)]
     pub description: String,

@@ -1682,10 +1682,18 @@ async fn query_registry(registry_url: &str) -> Result<RegistryManifest> {
         match query_github_repo_manifest(&github_api_url, &client).await {
             Ok(manifest) => return Ok(manifest),
             Err(err) => {
-                warn!(
-                    error = %err,
-                    "updates: failed to fetch GitHub manifest.json; falling back to releases/latest"
-                );
+                let err_text = err.to_string();
+                if err_text.contains("HTTP 404") {
+                    info!(
+                        error = %err,
+                        "updates: GitHub manifest.json not found; falling back to releases/latest"
+                    );
+                } else {
+                    warn!(
+                        error = %err,
+                        "updates: failed to fetch GitHub manifest.json; falling back to releases/latest"
+                    );
+                }
                 return query_github_releases(&github_api_url, &client).await;
             }
         }

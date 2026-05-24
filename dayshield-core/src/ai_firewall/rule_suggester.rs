@@ -1,6 +1,6 @@
 use sha2::{Digest, Sha256};
 
-use crate::ai_policy::{
+use crate::ai_firewall::{
     event_classifier::{is_block_action, is_scoped_allow_event, EventClass},
     models::{Decision, DecisionAction, Event, Suggestion},
 };

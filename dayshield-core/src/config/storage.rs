@@ -757,6 +757,24 @@ impl ConfigStore {
                             scope.subnet
                         );
                     }
+                    for dns in &res.dns_servers {
+                        if !is_valid_ipv4_addr(dns) {
+                            anyhow::bail!(
+                                "DHCP reservation {} has invalid DNS override {:?}",
+                                res.id,
+                                dns
+                            );
+                        }
+                    }
+                    for ntp in &res.ntp_servers {
+                        if !is_valid_ipv4_addr(ntp) {
+                            anyhow::bail!(
+                                "DHCP reservation {} has invalid NTP override {:?}",
+                                res.id,
+                                ntp
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -865,6 +883,26 @@ impl ConfigStore {
                             reservation.ip_address,
                             scope.subnet
                         );
+                    }
+                    for dns in &reservation.dns_servers {
+                        if !crate::config::models::is_valid_ipv6_addr(dns) {
+                            anyhow::bail!(
+                                "DHCPv6 scope {} reservation {} has invalid DNS override {:?}",
+                                scope.id,
+                                reservation.id,
+                                dns
+                            );
+                        }
+                    }
+                    for ntp in &reservation.ntp_servers {
+                        if !crate::config::models::is_valid_ipv6_addr(ntp) {
+                            anyhow::bail!(
+                                "DHCPv6 scope {} reservation {} has invalid NTP override {:?}",
+                                scope.id,
+                                reservation.id,
+                                ntp
+                            );
+                        }
                     }
                 }
             }
@@ -2804,6 +2842,8 @@ mod tests {
                     hostname: None,
                     mac_address: "not-a-mac".into(),
                     ip_address: "192.168.1.50".into(),
+                    dns_servers: vec![],
+                    ntp_servers: vec![],
                     description: String::new(),
                 }],
             }],

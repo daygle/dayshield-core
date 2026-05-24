@@ -11,6 +11,7 @@ use axum::{
 };
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::process::Command;
 use tracing::warn;
 
@@ -23,6 +24,7 @@ use crate::live_logs::{
 };
 
 const DAYSHIELD_CORE_LOG_PATH: &str = "/var/log/dayshield/core.log";
+static LOGS_DMESG_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Deserialize)]
 pub struct SearchLogsQuery {
@@ -261,10 +263,12 @@ async fn query_dmesg_firewall_range(
     };
 
     if !out.status.success() {
-        warn!(
-            stderr = %String::from_utf8_lossy(&out.stderr),
-            "logs/search: dmesg fallback returned non-zero status"
-        );
+        if !LOGS_DMESG_FALLBACK_WARNED.swap(true, Ordering::Relaxed) {
+            warn!(
+                stderr = %String::from_utf8_lossy(&out.stderr),
+                "logs/search: dmesg fallback returned non-zero status"
+            );
+        }
         return Ok(vec![]);
     }
 

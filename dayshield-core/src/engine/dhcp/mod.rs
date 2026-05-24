@@ -60,12 +60,29 @@ pub fn generate_config(config: &DhcpConfig) -> String {
             .reservations
             .iter()
             .map(|r| {
+                let mut reservation_option_data = Vec::new();
+                if !r.dns_servers.is_empty() {
+                    reservation_option_data.push(json!({
+                        "name": "domain-name-servers",
+                        "data": r.dns_servers.join(", ")
+                    }));
+                }
+                if !r.ntp_servers.is_empty() {
+                    reservation_option_data.push(json!({
+                        "name": "ntp-servers",
+                        "data": r.ntp_servers.join(", ")
+                    }));
+                }
+
                 let mut entry = json!({
                     "hw-address": r.mac_address,
                     "ip-address": r.ip_address,
                 });
                 if let Some(h) = &r.hostname {
                     entry["hostname"] = json!(h);
+                }
+                if !reservation_option_data.is_empty() {
+                    entry["option-data"] = json!(reservation_option_data);
                 }
                 entry
             })
@@ -226,6 +243,8 @@ mod tests {
             hostname: Some("myhost".into()),
             mac_address: "aa:bb:cc:dd:ee:ff".into(),
             ip_address: "192.168.1.50".into(),
+            dns_servers: vec![],
+            ntp_servers: vec![],
             description: String::new(),
         });
         let out = generate_config(&cfg);
@@ -242,11 +261,31 @@ mod tests {
             hostname: None,
             mac_address: "11:22:33:44:55:66".into(),
             ip_address: "192.168.1.51".into(),
+            dns_servers: vec![],
+            ntp_servers: vec![],
             description: String::new(),
         });
         let out = generate_config(&cfg);
         assert!(out.contains("11:22:33:44:55:66"));
         assert!(out.contains("192.168.1.51"));
+    }
+
+    #[test]
+    fn generate_config_static_reservation_with_dns_and_ntp_overrides() {
+        let mut cfg = base_config();
+        cfg.scopes[0].reservations.push(DhcpReservation {
+            id: Uuid::new_v4(),
+            hostname: Some("camera".into()),
+            mac_address: "22:33:44:55:66:77".into(),
+            ip_address: "192.168.1.52".into(),
+            dns_servers: vec!["192.168.1.1".into(), "1.1.1.1".into()],
+            ntp_servers: vec!["192.168.1.1".into()],
+            description: String::new(),
+        });
+        let out = generate_config(&cfg);
+        assert!(out.contains("domain-name-servers"));
+        assert!(out.contains("ntp-servers"));
+        assert!(out.contains("192.168.1.52"));
     }
 
     #[test]

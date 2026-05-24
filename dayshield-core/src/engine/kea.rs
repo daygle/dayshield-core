@@ -167,9 +167,7 @@ async fn disable_server(server: KeaServer) -> Result<()> {
     Ok(())
 }
 
-async fn prepare_runtime(server: KeaServer) -> Result<()> {
-    #[cfg(not(unix))]
-    let _ = server;
+async fn prepare_runtime(_server: KeaServer) -> Result<()> {
 
     std::fs::create_dir_all(CONFIG_DIR).context("failed to create /etc/kea")?;
     std::fs::create_dir_all(DAYSHIELD_CONFIG_DIR).context("failed to create /etc/dayshield")?;

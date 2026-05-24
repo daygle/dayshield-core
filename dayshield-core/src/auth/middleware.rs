@@ -124,12 +124,18 @@ fn token_from_query(req: &Request) -> Option<String> {
     None
 }
 
-/// Extract a token from the request, preferring the `Authorization` header
-/// over the `session` cookie, and then URL query parameter.
+/// Extract a token from the request.
+///
+/// Priority order:
+/// 1. `Authorization` header
+/// 2. URL query parameter on explicitly allowed WebSocket-style routes
+/// 3. `session` cookie
+///
+/// Query-string tokens are intentionally checked before cookies on allowed
+/// routes so a stale browser cookie cannot override a freshly supplied token.
 fn extract_token(req: &Request) -> Option<String> {
     let path = req.uri().path();
     token_from_header(req)
-        .or_else(|| token_from_cookie(req))
         .or_else(|| {
             if allows_query_token(path) {
                 token_from_query(req)
@@ -137,6 +143,7 @@ fn extract_token(req: &Request) -> Option<String> {
                 None
             }
         })
+        .or_else(|| token_from_cookie(req))
 }
 
 // ---------------------------------------------------------------------------

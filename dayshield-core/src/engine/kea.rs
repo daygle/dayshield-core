@@ -15,15 +15,15 @@ use tracing::{info, warn};
 
 pub const CONFIG_DIR: &str = "/etc/kea";
 pub const DAYSHIELD_CONFIG_DIR: &str = "/etc/dayshield";
-pub const DATA_DIR: &str = "/run/dayshield/kea";
+pub const DATA_DIR: &str = "/var/lib/kea";
 
 pub const DHCP4_DAYSHIELD_CONF_PATH: &str = "/etc/dayshield/kea-dhcp4.conf";
 pub const DHCP4_SYSTEM_CONF_PATH: &str = "/etc/kea/kea-dhcp4.conf";
-pub const DHCP4_LEASES_PATH: &str = "/run/dayshield/kea/kea-leases4.csv";
+pub const DHCP4_LEASES_PATH: &str = "/var/lib/kea/kea-leases4.csv";
 
 pub const DHCP6_DAYSHIELD_CONF_PATH: &str = "/etc/dayshield/kea-dhcp6.conf";
 pub const DHCP6_SYSTEM_CONF_PATH: &str = "/etc/kea/kea-dhcp6.conf";
-pub const DHCP6_LEASES_PATH: &str = "/run/dayshield/kea/kea-leases6.csv";
+pub const DHCP6_LEASES_PATH: &str = "/var/lib/kea/kea-leases6.csv";
 
 const DHCP4_SERVICE_CANDIDATES: &[&str] = &[
     "isc-kea-dhcp4-server.service",
@@ -173,107 +173,13 @@ async fn prepare_runtime(server: KeaServer) -> Result<()> {
 
     std::fs::create_dir_all(CONFIG_DIR).context("failed to create /etc/kea")?;
     std::fs::create_dir_all(DAYSHIELD_CONFIG_DIR).context("failed to create /etc/dayshield")?;
-    std::fs::create_dir_all(DATA_DIR).context("failed to create /run/dayshield/kea")?;
+    std::fs::create_dir_all(DATA_DIR).context("failed to create /var/lib/kea")?;
 
     set_directory_permissions_best_effort(CONFIG_DIR);
     set_directory_permissions_best_effort(DAYSHIELD_CONFIG_DIR);
     set_directory_permissions_best_effort(DATA_DIR);
-    // Some deployments run without CAP_CHOWN in the DayShield service sandbox.
-    // Keep the runtime dir lease-writable even when ownership cannot be changed.
-    #[cfg(unix)]
-    set_directory_mode_best_effort(DATA_DIR, 0o777);
-
-    #[cfg(unix)]
-    {
-        sync_runtime_owner(server).await;
-        ensure_runtime_paths_writable(server);
-    }
 
     Ok(())
-}
-
-#[cfg(unix)]
-fn ensure_runtime_paths_writable(server: KeaServer) {
-    set_directory_mode_best_effort(DATA_DIR, 0o777);
-
-    let lease_path = server.lease_path();
-    if !Path::new(lease_path).exists() {
-        if let Err(error) = std::fs::File::create(lease_path) {
-            warn!(
-                service = server.label(),
-                path = lease_path,
-                error = %error,
-                "kea: continuing after lease file pre-create failed"
-            );
-            return;
-        }
-    }
-
-    set_file_mode_best_effort(lease_path, 0o666);
-}
-
-#[cfg(unix)]
-async fn sync_runtime_owner(server: KeaServer) {
-    let Some(unit) = resolve_service_unit(server).await.ok() else {
-        warn!(
-            service = server.label(),
-            tried = ?server.service_candidates(),
-            "kea: could not resolve service unit before ownership sync"
-        );
-        return;
-    };
-    let Some(user) = service_user(unit).await else {
-        return;
-    };
-
-    for path in [DATA_DIR, server.lease_path()] {
-        if Path::new(path).exists() {
-            if let Err(error) = chown_path(&user, path).await {
-                warn!(
-                    service = server.label(),
-                    path,
-                    user,
-                    error = %error,
-                    "kea: continuing after ownership repair failed"
-                );
-            }
-        }
-    }
-}
-
-#[cfg(unix)]
-async fn service_user(unit: &str) -> Option<String> {
-    let output = Command::new("systemctl")
-        .args(["show", unit, "--property=User", "--value", "--no-pager"])
-        .output()
-        .await
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let user = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if user.is_empty() {
-        None
-    } else {
-        Some(user)
-    }
-}
-
-#[cfg(unix)]
-async fn chown_path(user: &str, path: &str) -> Result<()> {
-    let output = Command::new("chown")
-        .args([user, path])
-        .output()
-        .await
-        .context("failed to spawn chown")?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    anyhow::bail!("chown {user} {path} failed: {stderr}");
 }
 
 async fn test_config(server: KeaServer, path: &str) -> Result<()> {
@@ -417,18 +323,6 @@ fn set_directory_permissions_best_effort(path: &str) {
     }
 }
 
-#[cfg(unix)]
-fn set_directory_mode_best_effort(path: &str, mode: u32) {
-    if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) {
-        warn!(
-            path,
-            mode,
-            error = %error,
-            "kea: continuing after directory mode update failed"
-        );
-    }
-}
-
 #[cfg(not(unix))]
 fn set_directory_permissions_best_effort(_path: &str) {}
 
@@ -436,18 +330,6 @@ fn set_directory_permissions_best_effort(_path: &str) {}
 fn set_file_permissions_best_effort(path: &str) {
     if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)) {
         warn!(path, error = %error, "kea: continuing after file chmod failed");
-    }
-}
-
-#[cfg(unix)]
-fn set_file_mode_best_effort(path: &str, mode: u32) {
-    if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) {
-        warn!(
-            path,
-            mode,
-            error = %error,
-            "kea: continuing after file mode update failed"
-        );
     }
 }
 
@@ -486,11 +368,11 @@ mod tests {
     fn lease_paths_use_runtime_storage() {
         assert_eq!(
             KeaServer::Dhcp4.lease_path(),
-            "/run/dayshield/kea/kea-leases4.csv"
+            "/var/lib/kea/kea-leases4.csv"
         );
         assert_eq!(
             KeaServer::Dhcp6.lease_path(),
-            "/run/dayshield/kea/kea-leases6.csv"
+            "/var/lib/kea/kea-leases6.csv"
         );
     }
 }

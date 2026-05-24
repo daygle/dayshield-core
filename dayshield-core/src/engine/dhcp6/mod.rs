@@ -168,7 +168,7 @@ mod tests {
     fn generate_config_uses_runtime_leases_and_stdout_logging() {
         let cfg = base_config();
         let out = generate_config(&cfg);
-        assert!(out.contains("/run/dayshield/kea/kea-leases6.csv"));
+        assert!(out.contains("/var/lib/kea/kea-leases6.csv"));
         assert!(out.contains("\"output\": \"stdout\""));
         assert!(!out.contains("/var/log/kea"));
     }

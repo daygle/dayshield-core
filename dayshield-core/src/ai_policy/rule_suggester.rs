@@ -1,14 +1,12 @@
 use sha2::{Digest, Sha256};
 
 use crate::ai_policy::{
-    event_classifier::{is_scoped_allow_event, EventClass},
+    event_classifier::{is_block_action, is_scoped_allow_event, EventClass},
     models::{Decision, DecisionAction, Event, Suggestion},
 };
 
 pub fn build_suggestion(event: Event, classes: &[EventClass]) -> Suggestion {
-    let is_blocked = event.action.eq_ignore_ascii_case("drop")
-        || event.action.eq_ignore_ascii_case("reject")
-        || event.action.eq_ignore_ascii_case("block");
+    let is_blocked = is_block_action(&event.action);
 
     let scoped_allow_candidate = is_scoped_allow_event(&event);
 
@@ -145,7 +143,10 @@ mod tests {
 
         let suggestion = build_suggestion(event, &[]);
 
-        assert!(matches!(suggestion.decision.action, DecisionAction::EditRule));
+        assert!(matches!(
+            suggestion.decision.action,
+            DecisionAction::EditRule
+        ));
     }
 
     #[test]
@@ -165,6 +166,9 @@ mod tests {
 
         let suggestion = build_suggestion(event, &[EventClass::LanDevice]);
 
-        assert!(matches!(suggestion.decision.action, DecisionAction::EditRule));
+        assert!(matches!(
+            suggestion.decision.action,
+            DecisionAction::EditRule
+        ));
     }
 }

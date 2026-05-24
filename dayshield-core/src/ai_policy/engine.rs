@@ -16,15 +16,21 @@ use tracing::warn;
 use crate::{
     ai_policy::{
         auto_enforcer::{apply_suggestion_to_rules, undo_change, AppliedChange},
-        event_classifier::{classify_event, is_scoped_allow_event},
+        event_classifier::{classify_event, is_block_action, is_scoped_allow_event},
         intent_resolver::{resolve_intent, ResolvedIntent},
         models::{
             ApplySuggestionRequest, ApplySuggestionResponse, AutomationMode, AutomationSettings,
             Decision, DecisionAction, Event, Intent, ModeRequest, RuleAudit, SetIntentsRequest,
-            Suggestion, TrafficCandidate, UndoResponse,
+            Suggestion, TrafficCandidate, UndoResponse, ZeroTrustBootstrapRequest,
+            ZeroTrustBootstrapResponse,
         },
         rule_auditor::audit_rules,
         rule_suggester::build_suggestion,
+    },
+    config::models::{
+        effective_management_ports, AcmeChallengeType, Action, FirewallAddressFamily,
+        FirewallChainPolicy, FirewallDirection, FirewallRule, FirewallSettings,
+        FirewallStateLimits, LogPosition, Protocol, SystemConfig,
     },
     state::AppState,
 };
@@ -34,6 +40,9 @@ const DEFAULT_ACTION_LOG_PATH: &str = "/var/log/dayshield/ai_actions.log";
 const DEFAULT_INTENTS_PATH: &str = "/etc/dayshield/intents.json";
 const DEFAULT_MODE_PATH: &str = "/var/lib/dayshield/ai/mode.json";
 const DEFAULT_AUTOMATION_SETTINGS_PATH: &str = "/var/lib/dayshield/ai/automation_settings.json";
+const ZERO_TRUST_BASELINE_PRIORITY: i32 = -125;
+const PRIVATE_IPV4_SOURCES: &[&str] = &["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"];
+const PRIVATE_IPV6_SOURCES: &[&str] = &["fc00::/7", "fe80::/10"];
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct LoggedAction {
@@ -450,6 +459,114 @@ impl AiPolicyEngine {
         Ok(result)
     }
 
+    pub async fn bootstrap_zero_trust(
+        &self,
+        state: &Arc<AppState>,
+        request: ZeroTrustBootstrapRequest,
+        iface: Option<String>,
+    ) -> Result<ZeroTrustBootstrapResponse> {
+        let iface = normalize_iface(iface);
+
+        let mode = if request.set_suggest_mode {
+            self.set_mode(
+                ModeRequest {
+                    mode: AutomationMode::SuggestEdits,
+                },
+                iface.clone(),
+            )
+            .await?
+        } else {
+            self.get_mode(iface.clone()).await
+        };
+
+        let mut automation_settings = self.get_automation_settings(iface.clone()).await;
+        harden_zero_trust_automation_settings(&mut automation_settings);
+        automation_settings = self
+            .set_automation_settings(automation_settings, iface.clone())
+            .await?;
+
+        let mut firewall_settings_hardened = false;
+        let mut baseline_rules_added = 0;
+        let mut baseline_rules_updated = 0;
+        let mut baseline_rule_ids = Vec::new();
+
+        if request.harden_firewall || request.include_legit_services {
+            let old_config = state
+                .config_store
+                .load()
+                .context("failed to load config for zero-trust bootstrap")?;
+            let mut new_config = old_config.clone();
+            let ipv6_enabled = new_config
+                .system_settings
+                .as_ref()
+                .map(|settings| settings.ipv6_enabled)
+                .unwrap_or(false);
+
+            if request.harden_firewall {
+                let mut firewall_settings =
+                    new_config.firewall_settings.clone().unwrap_or_default();
+                harden_zero_trust_firewall_settings(
+                    &mut firewall_settings,
+                    new_config.system_settings.as_ref(),
+                );
+                new_config.firewall_settings = Some(firewall_settings);
+                firewall_settings_hardened = true;
+            }
+
+            if request.include_legit_services {
+                let baseline_rules =
+                    build_zero_trust_baseline_rules(&new_config, iface.as_deref(), ipv6_enabled);
+                for rule in baseline_rules {
+                    baseline_rule_ids.push(rule.id.to_string());
+                    if let Some(existing) = new_config
+                        .firewall_rules
+                        .iter_mut()
+                        .find(|existing| existing.id == rule.id)
+                    {
+                        *existing = rule;
+                        baseline_rules_updated += 1;
+                    } else {
+                        new_config.firewall_rules.push(rule);
+                        baseline_rules_added += 1;
+                    }
+                }
+            }
+
+            state
+                .config_store
+                .save_with_rollback(&new_config)
+                .context("failed to persist zero-trust bootstrap config")?;
+            {
+                let mut cache = state.firewall_rules.write().await;
+                *cache = new_config.firewall_rules.clone();
+            }
+
+            if let Err(apply_err) =
+                crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await
+            {
+                let _ = state.config_store.save_with_rollback(&old_config);
+                {
+                    let mut cache = state.firewall_rules.write().await;
+                    *cache = old_config.firewall_rules;
+                }
+                return Err(anyhow::anyhow!(
+                    "failed to apply nftables after zero-trust bootstrap: {apply_err}"
+                ));
+            }
+        }
+
+        Ok(ZeroTrustBootstrapResponse {
+            applied: true,
+            message: "zero-trust bootstrap enabled: input/forward default-deny with audit logging and scoped service exceptions".to_string(),
+            mode,
+            automation_settings,
+            firewall_settings_hardened,
+            baseline_rules_added,
+            baseline_rules_updated,
+            baseline_rule_ids,
+        })
+    }
+
     pub async fn apply_suggestion(
         &self,
         state: &Arc<AppState>,
@@ -737,6 +854,428 @@ impl AiPolicyEngine {
     }
 }
 
+fn harden_zero_trust_automation_settings(settings: &mut AutomationSettings) {
+    settings.auto_apply_confidence_threshold = settings.auto_apply_confidence_threshold.max(90);
+    settings.require_intent_match = true;
+    settings.require_protocol = true;
+    settings.require_destination_port = true;
+    settings.require_ip_family = true;
+    if settings.max_auto_apply_per_hour == 0 || settings.max_auto_apply_per_hour > 3 {
+        settings.max_auto_apply_per_hour = 3;
+    }
+    settings.allow_edit_rule = false;
+    settings.allow_remove_rule = false;
+    settings.protect_management_interface = true;
+}
+
+fn harden_zero_trust_firewall_settings(
+    settings: &mut FirewallSettings,
+    system_settings: Option<&crate::config::models::SystemSettings>,
+) {
+    settings.input_policy = FirewallChainPolicy::Drop;
+    settings.forward_policy = FirewallChainPolicy::Drop;
+    settings.output_policy = FirewallChainPolicy::Accept;
+    settings.drop_invalid_state = true;
+    settings.syn_flood_protection = true;
+    settings.management_anti_lockout = true;
+    settings.log_position = LogPosition::Before;
+
+    for port in effective_management_ports(settings, system_settings) {
+        if !settings.management_ports.contains(&port) {
+            settings.management_ports.push(port);
+        }
+    }
+    settings.management_ports.sort_unstable();
+    settings.management_ports.dedup();
+}
+
+fn build_zero_trust_baseline_rules(
+    config: &SystemConfig,
+    iface: Option<&str>,
+    ipv6_enabled: bool,
+) -> Vec<FirewallRule> {
+    let mut rules = Vec::new();
+
+    if let Some(dns) = config
+        .dns
+        .as_ref()
+        .filter(|dns| dns.enabled && dns.port != 0)
+    {
+        let service_ifaces = baseline_lan_interfaces(config, iface);
+        push_private_service_rules(
+            &mut rules,
+            "dns-udp",
+            "DNS resolver (UDP)",
+            Protocol::Udp,
+            dns.port,
+            &service_ifaces,
+            ipv6_enabled,
+        );
+        push_private_service_rules(
+            &mut rules,
+            "dns-tcp",
+            "DNS resolver (TCP)",
+            Protocol::Tcp,
+            dns.port,
+            &service_ifaces,
+            ipv6_enabled,
+        );
+    }
+
+    if let Some(dot) = config
+        .dot
+        .as_ref()
+        .filter(|dot| dot.enabled && dot.port != 0)
+    {
+        if dot.lan_only {
+            let service_ifaces = baseline_lan_interfaces(config, iface);
+            push_private_service_rules(
+                &mut rules,
+                "dot",
+                "DNS-over-TLS listener",
+                Protocol::Tcp,
+                dot.port,
+                &service_ifaces,
+                ipv6_enabled,
+            );
+        } else {
+            for service_iface in baseline_public_interfaces(iface) {
+                push_zero_trust_rule(
+                    &mut rules,
+                    "dot-public",
+                    "DNS-over-TLS listener",
+                    Protocol::Tcp,
+                    None,
+                    None,
+                    Some(dot.port),
+                    service_iface.as_deref(),
+                    if ipv6_enabled {
+                        FirewallAddressFamily::Ipv4Ipv6
+                    } else {
+                        FirewallAddressFamily::Ipv4
+                    },
+                );
+            }
+        }
+    }
+
+    if let Some(dhcp) = config.dhcp.as_ref().filter(|dhcp| dhcp.enabled) {
+        for service_iface in configured_service_interfaces(config, iface, &dhcp.interface) {
+            push_zero_trust_rule(
+                &mut rules,
+                "dhcpv4",
+                "DHCPv4 server",
+                Protocol::Udp,
+                None,
+                Some(68),
+                Some(67),
+                service_iface.as_deref(),
+                FirewallAddressFamily::Ipv4,
+            );
+        }
+    }
+
+    if ipv6_enabled {
+        if let Some(dhcp6) = config.dhcp6.as_ref().filter(|dhcp6| dhcp6.enabled) {
+            for service_iface in configured_service_interfaces(config, iface, &dhcp6.interface) {
+                push_zero_trust_rule(
+                    &mut rules,
+                    "dhcpv6",
+                    "DHCPv6 server",
+                    Protocol::Udp,
+                    None,
+                    Some(546),
+                    Some(547),
+                    service_iface.as_deref(),
+                    FirewallAddressFamily::Ipv6,
+                );
+            }
+        }
+    }
+
+    if let Some(ntp) = config
+        .ntp
+        .as_ref()
+        .filter(|ntp| ntp.enabled && ntp.serve_clients)
+    {
+        let service_ifaces = configured_listen_interfaces(config, iface, &ntp.listen_interfaces);
+        push_private_service_rules(
+            &mut rules,
+            "ntp",
+            "NTP server",
+            Protocol::Udp,
+            123,
+            &service_ifaces,
+            ipv6_enabled,
+        );
+    }
+
+    for wg in config
+        .wireguard_interfaces
+        .iter()
+        .filter(|wg| wg.enabled && wg.listen_port != 0)
+    {
+        for service_iface in baseline_public_interfaces(iface) {
+            push_zero_trust_rule(
+                &mut rules,
+                &format!("wireguard-{}", wg.name),
+                "WireGuard listener",
+                Protocol::Udp,
+                None,
+                None,
+                Some(wg.listen_port),
+                service_iface.as_deref(),
+                if ipv6_enabled {
+                    FirewallAddressFamily::Ipv4Ipv6
+                } else {
+                    FirewallAddressFamily::Ipv4
+                },
+            );
+        }
+    }
+
+    if let Some(acme) = config
+        .acme
+        .as_ref()
+        .filter(|acme| acme.enabled && acme.challenge_type.eq(&AcmeChallengeType::Http01))
+    {
+        if !acme.domains.is_empty() {
+            for service_iface in baseline_public_interfaces(iface) {
+                push_zero_trust_rule(
+                    &mut rules,
+                    "acme-http01",
+                    "ACME HTTP-01 challenge",
+                    Protocol::Tcp,
+                    None,
+                    None,
+                    Some(80),
+                    service_iface.as_deref(),
+                    if ipv6_enabled {
+                        FirewallAddressFamily::Ipv4Ipv6
+                    } else {
+                        FirewallAddressFamily::Ipv4
+                    },
+                );
+            }
+        }
+    }
+
+    if let Some(portal) = config
+        .captive_portal
+        .as_ref()
+        .filter(|portal| portal.enabled && portal.listen_port != 0)
+    {
+        let service_ifaces = configured_listen_interfaces(config, iface, &portal.interfaces);
+        push_private_service_rules(
+            &mut rules,
+            "captive-portal",
+            "Captive portal listener",
+            Protocol::Tcp,
+            portal.listen_port,
+            &service_ifaces,
+            ipv6_enabled,
+        );
+    }
+
+    rules
+}
+
+fn push_private_service_rules(
+    rules: &mut Vec<FirewallRule>,
+    service_key: &str,
+    label: &str,
+    protocol: Protocol,
+    destination_port: u16,
+    ifaces: &[Option<String>],
+    ipv6_enabled: bool,
+) {
+    for service_iface in ifaces {
+        for source in PRIVATE_IPV4_SOURCES {
+            push_zero_trust_rule(
+                rules,
+                service_key,
+                label,
+                protocol.clone(),
+                Some(source),
+                None,
+                Some(destination_port),
+                service_iface.as_deref(),
+                FirewallAddressFamily::Ipv4,
+            );
+        }
+        if ipv6_enabled {
+            for source in PRIVATE_IPV6_SOURCES {
+                push_zero_trust_rule(
+                    rules,
+                    service_key,
+                    label,
+                    protocol.clone(),
+                    Some(source),
+                    None,
+                    Some(destination_port),
+                    service_iface.as_deref(),
+                    FirewallAddressFamily::Ipv6,
+                );
+            }
+        }
+    }
+}
+
+fn push_zero_trust_rule(
+    rules: &mut Vec<FirewallRule>,
+    service_key: &str,
+    label: &str,
+    protocol: Protocol,
+    source: Option<&str>,
+    source_port: Option<u16>,
+    destination_port: Option<u16>,
+    iface: Option<&str>,
+    ip_family: FirewallAddressFamily,
+) {
+    rules.push(FirewallRule {
+        id: stable_zero_trust_rule_id(
+            service_key,
+            &protocol,
+            source,
+            source_port,
+            destination_port,
+            iface,
+            &ip_family,
+        ),
+        description: Some(format!("AI zero-trust baseline: {label}")),
+        priority: ZERO_TRUST_BASELINE_PRIORITY,
+        source: source.map(str::to_string),
+        destination: None,
+        protocol: Some(protocol),
+        source_port,
+        destination_port,
+        ip_family,
+        action: Action::Accept,
+        direction: FirewallDirection::Input,
+        interface: iface.map(str::to_string),
+        log: false,
+        enabled: true,
+        schedule: None,
+        state_limits: FirewallStateLimits::default(),
+    });
+}
+
+fn baseline_lan_interfaces(config: &SystemConfig, iface: Option<&str>) -> Vec<Option<String>> {
+    if let Some(iface) = iface {
+        return vec![Some(iface.to_string())];
+    }
+
+    let ifaces = config
+        .interfaces
+        .iter()
+        .filter(|iface| iface.enabled && iface.wan_mode.is_none() && iface.gateway.is_none())
+        .map(|iface| Some(iface.name.clone()))
+        .collect::<Vec<_>>();
+    if ifaces.is_empty() {
+        vec![None]
+    } else {
+        ifaces
+    }
+}
+
+fn baseline_public_interfaces(iface: Option<&str>) -> Vec<Option<String>> {
+    match iface {
+        Some(iface) => vec![Some(iface.to_string())],
+        None => vec![None],
+    }
+}
+
+fn configured_service_interfaces(
+    config: &SystemConfig,
+    requested_iface: Option<&str>,
+    configured_iface: &str,
+) -> Vec<Option<String>> {
+    let configured_iface = configured_iface.trim();
+    if configured_iface.is_empty() {
+        return baseline_lan_interfaces(config, requested_iface);
+    }
+
+    match requested_iface {
+        Some(requested_iface) if !iface_eq(requested_iface, configured_iface) => Vec::new(),
+        _ => vec![Some(configured_iface.to_string())],
+    }
+}
+
+fn configured_listen_interfaces(
+    config: &SystemConfig,
+    requested_iface: Option<&str>,
+    configured_ifaces: &[String],
+) -> Vec<Option<String>> {
+    let mut result = configured_ifaces
+        .iter()
+        .map(|iface| iface.trim())
+        .filter(|iface| !iface.is_empty())
+        .filter(|iface| {
+            requested_iface
+                .map(|requested_iface| iface_eq(requested_iface, iface))
+                .unwrap_or(true)
+        })
+        .map(|iface| Some(iface.to_string()))
+        .collect::<Vec<_>>();
+
+    if result.is_empty()
+        && configured_ifaces
+            .iter()
+            .all(|iface| iface.trim().is_empty())
+    {
+        result = baseline_lan_interfaces(config, requested_iface);
+    }
+
+    result
+}
+
+fn stable_zero_trust_rule_id(
+    service_key: &str,
+    protocol: &Protocol,
+    source: Option<&str>,
+    source_port: Option<u16>,
+    destination_port: Option<u16>,
+    iface: Option<&str>,
+    ip_family: &FirewallAddressFamily,
+) -> uuid::Uuid {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"dayshield-ai-zero-trust");
+    hasher.update(service_key.as_bytes());
+    hasher.update(protocol_key(protocol).as_bytes());
+    hasher.update(source.unwrap_or("any").as_bytes());
+    hasher.update(source_port.unwrap_or_default().to_be_bytes());
+    hasher.update(destination_port.unwrap_or_default().to_be_bytes());
+    hasher.update(iface.unwrap_or("any").as_bytes());
+    hasher.update(family_key(ip_family).as_bytes());
+
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes)
+}
+
+fn protocol_key(protocol: &Protocol) -> &'static str {
+    match protocol {
+        Protocol::Tcp => "tcp",
+        Protocol::Udp => "udp",
+        Protocol::Icmp => "icmp",
+        Protocol::Icmpv6 => "icmpv6",
+        Protocol::Any => "any",
+    }
+}
+
+fn family_key(family: &FirewallAddressFamily) -> &'static str {
+    match family {
+        FirewallAddressFamily::Ipv4 => "ipv4",
+        FirewallAddressFamily::Ipv6 => "ipv6",
+        FirewallAddressFamily::Ipv4Ipv6 => "ipv4_ipv6",
+    }
+}
+
 fn append_audit_suggestions(
     suggestions: &mut Vec<Suggestion>,
     audits: Vec<RuleAudit>,
@@ -790,10 +1329,7 @@ fn should_generate_suggestion(
         return true;
     }
 
-    if event.action.eq_ignore_ascii_case("drop")
-        || event.action.eq_ignore_ascii_case("reject")
-        || event.action.eq_ignore_ascii_case("block")
-    {
+    if is_block_action(&event.action) {
         return true;
     }
 
@@ -854,16 +1390,24 @@ fn build_traffic_candidates(recent: &[Event], intents: &[Intent]) -> Vec<Traffic
                         Some(resolved.intent_id),
                         Some(resolved.intent_name),
                     )
-                } else if aggregate.exemplar.action.eq_ignore_ascii_case("drop")
-                    || aggregate.exemplar.action.eq_ignore_ascii_case("reject")
-                {
-                    (
-                        DecisionAction::SuggestDeny,
-                        0.55,
-                        "Observed blocked traffic without a matching intent".to_string(),
-                        None,
-                        None,
-                    )
+                } else if is_block_action(&aggregate.exemplar.action) {
+                    if is_scoped_allow_event(&aggregate.exemplar) {
+                        (
+                            DecisionAction::SuggestAllow,
+                            (0.45 + (aggregate.count.min(6) as f32 * 0.05)).min(0.75),
+                            "Zero-trust baseline blocked scoped LAN traffic; verify and add a narrow allow rule if expected".to_string(),
+                            None,
+                            None,
+                        )
+                    } else {
+                        (
+                            DecisionAction::SuggestDeny,
+                            0.55,
+                            "Observed blocked traffic without a matching intent".to_string(),
+                            None,
+                            None,
+                        )
+                    }
                 } else {
                     let scoped_allow_candidate =
                         is_scoped_allow_candidate(&aggregate.exemplar, intents);
@@ -1331,6 +1875,77 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn zero_trust_dropped_lan_service_candidate_suggests_allow() {
+        let dir = tempdir().unwrap();
+        let engine = AiPolicyEngine::with_paths(
+            dir.path().join("suggestions.json"),
+            dir.path().join("actions.log"),
+            dir.path().join("intents.json"),
+            dir.path().join("mode.json"),
+            dir.path().join("automation_settings.json"),
+        );
+
+        {
+            let mut event = test_event("lan0", "10.0.0.2", "10.0.0.1");
+            event.action = "DEFAULT-BLOCK INPUT".to_string();
+            let mut events = engine.recent_events.write().await;
+            events.push(event);
+        }
+
+        let candidates = engine.list_traffic_candidates(None).await;
+        assert_eq!(candidates.len(), 1);
+        assert!(matches!(
+            candidates[0].recommended_action,
+            DecisionAction::SuggestAllow
+        ));
+    }
+
+    #[test]
+    fn zero_trust_baseline_includes_enabled_legit_services() {
+        let mut config = SystemConfig::default();
+        config.interfaces = vec![test_interface("lan0", false), test_interface("wan0", true)];
+        config.dns = Some(crate::config::models::DnsConfig::default());
+        config.dhcp = Some(crate::config::models::DhcpConfig {
+            enabled: true,
+            interface: "lan0".to_string(),
+            scopes: Vec::new(),
+        });
+        config.ntp = Some(crate::config::models::NtpConfig {
+            enabled: true,
+            upstream_servers: vec!["0.pool.ntp.org".to_string()],
+            serve_clients: true,
+            listen_interfaces: vec!["lan0".to_string()],
+        });
+
+        let rules = build_zero_trust_baseline_rules(&config, None, false);
+
+        assert!(rules.iter().any(|rule| {
+            rule.interface.as_deref() == Some("lan0")
+                && matches!(rule.protocol.as_ref(), Some(Protocol::Udp))
+                && rule.destination_port == Some(53)
+        }));
+        assert!(rules.iter().any(|rule| {
+            rule.interface.as_deref() == Some("lan0")
+                && matches!(rule.protocol.as_ref(), Some(Protocol::Tcp))
+                && rule.destination_port == Some(53)
+        }));
+        assert!(rules.iter().any(|rule| {
+            rule.interface.as_deref() == Some("lan0")
+                && matches!(rule.protocol.as_ref(), Some(Protocol::Udp))
+                && rule.source_port == Some(68)
+                && rule.destination_port == Some(67)
+        }));
+        assert!(rules.iter().any(|rule| {
+            rule.interface.as_deref() == Some("lan0")
+                && matches!(rule.protocol.as_ref(), Some(Protocol::Udp))
+                && rule.destination_port == Some(123)
+        }));
+        assert!(!rules
+            .iter()
+            .any(|rule| rule.interface.as_deref() == Some("wan0")));
+    }
+
     fn test_intent(name: &str, iface: Option<&str>) -> Intent {
         Intent {
             id: name.to_string(),
@@ -1360,6 +1975,34 @@ mod tests {
             src_port: Some(54321),
             dest_port: Some(443),
             iface: iface.to_string(),
+        }
+    }
+
+    fn test_interface(name: &str, wan: bool) -> crate::config::models::Interface {
+        crate::config::models::Interface {
+            name: name.to_string(),
+            description: None,
+            addresses: vec!["192.168.1.1/24".to_string()],
+            mtu: None,
+            mss: None,
+            enabled: true,
+            dhcp4: wan,
+            dhcp6: false,
+            accept_ra: false,
+            ipv6_mode: None,
+            track_source_interface: None,
+            track_prefix_id: None,
+            delegated_prefix_len: None,
+            ra_mode: None,
+            ia_pd_hint_len: None,
+            vlan: None,
+            parent_interface: None,
+            wan_mode: wan.then_some(crate::config::models::WanMode::Dhcp),
+            pppoe_username: None,
+            pppoe_password: None,
+            gateway: None,
+            block_private_networks: false,
+            block_bogon_networks: false,
         }
     }
 }

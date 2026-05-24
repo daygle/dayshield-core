@@ -69,6 +69,12 @@ pub fn is_scoped_allow_event(event: &Event) -> bool {
     true
 }
 
+pub fn is_block_action(action: &str) -> bool {
+    let normalized = action.trim().to_ascii_lowercase();
+    matches!(normalized.as_str(), "drop" | "reject" | "block")
+        || normalized.starts_with("default-block")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,5 +123,12 @@ mod tests {
         event.src_ip = "10.0.0.10".into();
         event.dest_port = None;
         assert!(!is_scoped_allow_event(&event));
+    }
+
+    #[test]
+    fn default_block_log_prefix_counts_as_blocked() {
+        assert!(is_block_action("DEFAULT-BLOCK INPUT"));
+        assert!(is_block_action("drop"));
+        assert!(!is_block_action("ACCEPT"));
     }
 }

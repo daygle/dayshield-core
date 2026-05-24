@@ -172,6 +172,7 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `GET  /dashboard/network`                             - WAN/LAN network overview
 /// - `GET  /dashboard/security`                            - firewall, Suricata, CrowdSec summary
 /// - `GET  /dashboard/acme`                                - ACME certificate expiry summary
+/// - `POST /api/ai/bootstrap_zero_trust`                    - enable AI zero-trust audit bootstrap
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         // Auth
@@ -521,6 +522,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/ai/mode", get(ai::get_mode))
         .route("/api/ai/mode", post(ai::set_mode))
+        .route(
+            "/api/ai/bootstrap_zero_trust",
+            post(ai::bootstrap_zero_trust),
+        )
         .route("/api/ai/action_history", get(ai::get_action_history))
         .route("/api/ai/undo_last_action", post(ai::undo_last_action))
         // NAT

@@ -216,3 +216,34 @@ pub struct UndoResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision: Option<Decision>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ZeroTrustBootstrapRequest {
+    pub set_suggest_mode: bool,
+    pub harden_firewall: bool,
+    pub include_legit_services: bool,
+}
+
+impl Default for ZeroTrustBootstrapRequest {
+    fn default() -> Self {
+        Self {
+            set_suggest_mode: true,
+            harden_firewall: true,
+            include_legit_services: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ZeroTrustBootstrapResponse {
+    pub applied: bool,
+    pub message: String,
+    pub mode: AutomationMode,
+    pub automation_settings: AutomationSettings,
+    pub firewall_settings_hardened: bool,
+    pub baseline_rules_added: usize,
+    pub baseline_rules_updated: usize,
+    pub baseline_rule_ids: Vec<String>,
+}

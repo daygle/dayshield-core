@@ -353,7 +353,7 @@ fn system_default_block_rule(direction: &str) -> FirewallRule {
             "Default drop policy for {} chain",
             direction.to_uppercase()
         )),
-        priority: -100,
+        priority: 1_000_000,
         source: None,
         destination: None,
         protocol: None,
@@ -2152,6 +2152,32 @@ mod tests {
         let rs = generate_ruleset(&[rule], None, &[], None, &HashMap::new());
         assert!(rs.contains("tcp dport 443"), "tcp dport must appear");
         assert!(rs.contains("accept"));
+    }
+
+    #[test]
+    fn default_block_system_rule_sorts_after_user_allow_rules() {
+        let rule = FirewallRule {
+            protocol: Some(Protocol::Tcp),
+            destination_port: Some(443),
+            direction: FirewallDirection::Input,
+            ..base_rule(0, Action::Accept)
+        };
+        let rs = generate_ruleset(&[rule], None, &[], None, &HashMap::new());
+        let input = rs
+            .split("    chain input {\n")
+            .nth(1)
+            .and_then(|section| section.split("\n    }\n").next())
+            .expect("input chain must be present");
+        let allow_pos = input
+            .lines()
+            .position(|line| line.contains("tcp dport 443") && line.ends_with(" accept"))
+            .expect("user allow rule must be present");
+        let default_drop_pos = input
+            .lines()
+            .position(|line| line.contains("counter name") && line.ends_with(" drop"))
+            .expect("system default drop rule must be present");
+
+        assert!(allow_pos < default_drop_pos);
     }
 
     #[test]

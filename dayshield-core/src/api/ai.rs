@@ -9,6 +9,7 @@ use axum::{
 
 use crate::ai_policy::models::{
     ApplySuggestionRequest, AutomationSettings, ModeRequest, SetIntentsRequest,
+    ZeroTrustBootstrapRequest,
 };
 use crate::config::models::{validate_ai_engine_config, AiEngineConfig};
 use crate::state::AppState;
@@ -289,6 +290,23 @@ pub async fn set_mode(
         .set_mode(req, selected_iface(query.iface, &headers))
         .await?;
     Ok(Json(mode))
+}
+
+/// POST /api/ai/bootstrap_zero_trust
+pub async fn bootstrap_zero_trust(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<InterfaceQuery>,
+) -> Result<impl IntoResponse, AiApiError> {
+    let response = state
+        .ai_policy_engine
+        .bootstrap_zero_trust(
+            &state,
+            ZeroTrustBootstrapRequest::default(),
+            selected_iface(query.iface, &headers),
+        )
+        .await?;
+    Ok(Json(response))
 }
 
 /// POST /api/ai/undo_last_action

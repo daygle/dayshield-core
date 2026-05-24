@@ -178,11 +178,38 @@ async fn prepare_runtime(server: KeaServer) -> Result<()> {
     set_directory_permissions_best_effort(CONFIG_DIR);
     set_directory_permissions_best_effort(DAYSHIELD_CONFIG_DIR);
     set_directory_permissions_best_effort(DATA_DIR);
+    // Some deployments run without CAP_CHOWN in the DayShield service sandbox.
+    // Keep the runtime dir lease-writable even when ownership cannot be changed.
+    #[cfg(unix)]
+    set_directory_mode_best_effort(DATA_DIR, 0o777);
 
     #[cfg(unix)]
-    sync_runtime_owner(server).await;
+    {
+        sync_runtime_owner(server).await;
+        ensure_runtime_paths_writable(server);
+    }
 
     Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_runtime_paths_writable(server: KeaServer) {
+    set_directory_mode_best_effort(DATA_DIR, 0o777);
+
+    let lease_path = server.lease_path();
+    if !Path::new(lease_path).exists() {
+        if let Err(error) = std::fs::File::create(lease_path) {
+            warn!(
+                service = server.label(),
+                path = lease_path,
+                error = %error,
+                "kea: continuing after lease file pre-create failed"
+            );
+            return;
+        }
+    }
+
+    set_file_mode_best_effort(lease_path, 0o666);
 }
 
 #[cfg(unix)]
@@ -390,6 +417,18 @@ fn set_directory_permissions_best_effort(path: &str) {
     }
 }
 
+#[cfg(unix)]
+fn set_directory_mode_best_effort(path: &str, mode: u32) {
+    if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) {
+        warn!(
+            path,
+            mode,
+            error = %error,
+            "kea: continuing after directory mode update failed"
+        );
+    }
+}
+
 #[cfg(not(unix))]
 fn set_directory_permissions_best_effort(_path: &str) {}
 
@@ -397,6 +436,18 @@ fn set_directory_permissions_best_effort(_path: &str) {}
 fn set_file_permissions_best_effort(path: &str) {
     if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)) {
         warn!(path, error = %error, "kea: continuing after file chmod failed");
+    }
+}
+
+#[cfg(unix)]
+fn set_file_mode_best_effort(path: &str, mode: u32) {
+    if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) {
+        warn!(
+            path,
+            mode,
+            error = %error,
+            "kea: continuing after file mode update failed"
+        );
     }
 }
 

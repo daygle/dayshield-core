@@ -15,9 +15,14 @@ use tokio::process::Command;
 use tracing::warn;
 
 use crate::live_logs::{
-    firewall::parse_journald_firewall_line, suricata::parse_eve_line,
-    system::parse_journald_system_line, websocket::logs_websocket, LogEvent,
+    firewall::{parse_dmesg_firewall_line, parse_journald_firewall_line},
+    suricata::parse_eve_line,
+    system::{parse_journald_system_line, parse_system_text_line},
+    websocket::logs_websocket,
+    LogEvent,
 };
+
+const DAYSHIELD_CORE_LOG_PATH: &str = "/var/log/dayshield/core.log";
 
 #[derive(Debug, Deserialize)]
 pub struct SearchLogsQuery {
@@ -149,6 +154,10 @@ fn event_search_text(event: &LogEvent) -> String {
     }
 }
 
+fn journal_has_no_files(stderr: &[u8]) -> bool {
+    String::from_utf8_lossy(stderr).contains("No journal files were found")
+}
+
 async fn query_journal_system(from: &str, to: &str) -> Result<Vec<LogEvent>, LogsApiError> {
     let out = Command::new("journalctl")
         .args([
@@ -166,6 +175,9 @@ async fn query_journal_system(from: &str, to: &str) -> Result<Vec<LogEvent>, Log
         })?;
 
     if !out.status.success() {
+        if journal_has_no_files(&out.stderr) {
+            return Ok(vec![]);
+        }
         return Err(LogsApiError::Search(format!(
             "journalctl system query failed: {}",
             String::from_utf8_lossy(&out.stderr)
@@ -179,6 +191,29 @@ async fn query_journal_system(from: &str, to: &str) -> Result<Vec<LogEvent>, Log
         .collect::<Vec<_>>())
 }
 
+async fn query_core_log_range(
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Vec<LogEvent>, LogsApiError> {
+    let content = match tokio::fs::read_to_string(DAYSHIELD_CORE_LOG_PATH).await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, path = DAYSHIELD_CORE_LOG_PATH, "logs/search: could not read DayShield core log");
+            return Ok(vec![]);
+        }
+    };
+
+    Ok(content
+        .lines()
+        .filter_map(parse_system_text_line)
+        .filter(|event| {
+            parse_event_ts(event)
+                .map(|ts| ts >= from && ts <= to)
+                .unwrap_or(true)
+        })
+        .collect())
+}
+
 async fn query_journal_firewall(from: &str, to: &str) -> Result<Vec<LogEvent>, LogsApiError> {
     let mut cmd = Command::new("journalctl");
     cmd.args(["--output=json", "--since", from, "--until", to])
@@ -188,6 +223,9 @@ async fn query_journal_firewall(from: &str, to: &str) -> Result<Vec<LogEvent>, L
         LogsApiError::Search(format!("failed to run journalctl for firewall logs: {e}"))
     })?;
     if !out.status.success() {
+        if journal_has_no_files(&out.stderr) {
+            return Ok(vec![]);
+        }
         return Err(LogsApiError::Search(format!(
             "journalctl firewall query failed: {}",
             String::from_utf8_lossy(&out.stderr)
@@ -202,6 +240,42 @@ async fn query_journal_firewall(from: &str, to: &str) -> Result<Vec<LogEvent>, L
                 Some(event @ LogEvent::FirewallEvent { .. }) => Some(event),
                 _ => None,
             })
+        })
+        .collect::<Vec<_>>())
+}
+
+async fn query_dmesg_firewall_range(
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Vec<LogEvent>, LogsApiError> {
+    let out = match Command::new("dmesg")
+        .args(["--time-format=iso"])
+        .output()
+        .await
+    {
+        Ok(output) => output,
+        Err(e) => {
+            warn!(error = %e, "logs/search: failed to run dmesg fallback");
+            return Ok(vec![]);
+        }
+    };
+
+    if !out.status.success() {
+        warn!(
+            stderr = %String::from_utf8_lossy(&out.stderr),
+            "logs/search: dmesg fallback returned non-zero status"
+        );
+        return Ok(vec![]);
+    }
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    Ok(stdout
+        .lines()
+        .filter_map(parse_dmesg_firewall_line)
+        .filter(|event| {
+            parse_event_ts(event)
+                .map(|ts| ts >= from && ts <= to)
+                .unwrap_or(true)
         })
         .collect::<Vec<_>>())
 }
@@ -273,10 +347,20 @@ pub async fn search_logs(
     let to_s = to.format("%Y-%m-%d %H:%M:%S UTC").to_string();
 
     if matches!(source.as_str(), "all" | "system") {
-        events.extend(query_journal_system(&from_s, &to_s).await?);
+        let journal_events = query_journal_system(&from_s, &to_s).await?;
+        if journal_events.is_empty() {
+            events.extend(query_core_log_range(from, to).await?);
+        } else {
+            events.extend(journal_events);
+        }
     }
     if matches!(source.as_str(), "all" | "firewall") {
-        events.extend(query_journal_firewall(&from_s, &to_s).await?);
+        let journal_events = query_journal_firewall(&from_s, &to_s).await?;
+        if journal_events.is_empty() {
+            events.extend(query_dmesg_firewall_range(from, to).await?);
+        } else {
+            events.extend(journal_events);
+        }
     }
     if matches!(source.as_str(), "all" | "suricata") {
         events.extend(query_suricata_range(from, to).await?);

@@ -27,12 +27,23 @@
 //! The filter can also be updated at runtime without restarting the process
 //! using [`update_filter`].
 
-use std::sync::OnceLock;
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{self, Write},
+    path::Path,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 use tracing::level_filters::LevelFilter;
+use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, reload, EnvFilter, Registry};
+
+/// Durable DayShield-owned log file used by the API when journald is absent
+/// or disabled on appliance images.
+pub const DEFAULT_LOG_PATH: &str = "/var/log/dayshield/core.log";
+const MAX_LOG_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Log output format.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -151,25 +162,117 @@ pub fn init_with_config(config: &LoggingConfig) {
 
     let env_syslog = std::env::var("LOG_SYSLOG").unwrap_or_default() == "1";
     let use_syslog = env_syslog || config.syslog;
+    let file_writer = open_default_log_file();
 
     if use_json {
+        let file_layer = file_writer.clone().map(|writer| {
+            fmt::layer()
+                .json()
+                .with_target(true)
+                .with_ansi(false)
+                .with_writer(writer)
+        });
         let subscriber = Registry::default()
             .with(filter_layer)
-            .with(fmt::layer().json().with_target(true).with_ansi(false));
+            .with(fmt::layer().json().with_target(true).with_ansi(false))
+            .with(file_layer);
         if use_syslog {
             subscriber.with(SyslogLayer::new()).try_init().ok();
         } else {
             subscriber.try_init().ok();
         }
     } else {
+        let file_layer = file_writer.map(|writer| {
+            fmt::layer()
+                .with_target(true)
+                .with_ansi(false)
+                .with_writer(writer)
+        });
         let subscriber = Registry::default()
             .with(filter_layer)
-            .with(fmt::layer().with_target(true).with_ansi(false));
+            .with(fmt::layer().with_target(true).with_ansi(false))
+            .with(file_layer);
         if use_syslog {
             subscriber.with(SyslogLayer::new()).try_init().ok();
         } else {
             subscriber.try_init().ok();
         }
+    }
+}
+
+fn open_default_log_file() -> Option<LogFileMakeWriter> {
+    let path = std::env::var("DAYSHIELD_LOG_PATH").unwrap_or_else(|_| DEFAULT_LOG_PATH.to_string());
+    let path = Path::new(&path);
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+    rotate_log_if_large(path);
+
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()
+        .map(LogFileMakeWriter::new)
+}
+
+fn rotate_log_if_large(path: &Path) {
+    let Ok(metadata) = fs::metadata(path) else {
+        return;
+    };
+    if metadata.len() < MAX_LOG_FILE_BYTES {
+        return;
+    }
+
+    let mut backup = path.to_path_buf();
+    backup.set_extension("log.1");
+    let _ = fs::remove_file(&backup);
+    let _ = fs::rename(path, backup);
+}
+
+#[derive(Clone)]
+struct LogFileMakeWriter {
+    file: Arc<Mutex<File>>,
+}
+
+impl LogFileMakeWriter {
+    fn new(file: File) -> Self {
+        Self {
+            file: Arc::new(Mutex::new(file)),
+        }
+    }
+}
+
+struct LogFileWriter {
+    file: Arc<Mutex<File>>,
+}
+
+impl<'a> MakeWriter<'a> for LogFileMakeWriter {
+    type Writer = LogFileWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        LogFileWriter {
+            file: Arc::clone(&self.file),
+        }
+    }
+}
+
+impl Write for LogFileWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "log file lock poisoned"))?;
+        file.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "log file lock poisoned"))?;
+        file.flush()
     }
 }
 

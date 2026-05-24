@@ -42,6 +42,35 @@ use crate::live_logs::{journald_field_text, LogEvent};
 /// processes its output line by line.  Restarts automatically when the
 /// process exits unexpectedly.
 pub async fn stream_firewall(tx: Sender<LogEvent>) {
+    if !journal_has_firewall_entries().await {
+        warn!("firewall: journald has no nftables/kernel entries; using dmesg fallback");
+        stream_dmesg_firewall(tx).await;
+        return;
+    }
+
+    stream_journal_firewall(tx).await;
+}
+
+async fn journal_has_firewall_entries() -> bool {
+    match Command::new("journalctl")
+        .args([
+            "--output=json",
+            "--lines=1",
+            "--identifier=nftables",
+            "--identifier=kernel",
+        ])
+        .output()
+        .await
+    {
+        Ok(output) => !String::from_utf8_lossy(&output.stdout).trim().is_empty(),
+        Err(error) => {
+            warn!(error = %error, "firewall: failed to probe journalctl; using dmesg fallback");
+            false
+        }
+    }
+}
+
+async fn stream_journal_firewall(tx: Sender<LogEvent>) {
     loop {
         info!("firewall: starting journalctl nftables stream");
 
@@ -95,6 +124,53 @@ pub async fn stream_firewall(tx: Sender<LogEvent>) {
     }
 }
 
+async fn stream_dmesg_firewall(tx: Sender<LogEvent>) {
+    loop {
+        info!("firewall: starting dmesg fallback stream");
+
+        let mut child = match Command::new("dmesg")
+            .args(["--follow", "--time-format=iso"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, "firewall: failed to spawn dmesg, retrying in 5s");
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+
+        let stdout = child.stdout.take().expect("stdout piped");
+        let mut reader = BufReader::new(stdout).lines();
+
+        loop {
+            match reader.next_line().await {
+                Ok(Some(line)) => {
+                    if let Some(event) = parse_dmesg_firewall_line(&line) {
+                        if tx.send(event).await.is_err() {
+                            let _ = child.kill().await;
+                            return;
+                        }
+                    }
+                }
+                Ok(None) => {
+                    info!("firewall: dmesg exited, restarting");
+                    break;
+                }
+                Err(e) => {
+                    warn!(error = %e, "firewall: dmesg read error");
+                    break;
+                }
+            }
+        }
+
+        let _ = child.kill().await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Parsing helpers
 // ---------------------------------------------------------------------------
@@ -119,11 +195,50 @@ pub(crate) fn parse_journald_firewall_line(line: &str) -> Option<LogEvent> {
     };
 
     // Parse the __REALTIME_TIMESTAMP field (microseconds since epoch).
-    let timestamp = parse_realtime_timestamp(
-        journald_field_text(obj.get("__REALTIME_TIMESTAMP")).as_deref(),
-    );
+    let timestamp =
+        parse_realtime_timestamp(journald_field_text(obj.get("__REALTIME_TIMESTAMP")).as_deref());
 
     parse_nftables_message(&message, &timestamp)
+}
+
+/// Parse one `dmesg` output line carrying an nftables/kernel firewall log.
+pub(crate) fn parse_dmesg_firewall_line(line: &str) -> Option<LogEvent> {
+    let message = normalize_dmesg_firewall_message(line)?;
+    let timestamp = parse_dmesg_timestamp(line);
+    parse_nftables_message(&message, &timestamp)
+}
+
+fn normalize_dmesg_firewall_message(line: &str) -> Option<String> {
+    let line = line.trim();
+    if !line.contains("IN=") || !line.contains("SRC=") || !line.contains("DST=") {
+        return None;
+    }
+
+    let in_idx = line.find("IN=")?;
+    let mut action = &line[..in_idx];
+    if let Some((_, rest)) = action.rsplit_once("kernel:") {
+        action = rest;
+    }
+    if let Some((_, rest)) = action.rsplit_once(']') {
+        action = rest;
+    }
+
+    let action = action.trim_matches(|ch: char| ch.is_whitespace() || ch == ':');
+    let kv = &line[in_idx..];
+    if action.is_empty() {
+        Some(kv.to_string())
+    } else {
+        Some(format!("{action} {kv}"))
+    }
+}
+
+fn parse_dmesg_timestamp(line: &str) -> String {
+    line.split_whitespace()
+        .next()
+        .map(|token| token.replacen(',', ".", 1))
+        .and_then(|token| DateTime::parse_from_rfc3339(&token).ok())
+        .map(|dt| dt.with_timezone(&Utc).to_rfc3339())
+        .unwrap_or_else(|| Utc::now().to_rfc3339())
 }
 
 /// Convert a journald `__REALTIME_TIMESTAMP` string (microseconds since the
@@ -294,6 +409,48 @@ mod tests {
         match event {
             LogEvent::FirewallEvent { action, dport, .. } => {
                 assert_eq!(action, "DROP");
+                assert_eq!(dport, 443);
+            }
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_parse_dmesg_firewall_line_with_kernel_prefix() {
+        let line = "2026-05-24T12:34:56,123456+00:00 kernel: DEFAULT-BLOCK INPUT IN=ens19 OUT= SRC=192.168.20.2 DST=192.168.20.255 PROTO=UDP SPT=9801 DPT=9801";
+        let event = parse_dmesg_firewall_line(line).expect("should parse");
+        match event {
+            LogEvent::FirewallEvent {
+                timestamp,
+                action,
+                src_ip,
+                dest_ip,
+                dport,
+                ..
+            } => {
+                assert_eq!(timestamp, "2026-05-24T12:34:56.123456+00:00");
+                assert_eq!(action, "DEFAULT-BLOCK INPUT");
+                assert_eq!(src_ip, "192.168.20.2");
+                assert_eq!(dest_ip, "192.168.20.255");
+                assert_eq!(dport, 9801);
+            }
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_parse_dmesg_firewall_line_with_bracket_prefix() {
+        let line = "[  123.456789] DROP IN=eth0 OUT= SRC=10.0.0.5 DST=10.0.0.1 PROTO=TCP SPT=12345 DPT=443";
+        let event = parse_dmesg_firewall_line(line).expect("should parse");
+        match event {
+            LogEvent::FirewallEvent {
+                action,
+                src_ip,
+                dport,
+                ..
+            } => {
+                assert_eq!(action, "DROP");
+                assert_eq!(src_ip, "10.0.0.5");
                 assert_eq!(dport, 443);
             }
             _ => panic!("unexpected variant"),

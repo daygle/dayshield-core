@@ -4,6 +4,8 @@
 //! Like [`crate::live_logs::firewall`] this module spawns `journalctl` as a child
 //! process using `--output=json --follow --priority=info` to avoid a hard
 //! dependency on `libsystemd`.
+//! When journald is present but has no entries, it falls back to DayShield's
+//! own durable log file at `/var/log/dayshield/core.log`.
 //!
 //! Each JSON line is parsed to extract the unit name and log message and is
 //! forwarded as a [`LogEvent::SystemEvent`].
@@ -12,12 +14,14 @@ use chrono::{DateTime, TimeZone, Utc};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
-    sync::mpsc::Sender,
+    sync::mpsc::{self, Sender},
 };
 use tracing::{info, warn};
 
 use crate::live_logs::firewall::parse_nftables_message;
-use crate::live_logs::{journald_field_text, LogEvent};
+use crate::live_logs::{journald_field_text, tail::FileTailer, LogEvent};
+
+const DAYSHIELD_CORE_LOG_PATH: &str = "/var/log/dayshield/core.log";
 
 // ---------------------------------------------------------------------------
 // Public streaming function
@@ -28,6 +32,49 @@ use crate::live_logs::{journald_field_text, LogEvent};
 /// Spawns `journalctl --output=json --follow --priority=info --lines=0` and
 /// processes its output line by line.  Restarts automatically on exit.
 pub async fn stream_system(tx: Sender<LogEvent>) {
+    if !journal_has_system_entries().await {
+        warn!(
+            path = DAYSHIELD_CORE_LOG_PATH,
+            "system: journald has no readable entries; tailing DayShield log file"
+        );
+        stream_core_log_file(tx).await;
+        return;
+    }
+
+    stream_journal_system(tx).await;
+}
+
+async fn journal_has_system_entries() -> bool {
+    match Command::new("journalctl")
+        .args(["--output=json", "--priority=info", "--lines=1"])
+        .output()
+        .await
+    {
+        Ok(output) => !String::from_utf8_lossy(&output.stdout).trim().is_empty(),
+        Err(error) => {
+            warn!(error = %error, "system: failed to probe journalctl; using log file fallback");
+            false
+        }
+    }
+}
+
+async fn stream_core_log_file(tx: Sender<LogEvent>) {
+    let (line_tx, mut line_rx) = mpsc::channel::<String>(256);
+
+    tokio::spawn(async move {
+        FileTailer::new(DAYSHIELD_CORE_LOG_PATH).run(line_tx).await;
+    });
+
+    while let Some(line) = line_rx.recv().await {
+        if let Some(event) = parse_system_text_line(&line) {
+            if tx.send(event).await.is_err() {
+                break;
+            }
+        }
+    }
+}
+
+async fn stream_journal_system(tx: Sender<LogEvent>) {
     loop {
         info!("system: starting journalctl system stream");
 
@@ -141,6 +188,68 @@ pub(crate) fn parse_journald_system_line(line: &str) -> Option<LogEvent> {
     })
 }
 
+/// Parse a DayShield-owned text/JSON log line from `/var/log/dayshield/core.log`.
+pub(crate) fn parse_system_text_line(line: &str) -> Option<LogEvent> {
+    let message = strip_ansi_codes(line).trim().to_string();
+    if message.is_empty() {
+        return None;
+    }
+
+    if let Some(event) = parse_tracing_json_line(&message) {
+        return Some(event);
+    }
+
+    if let Some(formatted) = parse_tracing_formatted_line(&message) {
+        return Some(LogEvent::SystemEvent {
+            timestamp: formatted.timestamp,
+            unit: formatted.target,
+            priority: Some(formatted.priority),
+            message: formatted.message,
+        });
+    }
+
+    Some(LogEvent::SystemEvent {
+        timestamp: Utc::now().to_rfc3339(),
+        unit: "dayshield-core".to_string(),
+        priority: None,
+        message,
+    })
+}
+
+fn parse_tracing_json_line(line: &str) -> Option<LogEvent> {
+    let obj: serde_json::Value = serde_json::from_str(line).ok()?;
+    let timestamp = obj
+        .get("timestamp")
+        .and_then(|value| journald_field_text(Some(value)))
+        .and_then(|raw| DateTime::parse_from_rfc3339(&raw).ok())
+        .map(|dt| dt.with_timezone(&Utc).to_rfc3339())
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
+    let level = obj
+        .get("level")
+        .and_then(|value| journald_field_text(Some(value)))
+        .unwrap_or_else(|| "INFO".to_string());
+    let priority = tracing_level_priority(&level);
+    let unit = obj
+        .get("target")
+        .and_then(|value| journald_field_text(Some(value)))
+        .unwrap_or_else(|| "dayshield-core".to_string());
+    let message = obj
+        .get("fields")
+        .and_then(|fields| fields.get("message"))
+        .and_then(|value| journald_field_text(Some(value)))
+        .or_else(|| {
+            obj.get("message")
+                .and_then(|value| journald_field_text(Some(value)))
+        })?;
+
+    Some(LogEvent::SystemEvent {
+        timestamp,
+        unit,
+        priority,
+        message,
+    })
+}
+
 fn looks_like_nftables_message(message: &str) -> bool {
     message.contains("IN=")
         && message.contains("SRC=")
@@ -149,6 +258,7 @@ fn looks_like_nftables_message(message: &str) -> bool {
 }
 
 struct TracingFormattedLine {
+    timestamp: String,
     target: String,
     priority: u8,
     message: String,
@@ -157,7 +267,10 @@ struct TracingFormattedLine {
 fn parse_tracing_formatted_line(message: &str) -> Option<TracingFormattedLine> {
     let trimmed = message.trim_start();
     let (timestamp, rest) = split_first_token(trimmed)?;
-    DateTime::parse_from_rfc3339(timestamp).ok()?;
+    let timestamp = DateTime::parse_from_rfc3339(timestamp)
+        .ok()?
+        .with_timezone(&Utc)
+        .to_rfc3339();
 
     let (level, rest) = split_first_token(rest.trim_start())?;
     let priority = tracing_level_priority(level)?;
@@ -168,6 +281,7 @@ fn parse_tracing_formatted_line(message: &str) -> Option<TracingFormattedLine> {
     }
 
     Some(TracingFormattedLine {
+        timestamp,
         target: target.to_string(),
         priority,
         message: message.trim().to_string(),
@@ -379,6 +493,47 @@ mod tests {
                 assert_eq!(unit, "dayshield_core::api::wireguard");
                 assert_eq!(priority, Some(4));
                 assert_eq!(message, "wireguard: invalid interface name name=");
+            }
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_parse_system_text_line_extracts_tracing_format() {
+        let line =
+            "2026-05-24T12:20:56.123456Z  INFO dayshield_core::engine::dhcp: dhcp: engine apply complete";
+        let event = parse_system_text_line(line).expect("should parse");
+        match event {
+            LogEvent::SystemEvent {
+                timestamp,
+                unit,
+                priority,
+                message,
+            } => {
+                assert_eq!(timestamp, "2026-05-24T12:20:56.123456+00:00");
+                assert_eq!(unit, "dayshield_core::engine::dhcp");
+                assert_eq!(priority, Some(6));
+                assert_eq!(message, "dhcp: engine apply complete");
+            }
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_parse_system_text_line_extracts_json_format() {
+        let line = r#"{"timestamp":"2026-05-24T12:20:56.123456Z","level":"WARN","target":"dayshield_core::api::dhcp","fields":{"message":"dhcp: lease csv has no data rows"}}"#;
+        let event = parse_system_text_line(line).expect("should parse");
+        match event {
+            LogEvent::SystemEvent {
+                timestamp,
+                unit,
+                priority,
+                message,
+            } => {
+                assert_eq!(timestamp, "2026-05-24T12:20:56.123456+00:00");
+                assert_eq!(unit, "dayshield_core::api::dhcp");
+                assert_eq!(priority, Some(4));
+                assert_eq!(message, "dhcp: lease csv has no data rows");
             }
             _ => panic!("unexpected variant"),
         }

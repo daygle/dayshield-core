@@ -15,7 +15,11 @@
 //! | GET    | `/dhcp/leases`                            | List active leases from Kea          |
 //! | GET    | `/dhcp/pools`                             | List DHCP scopes as pool view        |
 
-use std::{net::Ipv6Addr, sync::Arc};
+use std::{
+    collections::HashMap,
+    net::{Ipv4Addr, Ipv6Addr},
+    sync::Arc,
+};
 
 use axum::{
     extract::{Path, Query, State},
@@ -24,6 +28,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use tokio::process::Command;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -764,11 +769,7 @@ fn kea_value(cols: &[String], index: Option<usize>) -> &str {
         .unwrap_or("")
 }
 
-fn parse_kea4_lease_line(
-    headers: &[String],
-    line: &str,
-    now: u64,
-) -> Option<DhcpLeaseResponse> {
+fn parse_kea4_lease_line(headers: &[String], line: &str, now: u64) -> Option<DhcpLeaseResponse> {
     let cols = parse_csv_line(line);
     if cols.is_empty() {
         return None;
@@ -806,34 +807,7 @@ fn parse_kea4_lease_line(
     })
 }
 
-async fn read_kea4_leases() -> Vec<DhcpLeaseResponse> {
-    use crate::engine::dhcp::KEA_LEASES_PATH;
-
-    const LEGACY_KEA4_LEASES_PATH: &str = "/run/dayshield/kea/kea-leases4.csv";
-
-    let (content, loaded_from) = match tokio::fs::read_to_string(KEA_LEASES_PATH).await {
-        Ok(c) => (c, KEA_LEASES_PATH),
-        Err(primary_err) => match tokio::fs::read_to_string(LEGACY_KEA4_LEASES_PATH).await {
-            Ok(c) => {
-                warn!(
-                    primary_path = KEA_LEASES_PATH,
-                    fallback_path = LEGACY_KEA4_LEASES_PATH,
-                    error = %primary_err,
-                    "dhcp: loaded leases from legacy path after primary read failure"
-                );
-                (c, LEGACY_KEA4_LEASES_PATH)
-            }
-            Err(_) => {
-                return vec![];
-            }
-        },
-    };
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
+fn parse_kea4_leases_content(content: &str, loaded_from: &str, now: u64) -> Vec<DhcpLeaseResponse> {
     let rows: Vec<&str> = content
         .lines()
         .map(str::trim)
@@ -891,6 +865,56 @@ async fn read_kea4_leases() -> Vec<DhcpLeaseResponse> {
     leases
 }
 
+async fn discover_kea4_lease_paths() -> Vec<String> {
+    use crate::engine::dhcp::KEA_LEASES_PATH;
+
+    const LEGACY_KEA4_LEASES_PATH: &str = "/run/dayshield/kea/kea-leases4.csv";
+
+    let mut paths = vec![
+        KEA_LEASES_PATH.to_string(),
+        LEGACY_KEA4_LEASES_PATH.to_string(),
+    ];
+
+    for dir in ["/var/lib/kea", "/run/dayshield/kea"] {
+        let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let file_name = entry.file_name();
+            let file_name = file_name.to_string_lossy();
+            if file_name.starts_with("kea-leases4.csv.") {
+                paths.push(entry.path().to_string_lossy().to_string());
+            }
+        }
+    }
+
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+async fn read_kea4_leases() -> Vec<DhcpLeaseResponse> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut merged = HashMap::<String, DhcpLeaseResponse>::new();
+    for path in discover_kea4_lease_paths().await {
+        let Ok(content) = tokio::fs::read_to_string(&path).await else {
+            continue;
+        };
+        for lease in parse_kea4_leases_content(&content, &path, now) {
+            let key = format!("{}|{}", lease.ip_address, lease.mac.to_ascii_lowercase());
+            merged.insert(key, lease);
+        }
+    }
+
+    let mut leases = merged.into_values().collect::<Vec<_>>();
+    leases.sort_by(|a, b| a.ip_address.cmp(&b.ip_address).then(a.mac.cmp(&b.mac)));
+    leases
+}
+
 fn requested_dhcp_iface(query: &DhcpLeaseQuery) -> Option<&str> {
     query
         .iface
@@ -905,11 +929,152 @@ fn dhcp_config_matches_requested_iface(cfg: Option<&DhcpConfig>, requested_iface
         .unwrap_or(true)
 }
 
+fn ipv4_to_u32(value: &str) -> Option<u32> {
+    let octets = value.parse::<Ipv4Addr>().ok()?.octets();
+    Some(u32::from_be_bytes(octets))
+}
+
+fn ipv4_in_range(value: &str, start: &str, end: &str) -> bool {
+    let Some(value) = ipv4_to_u32(value) else {
+        return false;
+    };
+    let Some(start) = ipv4_to_u32(start) else {
+        return false;
+    };
+    let Some(end) = ipv4_to_u32(end) else {
+        return false;
+    };
+    value >= start && value <= end
+}
+
+fn dhcp_config_contains_client_ip(cfg: &DhcpConfig, ip: &str) -> bool {
+    cfg.scopes.iter().any(|scope| {
+        ipv4_in_range(ip, &scope.pool_start, &scope.pool_end)
+            || scope
+                .reservations
+                .iter()
+                .any(|reservation| reservation.ip_address == ip)
+    })
+}
+
+fn hostname_for_dhcp_client(cfg: &DhcpConfig, ip: &str, mac: &str) -> String {
+    cfg.scopes
+        .iter()
+        .flat_map(|scope| scope.reservations.iter())
+        .find(|reservation| {
+            reservation.ip_address == ip || reservation.mac_address.eq_ignore_ascii_case(mac)
+        })
+        .and_then(|reservation| reservation.hostname.clone())
+        .unwrap_or_default()
+}
+
+fn neighbor_state_is_usable(value: &serde_json::Value) -> bool {
+    let states = match value.get("state") {
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .filter_map(|item| item.as_str())
+            .map(str::to_ascii_uppercase)
+            .collect::<Vec<_>>(),
+        Some(serde_json::Value::String(state)) => vec![state.to_ascii_uppercase()],
+        _ => vec![],
+    };
+
+    !states
+        .iter()
+        .any(|state| matches!(state.as_str(), "FAILED" | "INCOMPLETE"))
+}
+
+fn parse_ip_neighbor_json(output: &[u8], cfg: &DhcpConfig) -> Vec<DhcpLeaseResponse> {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(output) else {
+        return vec![];
+    };
+    let Some(items) = value.as_array() else {
+        return vec![];
+    };
+
+    let mut leases = Vec::new();
+    for item in items {
+        if !neighbor_state_is_usable(item) {
+            continue;
+        }
+        let Some(ip) = item.get("dst").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let Some(mac) = item.get("lladdr").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        if !is_valid_ipv4_addr(ip) || !dhcp_config_contains_client_ip(cfg, ip) {
+            continue;
+        }
+
+        leases.push(DhcpLeaseResponse {
+            mac: mac.to_ascii_lowercase(),
+            ip_address: ip.to_string(),
+            hostname: hostname_for_dhcp_client(cfg, ip, mac),
+            starts: String::new(),
+            ends: String::new(),
+            state: "active".to_string(),
+        });
+    }
+
+    leases.sort_by(|a, b| a.ip_address.cmp(&b.ip_address).then(a.mac.cmp(&b.mac)));
+    leases.dedup_by(|a, b| a.ip_address == b.ip_address && a.mac.eq_ignore_ascii_case(&b.mac));
+    leases
+}
+
+async fn read_neighbor_dhcp_clients(
+    cfg: Option<&DhcpConfig>,
+    requested_iface: Option<&str>,
+) -> Vec<DhcpLeaseResponse> {
+    let Some(cfg) = cfg.filter(|cfg| cfg.enabled) else {
+        return vec![];
+    };
+
+    let iface = requested_iface
+        .filter(|iface| dhcp_config_matches_requested_iface(Some(cfg), iface))
+        .unwrap_or_else(|| cfg.interface.as_str())
+        .trim();
+    if iface.is_empty() {
+        return vec![];
+    }
+
+    let output = match Command::new("ip")
+        .args(["-j", "-4", "neigh", "show", "dev", iface])
+        .output()
+        .await
+    {
+        Ok(output) => output,
+        Err(error) => {
+            warn!(interface = %iface, error = %error, "dhcp: failed to run ip neigh fallback");
+            return vec![];
+        }
+    };
+
+    if !output.status.success() {
+        warn!(
+            interface = %iface,
+            stderr = %String::from_utf8_lossy(&output.stderr),
+            "dhcp: ip neigh fallback returned non-zero status"
+        );
+        return vec![];
+    }
+
+    let leases = parse_ip_neighbor_json(&output.stdout, cfg);
+    info!(
+        interface = %iface,
+        leases = leases.len(),
+        "dhcp: parsed active clients from neighbor table fallback"
+    );
+    leases
+}
+
 #[cfg(test)]
 mod kea4_lease_parser_tests {
     use super::{
-        dhcp_config_matches_requested_iface, parse_csv_line, parse_kea4_lease_line, DhcpConfig,
+        dhcp_config_matches_requested_iface, parse_csv_line, parse_ip_neighbor_json,
+        parse_kea4_lease_line, DhcpConfig, DhcpReservation, DhcpScope,
     };
+    use uuid::Uuid;
 
     #[test]
     fn parses_legacy_kea4_lease_csv() {
@@ -964,6 +1129,44 @@ mod kea4_lease_parser_tests {
         assert!(!dhcp_config_matches_requested_iface(Some(&ens19), "ens20"));
         assert!(dhcp_config_matches_requested_iface(None, "ens19"));
     }
+
+    #[test]
+    fn parses_neighbor_json_as_active_pool_clients() {
+        let cfg = DhcpConfig {
+            enabled: true,
+            interface: "ens19".to_string(),
+            scopes: vec![DhcpScope {
+                id: Uuid::new_v4(),
+                subnet: "192.168.20.0/24".to_string(),
+                pool_start: "192.168.20.100".to_string(),
+                pool_end: "192.168.20.200".to_string(),
+                gateway: Some("192.168.20.1".to_string()),
+                dns_servers: vec![],
+                lease_seconds: 86400,
+                domain_name: None,
+                reservations: vec![DhcpReservation {
+                    id: Uuid::new_v4(),
+                    mac_address: "aa:bb:cc:dd:ee:ff".to_string(),
+                    ip_address: "192.168.20.50".to_string(),
+                    hostname: Some("printer".to_string()),
+                    description: String::new(),
+                }],
+            }],
+        };
+        let json = br#"[
+            {"dst":"192.168.20.120","dev":"ens19","lladdr":"11:22:33:44:55:66","state":["STALE"]},
+            {"dst":"192.168.20.50","dev":"ens19","lladdr":"aa:bb:cc:dd:ee:ff","state":["REACHABLE"]},
+            {"dst":"192.168.30.10","dev":"ens19","lladdr":"de:ad:be:ef:00:01","state":["REACHABLE"]},
+            {"dst":"192.168.20.121","dev":"ens19","lladdr":"22:22:22:22:22:22","state":["FAILED"]}
+        ]"#;
+
+        let leases = parse_ip_neighbor_json(json, &cfg);
+        assert_eq!(leases.len(), 2);
+        assert_eq!(leases[0].ip_address, "192.168.20.120");
+        assert_eq!(leases[0].state, "active");
+        assert_eq!(leases[1].ip_address, "192.168.20.50");
+        assert_eq!(leases[1].hostname, "printer");
+    }
 }
 
 /// Return DHCP leases parsed from DayShield's configured Kea memfile lease database.
@@ -973,10 +1176,29 @@ pub async fn list_active_leases(
     State(state): State<Arc<AppState>>,
     Query(query): Query<DhcpLeaseQuery>,
 ) -> impl IntoResponse {
-    let leases = read_kea4_leases().await;
+    let requested_iface = requested_dhcp_iface(&query).map(str::to_string);
+    let cfg_result = state.config_store.load_dhcp_config();
+    let mut lease_source = "kea";
+    let mut leases = read_kea4_leases().await;
 
-    if let Some(iface) = requested_dhcp_iface(&query) {
-        match state.config_store.load_dhcp_config() {
+    if leases.is_empty() {
+        let fallback = read_neighbor_dhcp_clients(
+            cfg_result.as_ref().ok().and_then(|cfg| cfg.as_ref()),
+            requested_iface.as_deref(),
+        )
+        .await;
+        if !fallback.is_empty() {
+            warn!(
+                leases = fallback.len(),
+                "dhcp: Kea lease files contained no active rows; using neighbor-table fallback"
+            );
+            leases = fallback;
+            lease_source = "neighbor";
+        }
+    }
+
+    if let Some(iface) = requested_iface.as_deref() {
+        match &cfg_result {
             Ok(cfg) if !dhcp_config_matches_requested_iface(cfg.as_ref(), iface) => {
                 warn!(
                     requested_iface = %iface,
@@ -997,6 +1219,10 @@ pub async fn list_active_leases(
         "data": leases,
         "leases": leases,
         "clients": leases,
+        "source": lease_source,
+        "meta": {
+            "leaseSource": lease_source
+        }
     }))
 }
 

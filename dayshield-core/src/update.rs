@@ -2233,6 +2233,24 @@ mod tests_boot {
     }
 }
 
+/// Returns true when /boot is currently mounted read-only.
+/// Probes by attempting a temporary write rather than parsing /proc/mounts,
+/// so it works regardless of how the filesystem was mounted.
+fn boot_is_readonly() -> bool {
+    let probe = Path::new("/boot/.dayshield-rw-probe");
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(probe)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(probe);
+            false
+        }
+        Err(_) => true,
+    }
+}
+
 fn copy_slot_boot_files_from_dir(source_boot: &Path, slot_name: &str) -> Result<()> {
     let vmlinuz = newest_boot_file(source_boot, "vmlinuz-")
         .or_else(|_| newest_boot_file(source_boot, "vmlinuz"))?;
@@ -2454,10 +2472,22 @@ async fn promote_secondary_to_primary(
             "a\n",
         )?;
 
+        // /boot may be read-only; remount RW for slot file and GRUB updates.
+        let boot_was_readonly = boot_is_readonly();
+        if boot_was_readonly {
+            run_system_command("mount", &["-o", "remount,rw", "/boot"])
+                .await
+                .context("failed to remount /boot read-write")?;
+        }
+
         copy_slot_boot_files_between_slots("b", "a")?;
         install_grub_ab_entries(layout, &primary_mount).await?;
         mirror_update_state_to_inactive(state, state_file, &primary_mount)?;
         run_system_command("sync", &[]).await?;
+
+        if boot_was_readonly {
+            let _ = run_system_command("mount", &["-o", "remount,ro", "/boot"]).await;
+        }
         Ok(())
     }
     .await;
@@ -2656,6 +2686,15 @@ async fn stage_rootfs_ab_update(
             format!("{}\n", layout.inactive.name),
         )?;
 
+        // /boot is often mounted read-only on appliances.  Remount it
+        // read-write for the duration of slot file and GRUB updates.
+        let boot_was_readonly = boot_is_readonly();
+        if boot_was_readonly {
+            run_system_command("mount", &["-o", "remount,rw", "/boot"])
+                .await
+                .context("failed to remount /boot read-write")?;
+        }
+
         let _ = copy_slot_boot_files_from_dir(Path::new("/boot"), &layout.active.name);
         copy_slot_boot_files_from_dir(&inactive_mount.join("boot"), &layout.inactive.name)?;
         install_grub_ab_entries(&layout, &inactive_mount).await?;
@@ -2689,6 +2728,11 @@ async fn stage_rootfs_ab_update(
         let target_entry = layout.inactive.grub_entry_id();
         run_system_command("grub-reboot", &[&target_entry]).await?;
         run_system_command("sync", &[]).await?;
+
+        // Restore /boot to read-only if it was read-only before staging.
+        if boot_was_readonly {
+            let _ = run_system_command("mount", &["-o", "remount,ro", "/boot"]).await;
+        }
 
         details.push(format!(
             "staged rootfs {} into slot {}; reboot will trial boot {}",

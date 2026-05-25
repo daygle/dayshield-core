@@ -277,6 +277,12 @@ pub fn system_firewall_rules(
     if matches!(firewall_settings.forward_policy, FirewallChainPolicy::Drop) {
         rules.push(system_default_block_rule("forward"));
     }
+    for iface in interfaces
+        .iter()
+        .filter(|iface| iface.enabled && !is_wan_interface(iface))
+    {
+        rules.extend(system_lan_service_rules(iface, ipv6_enabled));
+    }
     let management_ports = effective_management_ports(firewall_settings, system_settings);
     if firewall_settings.management_anti_lockout && !management_ports.is_empty() {
         rules.extend(system_management_rules(
@@ -287,6 +293,86 @@ pub fn system_firewall_rules(
     }
 
     rules
+}
+
+fn system_lan_service_rules(iface: &Interface, ipv6_enabled: bool) -> Vec<FirewallRule> {
+    let mut rules = vec![
+        system_lan_service_rule(
+            iface,
+            "dhcp4-server",
+            "Allow DHCPv4 requests from LAN clients",
+            Some(Protocol::Udp),
+            Some(68),
+            Some(67),
+            FirewallAddressFamily::Ipv4,
+        ),
+        system_lan_service_rule(
+            iface,
+            "dns-udp",
+            "Allow DNS over UDP from LAN clients",
+            Some(Protocol::Udp),
+            None,
+            Some(53),
+            FirewallAddressFamily::Ipv4Ipv6,
+        ),
+        system_lan_service_rule(
+            iface,
+            "dns-tcp",
+            "Allow DNS over TCP from LAN clients",
+            Some(Protocol::Tcp),
+            None,
+            Some(53),
+            FirewallAddressFamily::Ipv4Ipv6,
+        ),
+    ];
+
+    if ipv6_enabled {
+        rules.push(system_lan_service_rule(
+            iface,
+            "dhcp6-server",
+            "Allow DHCPv6 requests from LAN clients",
+            Some(Protocol::Udp),
+            Some(546),
+            Some(547),
+            FirewallAddressFamily::Ipv6,
+        ));
+    }
+
+    rules
+}
+
+fn system_lan_service_rule(
+    iface: &Interface,
+    service: &str,
+    description: &str,
+    protocol: Option<Protocol>,
+    source_port: Option<u16>,
+    destination_port: Option<u16>,
+    ip_family: FirewallAddressFamily,
+) -> FirewallRule {
+    FirewallRule {
+        id: stable_system_rule_id(
+            &iface.name,
+            "lan-service",
+            service,
+            &FirewallDirection::Input,
+        ),
+        description: Some(format!("{description} on {}", iface.name)),
+        priority: -175,
+        source: None,
+        destination: None,
+        protocol,
+        source_port,
+        destination_port,
+        ip_family,
+        action: Action::Accept,
+        direction: FirewallDirection::Input,
+        interface: Some(iface.name.clone()),
+        log: false,
+        enabled: true,
+        schedule: None,
+        state_limits: FirewallStateLimits::default(),
+    }
 }
 
 fn system_management_rules(
@@ -2088,8 +2174,8 @@ pub async fn get_rule_stats() -> Vec<RuleStats> {
 mod tests {
     use super::*;
     use crate::config::models::{
-        Action, AddressFamily, FirewallDirection, FirewallRule, NatConfig, NatProtocol, NatRule,
-        NatRuleType, NatTranslation, OutboundMode, Protocol,
+        Action, AddressFamily, FirewallDirection, FirewallRule, Interface, NatConfig, NatProtocol,
+        NatRule, NatRuleType, NatTranslation, OutboundMode, Protocol, WanMode,
     };
     use uuid::Uuid;
 
@@ -2112,6 +2198,34 @@ mod tests {
             schedule: None,
             ip_family: FirewallAddressFamily::Ipv4Ipv6,
             state_limits: crate::config::models::FirewallStateLimits::default(),
+        }
+    }
+
+    fn test_interface(name: &str, wan: bool) -> Interface {
+        Interface {
+            name: name.into(),
+            description: None,
+            addresses: vec![],
+            mtu: None,
+            mss: None,
+            enabled: true,
+            dhcp4: wan,
+            dhcp6: false,
+            accept_ra: false,
+            ipv6_mode: None,
+            track_source_interface: None,
+            track_prefix_id: None,
+            delegated_prefix_len: None,
+            ra_mode: None,
+            ia_pd_hint_len: None,
+            vlan: None,
+            parent_interface: None,
+            wan_mode: wan.then_some(WanMode::Dhcp),
+            pppoe_username: None,
+            pppoe_password: None,
+            gateway: None,
+            block_private_networks: false,
+            block_bogon_networks: false,
         }
     }
 
@@ -2266,6 +2380,47 @@ mod tests {
             .expect("system default drop rule must be present");
 
         assert!(allow_pos < default_drop_pos);
+    }
+
+    #[test]
+    fn lan_interfaces_allow_dns_and_dhcp_to_firewall() {
+        let interfaces = vec![test_interface("lan0", false), test_interface("wan0", true)];
+        let rs = generate_ruleset_with_captive_and_interfaces(
+            &[],
+            None,
+            &[],
+            None,
+            None,
+            &HashMap::new(),
+            false,
+            None,
+            &[],
+            &interfaces,
+        );
+
+        assert!(rs.contains("iifname \"lan0\" meta nfproto ipv4 udp sport 68 udp dport 67"));
+        assert!(rs.contains("iifname \"lan0\" udp dport 53"));
+        assert!(rs.contains("iifname \"lan0\" tcp dport 53"));
+        assert!(!rs.contains("iifname \"wan0\" udp dport 53"));
+    }
+
+    #[test]
+    fn lan_interfaces_allow_dhcpv6_when_ipv6_enabled() {
+        let interfaces = vec![test_interface("lan0", false)];
+        let rs = generate_ruleset_with_captive_and_interfaces(
+            &[],
+            None,
+            &[],
+            None,
+            None,
+            &HashMap::new(),
+            true,
+            None,
+            &[],
+            &interfaces,
+        );
+
+        assert!(rs.contains("iifname \"lan0\" meta nfproto ipv6 udp sport 546 udp dport 547"));
     }
 
     #[test]

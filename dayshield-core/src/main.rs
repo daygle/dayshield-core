@@ -347,7 +347,17 @@ fn resolve_bind_addr(ipv6_enabled: bool, settings: &SystemSettings) -> String {
 
 async fn reconcile_dhcp_runtime(config_store: &config::ConfigStore) {
     match config_store.load_dhcp_config() {
-        Ok(Some(cfg)) => {
+        Ok(Some(mut cfg)) => {
+            match config_store.load_interfaces() {
+                Ok(interfaces) => {
+                    if engine::dhcp::apply_interface_defaults(&mut cfg, &interfaces) {
+                        if let Err(err) = config_store.save_dhcp_config(cfg.clone()) {
+                            warn!("failed to persist DHCPv4 interface defaults: {err:#}");
+                        }
+                    }
+                }
+                Err(err) => warn!("failed to load interfaces for DHCPv4 defaults: {err:#}"),
+            }
             if let Err(err) = engine::dhcp::apply_config(&cfg).await {
                 warn!("failed to reconcile DHCPv4 runtime config: {err:#}");
             }

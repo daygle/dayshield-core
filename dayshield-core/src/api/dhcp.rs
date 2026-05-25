@@ -42,7 +42,13 @@ use crate::{
         normalize_ipv6_cidr, Dhcp6Config, Dhcp6Reservation, Dhcp6Scope, DhcpConfig,
         DhcpReservation, DhcpScope,
     },
-    engine::{dhcp::apply_config as apply_dhcp4_config, dhcp6::apply_config as apply_dhcp6_config},
+    engine::{
+        dhcp::{
+            apply_config as apply_dhcp4_config,
+            apply_interface_defaults as apply_dhcp4_interface_defaults,
+        },
+        dhcp6::apply_config as apply_dhcp6_config,
+    },
     state::AppState,
 };
 
@@ -274,6 +280,18 @@ fn normalize_dhcp_config_subnets(cfg: &mut DhcpConfig) {
             scope.subnet = normalized;
         }
     }
+}
+
+fn apply_dhcp4_interface_defaults_from_store(
+    cfg: &mut DhcpConfig,
+    state: &AppState,
+) -> Result<(), DhcpError> {
+    let interfaces = state
+        .config_store
+        .load_interfaces()
+        .map_err(DhcpError::StorageError)?;
+    apply_dhcp4_interface_defaults(cfg, &interfaces);
+    Ok(())
 }
 
 fn cidr_to_mask(cidr: &str) -> String {
@@ -561,6 +579,7 @@ pub async fn update_config(
     // --- Persist -----------------------------------------------------------
 
     normalize_dhcp_config_subnets(&mut cfg);
+    apply_dhcp4_interface_defaults_from_store(&mut cfg, &state)?;
     state
         .config_store
         .save_dhcp_config(cfg.clone())
@@ -693,6 +712,7 @@ pub async fn create_static_lease(
     cfg.scopes[0].reservations.push(reservation);
 
     normalize_dhcp_config_subnets(&mut cfg);
+    apply_dhcp4_interface_defaults_from_store(&mut cfg, &state)?;
     state
         .config_store
         .save_dhcp_config(cfg.clone())
@@ -745,6 +765,7 @@ pub async fn delete_static_lease(
     }
 
     normalize_dhcp_config_subnets(&mut cfg);
+    apply_dhcp4_interface_defaults_from_store(&mut cfg, &state)?;
     state
         .config_store
         .save_dhcp_config(cfg.clone())
@@ -1502,6 +1523,7 @@ pub async fn update_interface_dhcp_config(
     // --- Persist -----------------------------------------------------------
 
     normalize_dhcp_config_subnets(&mut cfg);
+    apply_dhcp4_interface_defaults_from_store(&mut cfg, &state)?;
     state
         .config_store
         .save_dhcp_config(cfg.clone())
@@ -1655,6 +1677,7 @@ pub async fn create_interface_static_lease(
     cfg.scopes[0].reservations.push(reservation);
 
     normalize_dhcp_config_subnets(&mut cfg);
+    apply_dhcp4_interface_defaults_from_store(&mut cfg, &state)?;
     state
         .config_store
         .save_dhcp_config(cfg.clone())
@@ -1717,6 +1740,7 @@ pub async fn delete_interface_static_lease(
     }
 
     normalize_dhcp_config_subnets(&mut cfg);
+    apply_dhcp4_interface_defaults_from_store(&mut cfg, &state)?;
     state
         .config_store
         .save_dhcp_config(cfg.clone())

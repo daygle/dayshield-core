@@ -16,7 +16,7 @@ use anyhow::Result;
 use serde_json::json;
 use tracing::info;
 
-use crate::config::models::{normalize_ipv4_cidr, DhcpConfig};
+use crate::config::models::{ipv4_addr_in_cidr, normalize_ipv4_cidr, DhcpConfig, Interface};
 use crate::engine::kea::{self, KeaServer};
 
 /// Path to the Kea memfile lease database.
@@ -25,6 +25,67 @@ pub const KEA_LEASES_PATH: &str = kea::DHCP4_LEASES_PATH;
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/// Fill DHCP defaults that depend on the configured LAN interface.
+///
+/// DHCP clients need the router option to point at an address owned by the
+/// firewall on the served subnet. Falling back to the first usable subnet
+/// address is useful only when interface metadata is unavailable.
+pub fn apply_interface_defaults(config: &mut DhcpConfig, interfaces: &[Interface]) -> bool {
+    let Some(iface) = interfaces
+        .iter()
+        .find(|iface| iface.name == config.interface)
+    else {
+        return false;
+    };
+
+    let interface_ipv4_addresses = iface
+        .addresses
+        .iter()
+        .map(|address| {
+            address
+                .split_once('/')
+                .map(|(ip, _)| ip)
+                .unwrap_or(address.as_str())
+        })
+        .filter(|ip| !ip.contains(':') && ip.parse::<std::net::Ipv4Addr>().is_ok())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+
+    if interface_ipv4_addresses.is_empty() {
+        return false;
+    }
+
+    let mut changed = false;
+    for scope in &mut config.scopes {
+        let Some(router) = interface_ipv4_addresses
+            .iter()
+            .find(|ip| ipv4_addr_in_cidr(ip, &scope.subnet))
+            .cloned()
+        else {
+            continue;
+        };
+
+        let current_gateway = scope
+            .gateway
+            .as_deref()
+            .map(str::trim)
+            .filter(|gateway| !gateway.is_empty());
+        let gateway_is_interface_address = current_gateway
+            .map(|gateway| {
+                interface_ipv4_addresses.iter().any(|ip| ip == gateway)
+                    && ipv4_addr_in_cidr(gateway, &scope.subnet)
+            })
+            .unwrap_or(false);
+
+        if !gateway_is_interface_address {
+            scope.gateway = Some(router);
+            changed = true;
+        }
+    }
+
+    changed
+}
 
 /// Generate a complete Kea DHCPv4 JSON configuration as a `String`.
 ///
@@ -193,7 +254,7 @@ pub async fn apply_config(config: &DhcpConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::models::{DhcpReservation, DhcpScope};
+    use crate::config::models::{DhcpReservation, DhcpScope, Interface};
     use uuid::Uuid;
 
     fn base_scope() -> DhcpScope {
@@ -215,6 +276,34 @@ mod tests {
             enabled: true,
             interface: "eth1".into(),
             scopes: vec![base_scope()],
+        }
+    }
+
+    fn lan_interface(addresses: Vec<&str>) -> Interface {
+        Interface {
+            name: "eth1".into(),
+            description: None,
+            addresses: addresses.into_iter().map(str::to_string).collect(),
+            mtu: None,
+            mss: None,
+            enabled: true,
+            dhcp4: false,
+            dhcp6: false,
+            accept_ra: false,
+            ipv6_mode: None,
+            track_source_interface: None,
+            track_prefix_id: None,
+            delegated_prefix_len: None,
+            ra_mode: None,
+            ia_pd_hint_len: None,
+            vlan: None,
+            parent_interface: None,
+            wan_mode: None,
+            pppoe_username: None,
+            pppoe_password: None,
+            gateway: None,
+            block_private_networks: false,
+            block_bogon_networks: false,
         }
     }
 
@@ -266,6 +355,51 @@ mod tests {
         let out = generate_config(&cfg);
         assert!(out.contains("domain-name-servers"));
         assert!(out.contains("192.168.1.1"));
+    }
+
+    #[test]
+    fn interface_defaults_use_actual_lan_address_for_router() {
+        let mut cfg = base_config();
+        cfg.scopes[0].subnet = "192.168.50.0/24".into();
+        cfg.scopes[0].gateway = None;
+        cfg.scopes[0].dns_servers.clear();
+
+        let changed =
+            apply_interface_defaults(&mut cfg, &[lan_interface(vec!["192.168.50.254/24"])]);
+
+        assert!(changed);
+        assert_eq!(cfg.scopes[0].gateway.as_deref(), Some("192.168.50.254"));
+        let out = generate_config(&cfg);
+        assert!(out.contains("192.168.50.254"));
+        assert!(!out.contains("192.168.50.1"));
+    }
+
+    #[test]
+    fn interface_defaults_replace_stale_gateway_not_owned_by_interface() {
+        let mut cfg = base_config();
+        cfg.scopes[0].subnet = "192.168.50.0/24".into();
+        cfg.scopes[0].gateway = Some("192.168.50.1".into());
+
+        let changed =
+            apply_interface_defaults(&mut cfg, &[lan_interface(vec!["192.168.50.254/24"])]);
+
+        assert!(changed);
+        assert_eq!(cfg.scopes[0].gateway.as_deref(), Some("192.168.50.254"));
+    }
+
+    #[test]
+    fn interface_defaults_replace_gateway_from_wrong_scope() {
+        let mut cfg = base_config();
+        cfg.scopes[0].subnet = "192.168.50.0/24".into();
+        cfg.scopes[0].gateway = Some("192.168.1.1".into());
+
+        let changed = apply_interface_defaults(
+            &mut cfg,
+            &[lan_interface(vec!["192.168.1.1/24", "192.168.50.254/24"])],
+        );
+
+        assert!(changed);
+        assert_eq!(cfg.scopes[0].gateway.as_deref(), Some("192.168.50.254"));
     }
 
     #[test]

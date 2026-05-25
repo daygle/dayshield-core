@@ -848,9 +848,11 @@ pub async fn create_interface(
         apply_interface_with_ipv6(&iface, ipv6_enabled).await?;
         refresh_router_advertisements(&ifaces_to_save, ipv6_enabled).await;
 
+        apply_full_nftables_rules(&state).await?;
         if nat_wan_changed {
-            apply_full_nftables_rules(&state).await?;
             info!(name = %iface.name, "interfaces: synchronized NAT WAN interfaces and reapplied nftables");
+        } else {
+            info!(name = %iface.name, "interfaces: reapplied nftables for interface-dependent rules");
         }
 
         if gateways_changed {
@@ -964,18 +966,20 @@ pub async fn delete_interface(
             .await;
     }
 
-    if nat_wan_changed {
-        if let Err(err) = apply_full_nftables_rules(&state).await {
-            warn!(%name, error = %err, "interfaces: nftables apply failed after delete; restoring previous persisted config");
-            if let Err(restore_err) = restore_persisted_state(&state, previous_config).await {
-                return Err(InterfaceError::ApplyFailed(format!(
-                    "{}; failed to restore previous interface config: {}",
-                    err, restore_err
-                )));
-            }
-            return Err(err);
+    if let Err(err) = apply_full_nftables_rules(&state).await {
+        warn!(%name, error = %err, "interfaces: nftables apply failed after delete; restoring previous persisted config");
+        if let Err(restore_err) = restore_persisted_state(&state, previous_config).await {
+            return Err(InterfaceError::ApplyFailed(format!(
+                "{}; failed to restore previous interface config: {}",
+                err, restore_err
+            )));
         }
+        return Err(err);
+    }
+    if nat_wan_changed {
         info!(%name, "interfaces: synchronized NAT WAN interfaces and reapplied nftables");
+    } else {
+        info!(%name, "interfaces: reapplied nftables for interface-dependent rules");
     }
 
     if gateways_changed {

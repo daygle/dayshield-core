@@ -348,6 +348,10 @@ fn classify_system_source(unit: &str, message: &str) -> &'static str {
         || hay.contains("netplan")
     {
         "interfaces"
+    } else if hay.contains("honeypot") {
+        "honeypot"
+    } else if hay.contains("captive-portal") || hay.contains("captive_portal") {
+        "captive_portal"
     } else if hay.contains("backup") || hay.contains("restore") || hay.contains("snapshot") {
         "backup_restore"
     } else if hay.contains("update")

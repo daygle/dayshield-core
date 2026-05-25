@@ -1886,6 +1886,7 @@ pub enum AcmeDnsProvider {
     #[default]
     Manual,
     Cloudflare,
+    Namecheap,
 }
 
 /// Configuration for automatic TLS certificate management via ACME.

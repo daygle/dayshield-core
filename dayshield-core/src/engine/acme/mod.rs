@@ -296,11 +296,12 @@ impl AcmeEngine {
                     }
 
                     match self.config.dns_provider {
-                        AcmeDnsProvider::Manual => {
+                        AcmeDnsProvider::Manual | AcmeDnsProvider::Namecheap => {
                             warn!(
                                 domain = %domain,
                                 txt_name = format!("_acme-challenge.{domain}"),
                                 txt_value = %dns_value,
+                                provider = ?self.config.dns_provider,
                                 "acme: DNS-01 requires manual TXT record creation"
                             );
                             return Err(AcmeError::Dns01ManualRequired {

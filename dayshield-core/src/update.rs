@@ -52,7 +52,6 @@ const ALL_REPO_COMPONENTS: [RepoComponent; 3] = [
 /// GitHub Releases repository: https://github.com/daygle/dayshield-core
 /// Artifacts are attached to releases as: core-v1.2.3.tar.zst, ui-v1.2.3.tar.zst, etc.
 const DEFAULT_REGISTRY_URL: &str = "https://api.github.com/repos/daygle/dayshield-core";
-const DEFAULT_UPDATE_MODE: &str = "registry";
 
 fn default_core_repo_path() -> String {
     env::var("DAYSHIELD_UPDATE_CORE_PATH").unwrap_or_else(|_| "/opt/dayshield-core".to_string())
@@ -102,7 +101,7 @@ fn default_require_signed_commits() -> bool {
     false
 }
 
-fn default_verify_rootfs_manifest() -> bool {
+fn default_verify_rootfs_metadata() -> bool {
     true
 }
 
@@ -116,10 +115,6 @@ fn default_bootstrap_missing_rootfs_repo() -> bool {
 
 fn default_registry_url() -> String {
     env::var("DAYSHIELD_UPDATE_REGISTRY_URL").unwrap_or_else(|_| DEFAULT_REGISTRY_URL.to_string())
-}
-
-fn default_update_mode() -> String {
-    env::var("DAYSHIELD_UPDATE_MODE").unwrap_or_else(|_| DEFAULT_UPDATE_MODE.to_string())
 }
 
 fn default_auto_check_frequency() -> UpdateAutoCheckFrequency {
@@ -258,8 +253,8 @@ pub struct UpdateSettings {
     pub deploy_runtime_after_apply: bool,
     #[serde(default = "default_require_signed_commits")]
     pub require_signed_commits: bool,
-    #[serde(default = "default_verify_rootfs_manifest")]
-    pub verify_rootfs_manifest: bool,
+    #[serde(default = "default_verify_rootfs_metadata")]
+    pub verify_rootfs_metadata: bool,
     #[serde(default = "default_trusted_signers_file")]
     pub trusted_signers_file: String,
     #[serde(default = "default_bootstrap_missing_rootfs_repo")]
@@ -285,8 +280,6 @@ pub struct UpdateSettings {
     // New registry-based update settings
     #[serde(default = "default_registry_url")]
     pub registry_url: String,
-    #[serde(default = "default_update_mode")]
-    pub update_mode: String,
     #[serde(default = "default_verify_artifact_signatures")]
     pub verify_artifact_signatures: bool,
     #[serde(default = "default_encrypt_update_config_backups")]
@@ -306,7 +299,7 @@ impl Default for UpdateSettings {
             reboot_required_after_apply: default_reboot_required_after_apply(),
             deploy_runtime_after_apply: default_deploy_runtime_after_apply(),
             require_signed_commits: default_require_signed_commits(),
-            verify_rootfs_manifest: default_verify_rootfs_manifest(),
+            verify_rootfs_metadata: default_verify_rootfs_metadata(),
             trusted_signers_file: default_trusted_signers_file(),
             bootstrap_missing_rootfs_repo: default_bootstrap_missing_rootfs_repo(),
             core_repo_path: default_core_repo_path(),
@@ -319,7 +312,6 @@ impl Default for UpdateSettings {
             ui_branch: default_branch(),
             rootfs_branch: default_branch(),
             registry_url: default_registry_url(),
-            update_mode: default_update_mode(),
             verify_artifact_signatures: default_verify_artifact_signatures(),
             encrypt_update_config_backups: default_encrypt_update_config_backups(),
             enable_rootfs_ab_updates: default_enable_rootfs_ab_updates(),
@@ -537,22 +529,6 @@ struct GitHubRelease {
 struct GitHubAsset {
     pub name: String,
     pub browser_download_url: String,
-}
-
-fn registry_manifest_url(registry_url: &str) -> String {
-    let trimmed = registry_url.trim_end_matches('/');
-    if trimmed.ends_with(".json") {
-        trimmed.to_string()
-    } else {
-        format!("{trimmed}/manifest.json")
-    }
-}
-
-fn github_contents_manifest_url(github_api_url: &str) -> String {
-    format!(
-        "{}/contents/manifest.json",
-        github_api_url.trim_end_matches('/')
-    )
 }
 
 fn github_repo_parts(url: &str) -> Option<(String, String)> {
@@ -1680,38 +1656,18 @@ async fn query_registry(registry_url: &str) -> Result<RegistryManifest> {
     let client = reqwest::Client::new();
 
     if let Some(github_api_url) = github_repo_api_url(registry_url) {
-        match query_github_repo_manifest(&github_api_url, &client).await {
-            Ok(manifest) => return Ok(manifest),
-            Err(err) => {
-                let err_text = err.to_string();
-                if err_text.contains("HTTP 404") {
-                    info!(
-                        error = %err,
-                        "updates: GitHub manifest.json not found; falling back to releases/latest"
-                    );
-                } else {
-                    warn!(
-                        error = %err,
-                        "updates: failed to fetch GitHub manifest.json; falling back to releases/latest"
-                    );
-                }
-                return query_github_releases(&github_api_url, &client).await;
-            }
-        }
+        return query_github_releases(&github_api_url, &client).await;
     }
 
-    let manifest_url = registry_manifest_url(registry_url);
-    query_registry_manifest_url(&client, &manifest_url).await
+    anyhow::bail!(
+        "updates: registry URL must point to a GitHub repository"
+    )
 }
 
 async fn query_registry_with_component_fallbacks(
     settings: &UpdateSettings,
 ) -> Result<RegistryManifest> {
     let mut manifest = query_registry(&settings.registry_url).await?;
-
-    if !manifest.partial {
-        return Ok(manifest);
-    }
 
     let mut seen_components = manifest
         .components
@@ -1778,85 +1734,6 @@ async fn query_registry_with_component_fallbacks(
     }
 
     Ok(manifest)
-}
-
-async fn query_registry_manifest_url(
-    client: &reqwest::Client,
-    manifest_url: &str,
-) -> Result<RegistryManifest> {
-    let response = client
-        .get(manifest_url)
-        .send()
-        .await
-        .with_context(|| format!("failed to query registry manifest at {}", manifest_url))?;
-
-    if !response.status().is_success() {
-        anyhow::bail!(
-            "registry query failed: HTTP {} from {}",
-            response.status(),
-            manifest_url
-        );
-    }
-
-    response
-        .json()
-        .await
-        .with_context(|| format!("failed to parse registry manifest from {}", manifest_url))
-}
-
-async fn query_github_repo_manifest(
-    github_api_url: &str,
-    client: &reqwest::Client,
-) -> Result<RegistryManifest> {
-    let manifest_url = github_contents_manifest_url(github_api_url);
-    let mut request = client
-        .get(&manifest_url)
-        .header(
-            ACCEPT,
-            HeaderValue::from_static("application/vnd.github.raw+json"),
-        )
-        .header(USER_AGENT, HeaderValue::from_static(UPDATE_HTTP_USER_AGENT))
-        .header(
-            HeaderName::from_static("x-github-api-version"),
-            HeaderValue::from_static("2022-11-28"),
-        );
-
-    if let Ok(token) = env::var("DAYSHIELD_GITHUB_TOKEN")
-        .or_else(|_| env::var("GITHUB_TOKEN"))
-        .or_else(|_| env::var("GH_TOKEN"))
-    {
-        let token = token.trim();
-        if !token.is_empty() {
-            let value = HeaderValue::from_str(&format!("Bearer {}", token))
-                .context("invalid GitHub token value")?;
-            request = request.header(AUTHORIZATION, value);
-        }
-    }
-
-    let response = request
-        .send()
-        .await
-        .with_context(|| format!("failed to query GitHub manifest at {}", manifest_url))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        anyhow::bail!(
-            "GitHub manifest query failed: HTTP {} from {}{}",
-            status,
-            manifest_url,
-            if body.trim().is_empty() {
-                String::new()
-            } else {
-                format!(": {}", body.trim())
-            }
-        );
-    }
-
-    response
-        .json()
-        .await
-        .with_context(|| format!("failed to parse GitHub manifest from {}", manifest_url))
 }
 
 fn artifact_version_from_name(component: &str, asset_name: &str) -> Option<String> {
@@ -1970,7 +1847,7 @@ async fn populate_github_release_checksums(
     }
 }
 
-/// Query GitHub Releases API for latest release artifacts (legacy fallback).
+/// Query GitHub Releases API for latest release artifacts.
 async fn query_github_releases(
     github_api_url: &str,
     client: &reqwest::Client,
@@ -2795,69 +2672,25 @@ async fn build_component_status(
     state_file: &UpdateStateFile,
     component: RepoComponent,
 ) -> ComponentUpdateStatus {
-    let (repo_path, remote_url, branch) = component_config(settings, component);
+    let (repo_path, _remote_url, branch) = component_config(settings, component);
     let saved = find_component_state(state_file, component);
 
-    // Registry mode reads cached state from the most recent explicit check
-    // (manual or scheduled) and does not query the registry during status polls.
-    if settings.update_mode == "registry" {
-        return ComponentUpdateStatus {
-            component: component.as_str().to_string(),
-            repo_path,
-            branch,
-            valid_repo: true,
-            dirty_worktree: false,
-            current_commit: None,
-            remote_commit: None,
-            current_version: current_version_baseline(saved),
-            remote_version: saved.and_then(|s| s.remote_version.clone()),
-            update_available: saved.map(|s| s.update_available).unwrap_or(false),
-            rollback_commit: saved.and_then(|s| s.rollback_commit.clone()),
-            rollback_version: saved.and_then(|s| s.rollback_version.clone()),
-            last_applied_commit: None,
-            last_applied_version: saved.and_then(|s| s.last_applied_version.clone()),
-            last_error: saved.and_then(|s| s.last_error.clone()),
-        };
-    }
-
-    // Non-registry mode is no longer used by default but remains available if configured.
-    let inspect_result = inspect_repo(&repo_path, &remote_url, &branch).await;
-
-    match inspect_result {
-        Ok((current, remote, dirty)) => ComponentUpdateStatus {
-            component: component.as_str().to_string(),
-            repo_path,
-            branch,
-            valid_repo: true,
-            dirty_worktree: dirty,
-            update_available: current != remote,
-            current_commit: Some(current),
-            remote_commit: Some(remote),
-            current_version: saved.and_then(|s| s.current_version.clone()),
-            remote_version: None,
-            rollback_commit: saved.and_then(|s| s.rollback_commit.clone()),
-            rollback_version: saved.and_then(|s| s.rollback_version.clone()),
-            last_applied_commit: saved.and_then(|s| s.last_applied_commit.clone()),
-            last_applied_version: saved.and_then(|s| s.last_applied_version.clone()),
-            last_error: saved.and_then(|s| s.last_error.clone()),
-        },
-        Err(err) => ComponentUpdateStatus {
-            component: component.as_str().to_string(),
-            repo_path,
-            branch,
-            valid_repo: false,
-            dirty_worktree: false,
-            update_available: false,
-            current_commit: None,
-            remote_commit: None,
-            current_version: saved.and_then(|s| s.current_version.clone()),
-            remote_version: None,
-            rollback_commit: saved.and_then(|s| s.rollback_commit.clone()),
-            rollback_version: saved.and_then(|s| s.rollback_version.clone()),
-            last_applied_commit: saved.and_then(|s| s.last_applied_commit.clone()),
-            last_applied_version: saved.and_then(|s| s.last_applied_version.clone()),
-            last_error: Some(err.to_string()),
-        },
+    ComponentUpdateStatus {
+        component: component.as_str().to_string(),
+        repo_path,
+        branch,
+        valid_repo: true,
+        dirty_worktree: false,
+        current_commit: None,
+        remote_commit: None,
+        current_version: current_version_baseline(saved),
+        remote_version: saved.and_then(|s| s.remote_version.clone()),
+        update_available: saved.map(|s| s.update_available).unwrap_or(false),
+        rollback_commit: saved.and_then(|s| s.rollback_commit.clone()),
+        rollback_version: saved.and_then(|s| s.rollback_version.clone()),
+        last_applied_commit: None,
+        last_applied_version: saved.and_then(|s| s.last_applied_version.clone()),
+        last_error: saved.and_then(|s| s.last_error.clone()),
     }
 }
 
@@ -2866,10 +2699,6 @@ async fn bootstrap_missing_registry_remote_versions(
     settings: &UpdateSettings,
     state_file: &mut UpdateStateFile,
 ) {
-    if settings.update_mode != "registry" {
-        return;
-    }
-
     let has_missing_remote = ALL_REPO_COMPONENTS.iter().any(|component| {
         find_component_state(state_file, *component)
             .and_then(|saved| saved.remote_version.as_ref())
@@ -3140,33 +2969,6 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
                 );
             }
 
-            // Only flag missing components as errors for comprehensive manifests
-            // (manifest.json). When using the GitHub releases fallback (partial=true)
-            // each repo only publishes its own component, so absence of others is
-            // expected and should not surface as an error.
-            if !manifest.partial {
-                for component in [
-                    RepoComponent::Core,
-                    RepoComponent::Ui,
-                    RepoComponent::Rootfs,
-                ] {
-                    if seen_components.contains(component.as_str()) {
-                        continue;
-                    }
-
-                    let comp_state = ensure_component_state(&mut state_file, component);
-                    // Do not clear remote_version - preserve the last known value so the
-                    // UI can still display it. Only mark as not-updatable and flag the
-                    // missing-from-manifest state so the UI can style it appropriately.
-                    comp_state.update_available = false;
-                    comp_state.last_error = Some("missing from registry manifest".to_string());
-                    info!(
-                        component = component.as_str(),
-                        "updates: component not listed in registry manifest"
-                    );
-                }
-            }
-
             if !seen_components.contains(RepoComponent::Rootfs.as_str()) {
                 clear_appliance_rebuild_required(&mut state_file);
             }
@@ -3275,7 +3077,7 @@ async fn apply_updates_registry(
                 "apply",
                 "info",
                 format!(
-                    "No registry artifact entry for '{}' in current manifest; skipping",
+                    "No published artifact entry for '{}' in current release set; skipping",
                     comp.as_str()
                 ),
                 Some(comp.as_str()),
@@ -3667,7 +3469,6 @@ pub async fn rollback_updates(
 ) -> Result<UpdatesActionResult> {
     let _guard = op_lock().lock().await;
 
-    let settings = load_settings(state);
     let mut state_file = load_state(state);
     let selected = RepoComponent::from_update_component(component);
     ensure_registry_updatable_selection(&selected)?;
@@ -3692,39 +3493,16 @@ pub async fn rollback_updates(
     info!(component = ?component, "updates: rollback started");
 
     for comp in selected {
-        if settings.update_mode == "registry" {
-            let previous_version = {
-                let entry = ensure_component_state(&mut state_file, comp);
-                entry.rollback_version.clone()
-            };
+        let previous_version = {
+            let entry = ensure_component_state(&mut state_file, comp);
+            entry.rollback_version.clone()
+        };
 
-            let target_version = match previous_version {
-                Some(version) => version,
-                None => {
-                    let msg = format!("{}: no rollback snapshot/version available", comp.as_str());
-                    details.push(msg.clone());
-                    append_operation_log(
-                        &mut state_file,
-                        "rollback",
-                        "error",
-                        msg.clone(),
-                        Some(comp.as_str()),
-                    );
-                    continue;
-                }
-            };
-
-            let current_before = {
-                let entry = ensure_component_state(&mut state_file, comp);
-                entry.current_version.clone()
-            };
-
-            if let Err(err) = restore_runtime_from_snapshot(comp) {
-                let msg = format!("{}: rollback failed ({err})", comp.as_str());
-                {
-                    let entry = ensure_component_state(&mut state_file, comp);
-                    entry.last_error = Some(msg.clone());
-                }
+        let target_version = match previous_version {
+            Some(version) => version,
+            None => {
+                let msg = format!("{}: no rollback snapshot/version available", comp.as_str());
+                details.push(msg.clone());
                 append_operation_log(
                     &mut state_file,
                     "rollback",
@@ -3732,103 +3510,16 @@ pub async fn rollback_updates(
                     msg.clone(),
                     Some(comp.as_str()),
                 );
-                save_state(state, &state_file)?;
-                let status = get_status(state).await;
-                return Ok(UpdatesActionResult {
-                    operation: "rollback".to_string(),
-                    success: false,
-                    message: "rollback failed".to_string(),
-                    details: vec![msg],
-                    status,
-                });
-            }
-
-            {
-                let entry = ensure_component_state(&mut state_file, comp);
-                entry.current_version = Some(target_version.clone());
-                entry.last_applied_version = Some(target_version.clone());
-                entry.rollback_version = current_before.clone();
-                entry.last_error = None;
-            }
-
-            details.push(format!(
-                "{}: rolled back to {}",
-                comp.as_str(),
-                target_version
-            ));
-            append_operation_log_with_versions(
-                &mut state_file,
-                "rollback",
-                "success",
-                match current_before.as_deref() {
-                    Some(prev) => format!(
-                        "Rolled back {} from v{} to v{}",
-                        comp.as_str(),
-                        prev,
-                        target_version
-                    ),
-                    None => format!("Rolled back {} to v{}", comp.as_str(), target_version),
-                },
-                Some(comp.as_str()),
-                current_before.as_deref(),
-                Some(target_version.as_str()),
-            );
-            rolled_back_components += 1;
-            continue;
-        }
-
-        let (repo_path, _remote_url, _branch) = component_config(&settings, comp);
-
-        if let Err(err) = ensure_repo_writable(&repo_path) {
-            let msg = format!(
-                "{}: repository is read-only; rollback requires writable repo ({err})",
-                comp.as_str()
-            );
-            {
-                let entry = ensure_component_state(&mut state_file, comp);
-                entry.last_error = Some(msg.clone());
-            }
-            append_operation_log(
-                &mut state_file,
-                "rollback",
-                "error",
-                msg.clone(),
-                Some(comp.as_str()),
-            );
-            save_state(state, &state_file)?;
-            let status = get_status(state).await;
-            return Ok(UpdatesActionResult {
-                operation: "rollback".to_string(),
-                success: false,
-                message: "rollback failed".to_string(),
-                details: vec![msg],
-                status,
-            });
-        }
-
-        let target = {
-            let entry = ensure_component_state(&mut state_file, comp);
-            match &entry.rollback_commit {
-                Some(c) => c.clone(),
-                None => {
-                    details.push(format!("{}: no rollback commit available", comp.as_str()));
-                    continue;
-                }
+                continue;
             }
         };
 
-        let current = run_git(&repo_path, &["rev-parse", "HEAD"]).await?;
-        let result = reset_and_optionally_deploy(
-            &settings,
-            &mut state_file,
-            comp,
-            &target,
-            settings.deploy_runtime_after_apply,
-            &mut details,
-        )
-        .await;
+        let current_before = {
+            let entry = ensure_component_state(&mut state_file, comp);
+            entry.current_version.clone()
+        };
 
-        if let Err(err) = result {
+        if let Err(err) = restore_runtime_from_snapshot(comp) {
             let msg = format!("{}: rollback failed ({err})", comp.as_str());
             {
                 let entry = ensure_component_state(&mut state_file, comp);
@@ -3854,15 +3545,33 @@ pub async fn rollback_updates(
 
         {
             let entry = ensure_component_state(&mut state_file, comp);
-            entry.rollback_commit = Some(current);
+            entry.current_version = Some(target_version.clone());
+            entry.last_applied_version = Some(target_version.clone());
+            entry.rollback_version = current_before.clone();
             entry.last_error = None;
         }
-        append_operation_log(
+
+        details.push(format!(
+            "{}: rolled back to {}",
+            comp.as_str(),
+            target_version
+        ));
+        append_operation_log_with_versions(
             &mut state_file,
             "rollback",
             "success",
-            format!("Rolled back {}", comp.as_str()),
+            match current_before.as_deref() {
+                Some(prev) => format!(
+                    "Rolled back {} from v{} to v{}",
+                    comp.as_str(),
+                    prev,
+                    target_version
+                ),
+                None => format!("Rolled back {} to v{}", comp.as_str(), target_version),
+            },
             Some(comp.as_str()),
+            current_before.as_deref(),
+            Some(target_version.as_str()),
         );
         rolled_back_components += 1;
     }
@@ -3886,60 +3595,55 @@ pub async fn rollback_updates(
         });
     }
 
-    if settings.update_mode == "registry" {
-        let config_snapshot = state_file.config_rollback_path.clone();
-        let snapshot_path = match config_snapshot {
-            Some(path) => PathBuf::from(path),
-            None => {
-                append_operation_log(
-                    &mut state_file,
-                    "rollback",
-                    "error",
-                    "Rollback failed: no config backup archive available",
-                    None,
-                );
-                save_state(state, &state_file)?;
-                let status = get_status(state).await;
-                return Ok(UpdatesActionResult {
-                    operation: "rollback".to_string(),
-                    success: false,
-                    message: "rollback failed: no config backup archive available".to_string(),
-                    details,
-                    status,
-                });
-            }
-        };
-
-        if let Err(err) = restore_config_from_snapshot(state, &snapshot_path) {
-            let msg = format!(
-                "failed to restore config snapshot ({}): {}",
-                snapshot_path.display(),
-                err
+    let config_snapshot = state_file.config_rollback_path.clone();
+    let snapshot_path = match config_snapshot {
+        Some(path) => PathBuf::from(path),
+        None => {
+            append_operation_log(
+                &mut state_file,
+                "rollback",
+                "error",
+                "Rollback failed: no config backup archive available",
+                None,
             );
-            append_operation_log(&mut state_file, "rollback", "error", &msg, None);
             save_state(state, &state_file)?;
             let status = get_status(state).await;
             return Ok(UpdatesActionResult {
                 operation: "rollback".to_string(),
                 success: false,
-                message: "rollback failed".to_string(),
-                details: vec![msg],
+                message: "rollback failed: no config backup archive available".to_string(),
+                details,
                 status,
             });
         }
+    };
 
-        append_operation_log(
-            &mut state_file,
-            "rollback",
-            "success",
-            format!(
-                "Restored config backup archive: {}",
-                snapshot_path.display()
-            ),
-            None,
+    if let Err(err) = restore_config_from_snapshot(state, &snapshot_path) {
+        let msg = format!(
+            "failed to restore config snapshot ({}): {}",
+            snapshot_path.display(),
+            err
         );
-        state_file.config_rollback_path = None;
+        append_operation_log(&mut state_file, "rollback", "error", &msg, None);
+        save_state(state, &state_file)?;
+        let status = get_status(state).await;
+        return Ok(UpdatesActionResult {
+            operation: "rollback".to_string(),
+            success: false,
+            message: "rollback failed".to_string(),
+            details: vec![msg],
+            status,
+        });
     }
+
+    append_operation_log(
+        &mut state_file,
+        "rollback",
+        "success",
+        format!("Restored config backup archive: {}", snapshot_path.display()),
+        None,
+    );
+    state_file.config_rollback_path = None;
 
     state_file.last_applied_at = Some(Utc::now().to_rfc3339());
     state_file.pending_reboot = false;
@@ -4499,24 +4203,8 @@ pub async fn start_update_checker(state: std::sync::Arc<AppState>) {
 mod tests {
     use super::{
         artifact_version_from_name, checksum_from_text, github_repo_api_url, github_repo_slug,
-        registry_manifest_url, ArtifactMetadata, RegistryManifest,
+        ArtifactMetadata, RegistryManifest,
     };
-
-    #[test]
-    fn registry_manifest_url_appends_manifest_filename() {
-        assert_eq!(
-            registry_manifest_url("https://updates.example.com"),
-            "https://updates.example.com/manifest.json"
-        );
-        assert_eq!(
-            registry_manifest_url("https://updates.example.com/"),
-            "https://updates.example.com/manifest.json"
-        );
-        assert_eq!(
-            registry_manifest_url("https://updates.example.com/manifest.json"),
-            "https://updates.example.com/manifest.json"
-        );
-    }
 
     #[test]
     fn github_repo_slug_extracts_owner_and_repo() {

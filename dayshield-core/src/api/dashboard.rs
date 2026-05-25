@@ -1027,7 +1027,6 @@ fn build_dashboard_cards(inputs: DashboardCardInputs<'_>) -> Vec<DashboardCard> 
         "Core, UI, and rootfs update settings, validation, rollback, and appliance rebuild state"
             .to_string(),
         vec![
-            metric("Mode", update_settings.update_mode),
             metric("Auto check", yes_no(update_settings.auto_check_enabled)),
             metric(
                 "Signed commits",

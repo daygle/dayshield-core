@@ -11,9 +11,10 @@ use axum::{
 };
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
+use std::io::ErrorKind;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::process::Command;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::live_logs::{
     firewall::{parse_dmesg_firewall_line, parse_journald_firewall_line},
@@ -26,6 +27,7 @@ use crate::live_logs::{
 
 const DAYSHIELD_CORE_LOG_PATH: &str = "/var/log/dayshield/core.log";
 static LOGS_DMESG_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
+static UI_LOG_MISSING_WARNED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Deserialize)]
 pub struct SearchLogsQuery {
@@ -187,6 +189,11 @@ fn journal_has_no_files(stderr: &[u8]) -> bool {
     String::from_utf8_lossy(stderr).contains("No journal files were found")
 }
 
+fn dmesg_permission_denied(stderr: &[u8]) -> bool {
+    let stderr = String::from_utf8_lossy(stderr).to_lowercase();
+    stderr.contains("operation not permitted") || stderr.contains("read kernel buffer failed")
+}
+
 async fn query_journal_system(from: &str, to: &str) -> Result<Vec<LogEvent>, LogsApiError> {
     let out = Command::new("journalctl")
         .args([
@@ -224,6 +231,12 @@ async fn query_ui_range(from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<Lo
     let content = match tokio::fs::read_to_string(DAYSHIELD_UI_LOG_PATH).await {
         Ok(v) => v,
         Err(e) => {
+            if e.kind() == ErrorKind::NotFound {
+                if !UI_LOG_MISSING_WARNED.swap(true, Ordering::Relaxed) {
+                    info!(path = DAYSHIELD_UI_LOG_PATH, "logs/search: UI log not present yet; returning empty result");
+                }
+                return Ok(vec![]);
+            }
             warn!(error = %e, path = DAYSHIELD_UI_LOG_PATH, "logs/search: could not read UI log");
             return Ok(vec![]);
         }
@@ -374,10 +387,17 @@ async fn query_dmesg_firewall_range(
 
     if !out.status.success() {
         if !LOGS_DMESG_FALLBACK_WARNED.swap(true, Ordering::Relaxed) {
-            warn!(
-                stderr = %String::from_utf8_lossy(&out.stderr),
-                "logs/search: dmesg fallback returned non-zero status"
-            );
+            if dmesg_permission_denied(&out.stderr) {
+                info!(
+                    stderr = %String::from_utf8_lossy(&out.stderr),
+                    "logs/search: dmesg fallback unavailable without elevated kernel log access"
+                );
+            } else {
+                warn!(
+                    stderr = %String::from_utf8_lossy(&out.stderr),
+                    "logs/search: dmesg fallback returned non-zero status"
+                );
+            }
         }
         return Ok(vec![]);
     }

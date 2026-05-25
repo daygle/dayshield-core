@@ -1075,6 +1075,7 @@ pub async fn reboot(
 ) -> Result<impl IntoResponse, SystemApiError> {
     info!("system: reboot requested via API");
     tokio::process::Command::new("systemctl")
+        .arg("--no-block")
         .arg("reboot")
         .spawn()
         .map_err(|e| {
@@ -1096,6 +1097,7 @@ pub async fn shutdown(
 ) -> Result<impl IntoResponse, SystemApiError> {
     info!("system: shutdown requested via API");
     tokio::process::Command::new("systemctl")
+        .arg("--no-block")
         .arg("poweroff")
         .spawn()
         .map_err(|e| {

@@ -1128,25 +1128,7 @@ pub async fn get_ostree_status() -> impl IntoResponse {
 pub async fn check_ostree_updates() -> impl IntoResponse {
     match ostree::check_for_updates().await {
         Ok(result) => (StatusCode::OK, Json(serde_json::json!(result))).into_response(),
-        Err(err) => {
-            let status = ostree::status().await;
-            let code = if status.supported {
-                StatusCode::INTERNAL_SERVER_ERROR
-            } else {
-                StatusCode::NOT_IMPLEMENTED
-            };
-            (
-                code,
-                Json(serde_json::json!({
-                    "operation": "check",
-                    "success": false,
-                    "message": format!("failed to check OSTree updates: {err:#}"),
-                    "details": [],
-                    "status": status
-                })),
-            )
-                .into_response()
-        }
+        Err(err) => ostree_action_error_response("check", err).await,
     }
 }
 
@@ -1154,25 +1136,7 @@ pub async fn check_ostree_updates() -> impl IntoResponse {
 pub async fn stage_ostree_update() -> impl IntoResponse {
     match ostree::stage_update().await {
         Ok(result) => (StatusCode::OK, Json(serde_json::json!(result))).into_response(),
-        Err(err) => {
-            let status = ostree::status().await;
-            let code = if status.supported {
-                StatusCode::INTERNAL_SERVER_ERROR
-            } else {
-                StatusCode::NOT_IMPLEMENTED
-            };
-            (
-                code,
-                Json(serde_json::json!({
-                    "operation": "stage",
-                    "success": false,
-                    "message": format!("failed to stage OSTree update: {err:#}"),
-                    "details": [],
-                    "status": status
-                })),
-            )
-                .into_response()
-        }
+        Err(err) => ostree_action_error_response("stage", err).await,
     }
 }
 
@@ -1180,31 +1144,33 @@ pub async fn stage_ostree_update() -> impl IntoResponse {
 pub async fn apply_ostree_update() -> impl IntoResponse {
     match ostree::apply_update().await {
         Ok(result) => (StatusCode::OK, Json(serde_json::json!(result))).into_response(),
-        Err(err) => {
-            let status = ostree::status().await;
-            let code = if status.supported {
-                StatusCode::INTERNAL_SERVER_ERROR
-            } else {
-                StatusCode::NOT_IMPLEMENTED
-            };
-            (
-                code,
-                Json(serde_json::json!({
-                    "operation": "apply",
-                    "success": false,
-                    "message": format!("failed to apply OSTree update: {err:#}"),
-                    "details": [],
-                    "status": status
-                })),
-            )
-                .into_response()
-        }
+        Err(err) => ostree_action_error_response("apply", err).await,
     }
 }
 
 /// Handler: return compact reboot-required state for OSTree update UX.
 pub async fn get_ostree_reboot_required() -> impl IntoResponse {
     Json(ostree::reboot_state().await)
+}
+
+async fn ostree_action_error_response(operation: &str, err: anyhow::Error) -> axum::response::Response {
+    let status = ostree::status().await;
+    let code = if status.supported {
+        StatusCode::INTERNAL_SERVER_ERROR
+    } else {
+        StatusCode::NOT_IMPLEMENTED
+    };
+    (
+        code,
+        Json(serde_json::json!({
+            "operation": operation,
+            "success": false,
+            "message": format!("failed to {operation} OSTree updates: {err:#}"),
+            "details": [],
+            "status": status
+        })),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------

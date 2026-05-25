@@ -4,6 +4,8 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::process::Command;
 
+const MAX_COMMAND_OUTPUT_LINES: usize = 20;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OstreeDeployment {
@@ -87,8 +89,14 @@ pub async fn reboot_state() -> OstreeRebootState {
         supported: status.supported,
         reboot_required: status.reboot_required,
         update_available: status.update_available,
-        current_version: status.current_deployment.as_ref().and_then(|d| d.version.clone()),
-        target_version: status.available_update.as_ref().and_then(|d| d.version.clone()),
+        current_version: status
+            .current_deployment
+            .as_ref()
+            .and_then(|d| d.version.as_deref().map(str::to_string)),
+        target_version: status
+            .available_update
+            .as_ref()
+            .and_then(|d| d.version.as_deref().map(str::to_string)),
         checked_at: status.checked_at,
         last_error: status.last_error,
     }
@@ -197,7 +205,7 @@ fn summarize_output(stdout: &[u8], stderr: &[u8]) -> Vec<String> {
         .chain(String::from_utf8_lossy(stderr).lines())
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .take(20)
+        .take(MAX_COMMAND_OUTPUT_LINES)
         .map(str::to_string)
         .collect()
 }
@@ -226,7 +234,7 @@ fn parse_status_payload(payload: &str) -> Result<OstreeStatus> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let mut parsed: Vec<OstreeDeployment> = deployments
+    let parsed: Vec<OstreeDeployment> = deployments
         .iter()
         .map(parse_deployment)
         .collect::<Result<Vec<_>>>()?;
@@ -245,19 +253,14 @@ fn parse_status_payload(payload: &str) -> Result<OstreeStatus> {
         .map(parse_deployment)
         .transpose()?;
 
-    // Make sure current deployment is not reported as available update when only one deployment exists.
-    parsed.retain(|deployment| !deployment.booted);
-    let available_update = staged_deployment.clone().or_else(|| {
-        parsed
-            .into_iter()
-            .next()
-            .or_else(|| cached_update.clone())
-            .filter(|candidate| {
-                current
-                    .as_ref()
-                    .and_then(|deployed| deployed.version.as_ref())
-                    != candidate.version.as_ref()
-            })
+    let current_version = current.as_ref().and_then(|deployed| deployed.version.as_ref());
+    let first_non_booted = parsed.into_iter().find(|deployment| !deployment.booted);
+    let candidate_update = staged_deployment
+        .clone()
+        .or(first_non_booted)
+        .or(cached_update);
+    let available_update = candidate_update.filter(|candidate| {
+        current_version.map(|version| version.as_str()) != candidate.version.as_deref()
     });
 
     Ok(OstreeStatus {
@@ -281,6 +284,8 @@ fn parse_deployment(value: &Value) -> Result<OstreeDeployment> {
 
     Ok(OstreeDeployment {
         id: string_field("id"),
+        // rpm-ostree has used `osname` in JSON output; tolerate `os_name` for
+        // compatibility with tooling/fixtures that normalize snake_case.
         os_name: string_field("osname").or_else(|| string_field("os_name")),
         version: string_field("version"),
         checksum: string_field("checksum"),
@@ -360,5 +365,31 @@ mod tests {
             Some("1.2.0".to_string())
         );
         assert!(status.update_available);
+    }
+
+    #[test]
+    fn parse_status_does_not_report_cached_update_when_version_matches_current() {
+        let payload = r#"
+        {
+          "deployments": [
+            {
+              "id": "deployed",
+              "version": "1.0.0",
+              "checksum": "abc",
+              "booted": true
+            }
+          ],
+          "cached-update": {
+            "id": "cached",
+            "version": "1.0.0",
+            "checksum": "ghi"
+          }
+        }
+        "#;
+
+        let status = parse_status_payload(payload).expect("status should parse");
+        assert!(status.available_update.is_none());
+        assert!(!status.update_available);
+        assert!(!status.reboot_required);
     }
 }

@@ -664,7 +664,9 @@ pub enum FirewallChainPolicy {
 /// Whether per-rule/default block firewall logs should be emitted before or
 /// after the rule action.
 ///
-/// `After` suppresses logs for terminal drop/reject tails, which reduces noise.
+/// `Before` keeps drop/reject decisions visible in the firewall event stream.
+/// Terminal drop/reject rules are still logged before the verdict because nft
+/// cannot evaluate statements after a terminal verdict.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum LogPosition {
@@ -673,7 +675,7 @@ pub enum LogPosition {
 }
 
 fn default_log_position() -> LogPosition {
-    LogPosition::After
+    LogPosition::Before
 }
 
 /// Global firewall behavior that is not tied to individual allow/deny rules.

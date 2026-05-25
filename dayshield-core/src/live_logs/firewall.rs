@@ -3,7 +3,8 @@
 //!
 //! Because linking against `libsystemd` is undesirable in a portable crate,
 //! this module reads journald entries by spawning `journalctl` as a child
-//! process with `--output=json --follow --identifier=nftables`.
+//! process with `--output=json --follow`, matching both nftables-tagged
+//! messages and kernel-transport firewall logs.
 //!
 //! Each JSON line from journalctl is parsed for nftables key=value fields
 //! embedded in the `MESSAGE` field and mapped to a [`LogEvent::FirewallEvent`].
@@ -22,14 +23,17 @@
 
 use std::{
     collections::HashMap,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        OnceLock,
+    },
 };
 
 use chrono::{DateTime, TimeZone, Utc};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
-    sync::mpsc::Sender,
+    sync::{broadcast, mpsc::Sender},
     time::{Duration, Instant},
 };
 use tracing::{info, warn};
@@ -37,6 +41,9 @@ use tracing::{info, warn};
 use crate::live_logs::{journald_field_text, LogEvent};
 
 static FIREWALL_JOURNAL_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
+static FIREWALL_DMESG_UNAVAILABLE_WARNED: AtomicBool = AtomicBool::new(false);
+static FIREWALL_EVENTS: OnceLock<broadcast::Sender<LogEvent>> = OnceLock::new();
+const FIREWALL_BROADCAST_CAPACITY: usize = 1024;
 
 // ---------------------------------------------------------------------------
 // Public streaming function
@@ -44,13 +51,60 @@ static FIREWALL_JOURNAL_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// Stream nftables firewall log events from journald to `tx`.
 ///
-/// Spawns `journalctl --output=json --follow --identifier=nftables` and
+/// Spawns `journalctl --output=json --follow` for nftables/kernel messages and
 /// processes its output line by line.  Restarts automatically when the
 /// process exits unexpectedly.
 pub async fn stream_firewall(tx: Sender<LogEvent>) {
-    if !journal_has_firewall_entries().await {
+    let mut rx = shared_firewall_events().subscribe();
+
+    loop {
+        match rx.recv().await {
+            Ok(event) => {
+                if tx.send(event).await.is_err() {
+                    return;
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                warn!(
+                    skipped,
+                    "firewall: live log consumer lagged; skipped firewall events"
+                );
+            }
+            Err(broadcast::error::RecvError::Closed) => return,
+        }
+    }
+}
+
+fn shared_firewall_events() -> broadcast::Sender<LogEvent> {
+    FIREWALL_EVENTS
+        .get_or_init(|| {
+            let (broadcast_tx, _) = broadcast::channel(FIREWALL_BROADCAST_CAPACITY);
+            let forward_tx = broadcast_tx.clone();
+
+            tokio::spawn(async move {
+                let (source_tx, mut source_rx) =
+                    tokio::sync::mpsc::channel::<LogEvent>(FIREWALL_BROADCAST_CAPACITY);
+
+                tokio::spawn(async move {
+                    stream_firewall_source(source_tx).await;
+                });
+
+                while let Some(event) = source_rx.recv().await {
+                    let _ = forward_tx.send(event);
+                }
+
+                warn!("firewall: shared live log source stopped");
+            });
+
+            broadcast_tx
+        })
+        .clone()
+}
+
+async fn stream_firewall_source(tx: Sender<LogEvent>) {
+    if !journal_can_stream_firewall().await {
         if !FIREWALL_JOURNAL_FALLBACK_WARNED.swap(true, Ordering::Relaxed) {
-            warn!("firewall: journald has no nftables/kernel entries; using dmesg fallback");
+            warn!("firewall: journalctl is unavailable for nftables/kernel logs; using dmesg fallback");
         }
         stream_dmesg_firewall(tx).await;
         return;
@@ -59,18 +113,27 @@ pub async fn stream_firewall(tx: Sender<LogEvent>) {
     stream_journal_firewall(tx).await;
 }
 
-async fn journal_has_firewall_entries() -> bool {
+async fn journal_can_stream_firewall() -> bool {
     match Command::new("journalctl")
         .args([
             "--output=json",
-            "--lines=1",
-            "--identifier=nftables",
-            "--identifier=kernel",
+            "--lines=0",
+            "SYSLOG_IDENTIFIER=nftables",
+            "+",
+            "_TRANSPORT=kernel",
         ])
         .output()
         .await
     {
-        Ok(output) => !String::from_utf8_lossy(&output.stdout).trim().is_empty(),
+        Ok(output) if output.status.success() => true,
+        Ok(output) => {
+            warn!(
+                status = %output.status,
+                stderr = %String::from_utf8_lossy(&output.stderr),
+                "firewall: journalctl probe failed; using dmesg fallback"
+            );
+            false
+        }
         Err(error) => {
             warn!(error = %error, "firewall: failed to probe journalctl; using dmesg fallback");
             false
@@ -87,7 +150,9 @@ async fn stream_journal_firewall(tx: Sender<LogEvent>) {
                 "--output=json",
                 "--follow",
                 "--lines=50",
-                "--identifier=nftables",
+                "SYSLOG_IDENTIFIER=nftables",
+                "+",
+                "_TRANSPORT=kernel",
             ])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -170,19 +235,23 @@ async fn stream_dmesg_firewall(tx: Sender<LogEvent>) {
                     }
                 }
                 Ok(None) => {
-                    let immediate_exit = !saw_any_line && started_at.elapsed() < Duration::from_secs(2);
+                    let immediate_exit =
+                        !saw_any_line && started_at.elapsed() < Duration::from_secs(2);
                     if immediate_exit {
                         immediate_exit_count = immediate_exit_count.saturating_add(1);
                         let delay_secs = 2_u64.pow(immediate_exit_count.min(8));
-                        warn!(
-                            attempt = immediate_exit_count,
-                            delay_secs,
-                            "firewall: dmesg exited immediately; likely unavailable (permissions/kernel access), backing off"
-                        );
+                        if !FIREWALL_DMESG_UNAVAILABLE_WARNED.swap(true, Ordering::Relaxed) {
+                            warn!(
+                                attempt = immediate_exit_count,
+                                delay_secs,
+                                "firewall: dmesg exited immediately; likely unavailable (permissions/kernel access), backing off"
+                            );
+                        }
                         let _ = child.kill().await;
                         tokio::time::sleep(Duration::from_secs(delay_secs)).await;
                     } else {
                         immediate_exit_count = 0;
+                        FIREWALL_DMESG_UNAVAILABLE_WARNED.store(false, Ordering::Relaxed);
                         info!("firewall: dmesg exited, restarting");
                         let _ = child.kill().await;
                         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -248,8 +317,14 @@ fn normalize_dmesg_firewall_message(line: &str) -> Option<String> {
     if let Some((_, rest)) = action.rsplit_once("kernel:") {
         action = rest;
     }
-    if let Some((_, rest)) = action.rsplit_once(']') {
+    let trimmed = action.trim_start();
+    if let Some(rest) = trimmed
+        .strip_prefix('[')
+        .and_then(|value| value.split_once(']').map(|(_, rest)| rest))
+    {
         action = rest;
+    } else {
+        action = trimmed;
     }
 
     let action = action.trim_matches(|ch: char| ch.is_whitespace() || ch == ':');
@@ -481,6 +556,18 @@ mod tests {
                 assert_eq!(action, "DROP");
                 assert_eq!(src_ip, "10.0.0.5");
                 assert_eq!(dport, 443);
+            }
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_parse_dmesg_firewall_line_keeps_rule_id_prefix_action() {
+        let line = "[  123.456789] DROP dayshield[5a2f]: IN=eth0 OUT= SRC=10.0.0.5 DST=10.0.0.1 PROTO=TCP SPT=12345 DPT=443";
+        let event = parse_dmesg_firewall_line(line).expect("should parse");
+        match event {
+            LogEvent::FirewallEvent { action, .. } => {
+                assert_eq!(action, "DROP dayshield[5a2f]");
             }
             _ => panic!("unexpected variant"),
         }

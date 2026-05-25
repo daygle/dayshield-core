@@ -363,7 +363,7 @@ fn system_default_block_rule(direction: &str) -> FirewallRule {
         action: Action::Drop,
         direction: chain_direction,
         interface: None,
-        log: false,
+        log: true,
         enabled: true,
         schedule: None,
         state_limits: FirewallStateLimits::default(),
@@ -422,7 +422,7 @@ fn system_block_rule(
         action: Action::Drop,
         direction,
         interface: Some(iface.name.clone()),
-        log: false,
+        log: true,
         enabled: true,
         schedule: None,
         state_limits: FirewallStateLimits::default(),
@@ -680,6 +680,9 @@ pub fn generate_ruleset_with_captive_and_interfaces(
             ));
         }
     }
+    if let Some(nat) = nat_config {
+        append_automatic_outbound_forward_rules(&mut out, nat);
+    }
     if matches!(settings.forward_policy, FirewallChainPolicy::Drop) {
         if matches!(settings.log_position, LogPosition::Before) {
             out.push_str(&format!(
@@ -742,6 +745,19 @@ pub fn generate_ruleset_with_captive_and_interfaces(
     out
 }
 
+fn append_automatic_outbound_forward_rules(out: &mut String, nat: &NatConfig) {
+    if !matches!(
+        nat.outbound_mode,
+        OutboundMode::Automatic | OutboundMode::Hybrid
+    ) {
+        return;
+    }
+
+    for iface in &nat.wan_interfaces {
+        out.push_str(&format!("        oifname \"{}\" accept\n", iface));
+    }
+}
+
 /// Write `rules` and `nat_config` as a complete nftables ruleset to a temp file
 /// and apply it with `nft -f <tempfile>`.
 ///
@@ -802,6 +818,10 @@ pub async fn apply_rules_with_captive(
         interfaces,
     );
 
+    if nat_requires_ipv4_forwarding(nat_config) {
+        enable_ipv4_forwarding_best_effort().await;
+    }
+
     let tmp_path = std::env::temp_dir().join(format!("dayshield-nft-{}.conf", Uuid::new_v4()));
 
     debug!(path = %tmp_path.display(), "nftables: writing ruleset to temp file");
@@ -845,6 +865,40 @@ pub async fn apply_rules_with_captive(
 
     info!("nftables: rules applied successfully");
     Ok(())
+}
+
+fn nat_requires_ipv4_forwarding(nat_config: Option<&NatConfig>) -> bool {
+    let Some(nat) = nat_config else {
+        return false;
+    };
+
+    (matches!(
+        nat.outbound_mode,
+        OutboundMode::Automatic | OutboundMode::Hybrid
+    ) && !nat.wan_interfaces.is_empty())
+        || nat.rules.iter().any(|rule| rule.enabled)
+}
+
+async fn enable_ipv4_forwarding_best_effort() {
+    let output = match Command::new("sysctl")
+        .args(["-w", "net.ipv4.ip_forward=1"])
+        .output()
+        .await
+    {
+        Ok(output) => output,
+        Err(error) => {
+            warn!(error = %error, "nftables: failed to spawn sysctl for IPv4 forwarding");
+            return;
+        }
+    };
+
+    if !output.status.success() {
+        warn!(
+            status = %output.status,
+            stderr = %String::from_utf8_lossy(&output.stderr),
+            "nftables: failed to enable IPv4 forwarding"
+        );
+    }
 }
 
 /// Flush the entire nftables ruleset via `nft flush ruleset`.
@@ -1373,18 +1427,9 @@ fn format_rule(rule: &FirewallRule, chain: FilterChain, log_position: &LogPositi
         }
     }
 
-    // Optional log statement before the verdict. A log-only action must emit a
-    // log and then continue evaluating later rules instead of accepting.
-    if matches!(rule.action, Action::Log)
-        || (rule.log && matches!(log_position, LogPosition::Before))
-    {
-        parts.push(format!("log prefix \"dayshield[{}]: \"", rule.id));
-    }
-
-    // Named counter so hit statistics can be read back via `nft list counters`.
-    parts.push(format!("counter name \"{}\"", counter_name(&rule.id)));
-
-    // Verdict.
+    let terminal_verdict = matches!(rule.action, Action::Drop | Action::Reject | Action::Jump);
+    let should_log = matches!(rule.action, Action::Log)
+        || (rule.log && (matches!(log_position, LogPosition::Before) || terminal_verdict));
     let action = match rule.action {
         Action::Accept => Some("accept"),
         Action::Drop => Some("drop"),
@@ -1394,11 +1439,53 @@ fn format_rule(rule: &FirewallRule, chain: FilterChain, log_position: &LogPositi
         Action::Jump => Some("drop"),
         Action::Log => None,
     };
+
+    if should_log && terminal_verdict {
+        let mut log_parts = parts.clone();
+        log_parts.push(format!(
+            "limit rate {}/second burst {} packets",
+            DEFAULT_BLOCK_LOG_RATE_PER_SECOND, DEFAULT_BLOCK_LOG_BURST_PACKETS
+        ));
+        log_parts.push(format!("log prefix \"{}\"", firewall_log_prefix(rule)));
+
+        let mut verdict_parts = parts;
+        verdict_parts.push(format!("counter name \"{}\"", counter_name(&rule.id)));
+        if let Some(action) = action {
+            verdict_parts.push(action.to_string());
+        }
+
+        return format!(
+            "{}\n        {}",
+            log_parts.join(" "),
+            verdict_parts.join(" ")
+        );
+    }
+
+    // Optional log statement before the verdict. A log-only action must emit a
+    // log and then continue evaluating later rules instead of accepting.
+    if should_log {
+        parts.push(format!("log prefix \"{}\"", firewall_log_prefix(rule)));
+    }
+
+    // Named counter so hit statistics can be read back via `nft list counters`.
+    parts.push(format!("counter name \"{}\"", counter_name(&rule.id)));
+
+    // Verdict.
     if let Some(action) = action {
         parts.push(action.to_string());
     }
 
     parts.join(" ")
+}
+
+fn firewall_log_prefix(rule: &FirewallRule) -> String {
+    let action = match rule.action {
+        Action::Accept => "ACCEPT",
+        Action::Drop | Action::Jump => "DROP",
+        Action::Reject => "REJECT",
+        Action::Log => "LOG",
+    };
+    format!("{action} dayshield[{}]: ", rule.id)
 }
 
 fn nft_rate(count: u32, seconds: u32) -> String {
@@ -2099,10 +2186,11 @@ mod tests {
     }
 
     #[test]
-    fn default_drop_policy_omits_logged_tail_rules_when_log_position_is_after() {
+    fn default_drop_policy_logs_tail_rules() {
         let rs = generate_ruleset(&[], None, &[], None, &HashMap::new());
-        assert!(!rs.contains("log prefix \"DEFAULT-BLOCK INPUT \""));
-        assert!(!rs.contains("log prefix \"DEFAULT-BLOCK FORWARD \""));
+        assert!(rs.contains("log prefix \"DEFAULT-BLOCK INPUT \""));
+        assert!(rs.contains("log prefix \"DEFAULT-BLOCK FORWARD \""));
+        assert!(rs.contains("log prefix \"DROP dayshield["));
     }
 
     #[test]
@@ -2259,7 +2347,10 @@ mod tests {
             ..FirewallSettings::default()
         };
         let rs = generate_ruleset(&[rule], None, &[], Some(&settings), &HashMap::new());
-        assert!(rs.contains("log prefix"), "log prefix must appear");
+        assert!(
+            rs.contains("log prefix \"ACCEPT dayshield["),
+            "log prefix must appear"
+        );
     }
 
     #[test]
@@ -2268,8 +2359,27 @@ mod tests {
             log: true,
             ..base_rule(0, Action::Accept)
         };
-        let rs = generate_ruleset(&[rule], None, &[], None, &HashMap::new());
-        assert!(!rs.contains("log prefix \"dayshield["));
+        let settings = FirewallSettings {
+            log_position: LogPosition::After,
+            ..FirewallSettings::default()
+        };
+        let rs = generate_ruleset(&[rule], None, &[], Some(&settings), &HashMap::new());
+        assert!(!rs.contains("log prefix \"ACCEPT dayshield["));
+    }
+
+    #[test]
+    fn logged_drop_rule_still_logs_when_log_position_is_after() {
+        let rule = FirewallRule {
+            log: true,
+            ..base_rule(0, Action::Drop)
+        };
+        let settings = FirewallSettings {
+            log_position: LogPosition::After,
+            ..FirewallSettings::default()
+        };
+        let rs = generate_ruleset(&[rule], None, &[], Some(&settings), &HashMap::new());
+        assert!(rs.contains("log prefix \"DROP dayshield["));
+        assert!(rs.contains("limit rate 10/second burst 20 packets"));
     }
 
     #[test]
@@ -2281,7 +2391,7 @@ mod tests {
         let rs = generate_ruleset(&[rule], None, &[], None, &HashMap::new());
         let log_line = rs
             .lines()
-            .find(|line| line.contains("log prefix \"dayshield["))
+            .find(|line| line.contains("log prefix \"LOG dayshield["))
             .expect("log-only rule must emit a log line");
         assert!(!log_line.contains(" accept"));
         assert!(!log_line.contains(" drop"));
@@ -2362,6 +2472,21 @@ mod tests {
     }
 
     #[test]
+    fn automatic_mode_generates_forward_allow_for_wan() {
+        let nat = NatConfig {
+            outbound_mode: OutboundMode::Automatic,
+            wan_interfaces: vec!["eth0".into()],
+            rules: vec![],
+            nat_reflection: false,
+        };
+        let rs = generate_ruleset(&[], Some(&nat), &[], None, &HashMap::new());
+        assert!(
+            rs.contains("oifname \"eth0\" accept"),
+            "automatic outbound NAT must allow forwarded LAN-to-WAN traffic"
+        );
+    }
+
+    #[test]
     fn automatic_mode_no_wan_interfaces_omits_nat_table() {
         let nat = NatConfig {
             outbound_mode: OutboundMode::Automatic,
@@ -2374,6 +2499,18 @@ mod tests {
             !rs.contains("table ip nat"),
             "nat table must not appear without WAN interfaces"
         );
+    }
+
+    #[test]
+    fn manual_mode_omits_automatic_forward_allow() {
+        let nat = NatConfig {
+            outbound_mode: OutboundMode::Manual,
+            wan_interfaces: vec!["eth0".into()],
+            rules: vec![masquerade_rule("eth0", Some("192.168.0.0/24"))],
+            nat_reflection: false,
+        };
+        let rs = generate_ruleset(&[], Some(&nat), &[], None, &HashMap::new());
+        assert!(!rs.contains("oifname \"eth0\" accept"));
     }
 
     #[test]

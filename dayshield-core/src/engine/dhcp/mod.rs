@@ -36,17 +36,27 @@ pub fn generate_config(config: &DhcpConfig) -> String {
     for (i, scope) in config.scopes.iter().enumerate() {
         let subnet = normalize_ipv4_cidr(&scope.subnet).unwrap_or_else(|| scope.subnet.clone());
         let pool_str = format!("{}-{}", scope.pool_start, scope.pool_end);
+        let router = scope
+            .gateway
+            .as_deref()
+            .map(str::trim)
+            .filter(|gateway| !gateway.is_empty())
+            .map(str::to_string)
+            .or_else(|| default_gateway_for_subnet(&subnet));
 
         let mut option_data = Vec::new();
-        if let Some(gw) = &scope.gateway {
-            if !gw.is_empty() {
-                option_data.push(json!({ "name": "routers", "data": gw }));
-            }
+        if let Some(gw) = &router {
+            option_data.push(json!({ "name": "routers", "data": gw }));
         }
-        if !scope.dns_servers.is_empty() {
+        let dns_servers = if scope.dns_servers.is_empty() {
+            router.iter().cloned().collect::<Vec<_>>()
+        } else {
+            scope.dns_servers.clone()
+        };
+        if !dns_servers.is_empty() {
             option_data.push(json!({
                 "name": "domain-name-servers",
-                "data": scope.dns_servers.join(", ")
+                "data": dns_servers.join(", ")
             }));
         }
         if let Some(dn) = &scope.domain_name {
@@ -138,6 +148,18 @@ pub fn generate_config(config: &DhcpConfig) -> String {
     serde_json::to_string_pretty(&kea_conf).unwrap_or_else(|_| "{}".to_string())
 }
 
+fn default_gateway_for_subnet(subnet: &str) -> Option<String> {
+    let (addr, prefix) = subnet.split_once('/')?;
+    let prefix = prefix.parse::<u32>().ok()?;
+    if prefix > 30 {
+        return None;
+    }
+
+    let octets = addr.parse::<std::net::Ipv4Addr>().ok()?.octets();
+    let network = u32::from_be_bytes(octets);
+    Some(std::net::Ipv4Addr::from(network.saturating_add(1)).to_string())
+}
+
 /// Apply the provided DHCP configuration to the running Kea DHCPv4 instance.
 ///
 /// Steps:
@@ -224,6 +246,25 @@ mod tests {
         let cfg = base_config();
         let out = generate_config(&cfg);
         assert!(out.contains("routers"));
+        assert!(out.contains("192.168.1.1"));
+    }
+
+    #[test]
+    fn generate_config_derives_router_when_gateway_missing() {
+        let mut cfg = base_config();
+        cfg.scopes[0].subnet = "192.168.50.0/24".into();
+        cfg.scopes[0].gateway = None;
+        let out = generate_config(&cfg);
+        assert!(out.contains("routers"));
+        assert!(out.contains("192.168.50.1"));
+    }
+
+    #[test]
+    fn generate_config_uses_router_as_dns_when_dns_missing() {
+        let mut cfg = base_config();
+        cfg.scopes[0].dns_servers.clear();
+        let out = generate_config(&cfg);
+        assert!(out.contains("domain-name-servers"));
         assert!(out.contains("192.168.1.1"));
     }
 

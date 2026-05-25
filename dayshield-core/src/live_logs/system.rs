@@ -37,7 +37,7 @@ static SYSTEM_JOURNAL_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
 pub async fn stream_system(tx: Sender<LogEvent>) {
     if !journal_has_system_entries().await {
         if !SYSTEM_JOURNAL_FALLBACK_WARNED.swap(true, Ordering::Relaxed) {
-            warn!(
+            info!(
                 path = DAYSHIELD_CORE_LOG_PATH,
                 "system: journald has no readable entries; tailing DayShield log file"
             );

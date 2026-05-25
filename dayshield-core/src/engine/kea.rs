@@ -30,6 +30,7 @@ pub const DHCP6_SYSTEM_CONF_PATH: &str = "/etc/kea/kea-dhcp6.conf";
 pub const DHCP6_LEASES_PATH: &str = "/var/lib/kea/kea-leases6.csv";
 
 static KEA_DIR_CHMOD_WARNED: AtomicBool = AtomicBool::new(false);
+static KEA_FILE_CHMOD_WARNED: AtomicBool = AtomicBool::new(false);
 
 const DHCP4_SERVICE_CANDIDATES: &[&str] = &[
     "isc-kea-dhcp4-server.service",
@@ -174,7 +175,6 @@ async fn disable_server(server: KeaServer) -> Result<()> {
 }
 
 async fn prepare_runtime(_server: KeaServer) -> Result<()> {
-
     std::fs::create_dir_all(CONFIG_DIR).context("failed to create /etc/kea")?;
     std::fs::create_dir_all(DAYSHIELD_CONFIG_DIR).context("failed to create /etc/dayshield")?;
     std::fs::create_dir_all(DATA_DIR).context("failed to create /var/lib/kea")?;
@@ -322,11 +322,7 @@ fn remove_config_if_exists(path: &str) -> Result<()> {
 
 #[cfg(unix)]
 fn set_directory_permissions_best_effort(path: &str) {
-    if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)) {
-        if !KEA_DIR_CHMOD_WARNED.swap(true, Ordering::Relaxed) {
-            warn!(path, error = %error, "kea: continuing after directory chmod failed");
-        }
-    }
+    set_permissions_best_effort(path, 0o755, true);
 }
 
 #[cfg(not(unix))]
@@ -334,13 +330,53 @@ fn set_directory_permissions_best_effort(_path: &str) {}
 
 #[cfg(unix)]
 fn set_file_permissions_best_effort(path: &str) {
-    if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)) {
-        warn!(path, error = %error, "kea: continuing after file chmod failed");
-    }
+    set_permissions_best_effort(path, 0o644, false);
 }
 
 #[cfg(not(unix))]
 fn set_file_permissions_best_effort(_path: &str) {}
+
+#[cfg(unix)]
+fn set_permissions_best_effort(path: &str, mode: u32, directory: bool) {
+    if permission_mode_matches(path, mode) {
+        return;
+    }
+
+    if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) {
+        let warned = if directory {
+            &KEA_DIR_CHMOD_WARNED
+        } else {
+            &KEA_FILE_CHMOD_WARNED
+        };
+        if warned.swap(true, Ordering::Relaxed) {
+            return;
+        }
+
+        let kind = if directory { "directory" } else { "file" };
+        if error.kind() == ErrorKind::PermissionDenied {
+            info!(
+                path,
+                mode = %format!("{mode:o}"),
+                error = %error,
+                "kea: {kind} chmod not permitted; continuing"
+            );
+        } else {
+            warn!(
+                path,
+                mode = %format!("{mode:o}"),
+                error = %error,
+                "kea: continuing after {kind} chmod failed"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+fn permission_mode_matches(path: &str, mode: u32) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.permissions().mode() & 0o777 == mode)
+        .unwrap_or(false)
+}
 
 #[cfg(test)]
 mod tests {

@@ -219,7 +219,7 @@ async fn query_core_log_range(
 async fn query_journal_firewall(from: &str, to: &str) -> Result<Vec<LogEvent>, LogsApiError> {
     let mut cmd = Command::new("journalctl");
     cmd.args(["--output=json", "--since", from, "--until", to])
-        .args(["--identifier=nftables", "--identifier=kernel"]);
+        .args(["SYSLOG_IDENTIFIER=nftables", "+", "_TRANSPORT=kernel"]);
 
     let out = cmd.output().await.map_err(|e| {
         LogsApiError::Search(format!("failed to run journalctl for firewall logs: {e}"))

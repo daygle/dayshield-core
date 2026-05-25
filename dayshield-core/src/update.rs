@@ -1756,12 +1756,22 @@ async fn query_registry_with_component_fallbacks(
                 }
             }
             Err(err) => {
-                warn!(
-                    component = component.as_str(),
-                    repo_url,
-                    error = %err,
-                    "updates: failed to query component repo release fallback"
-                );
+                let err_text = err.to_string();
+                if err_text.contains("HTTP 404") {
+                    info!(
+                        component = component.as_str(),
+                        repo_url,
+                        error = %err,
+                        "updates: component repo release fallback not found"
+                    );
+                } else {
+                    warn!(
+                        component = component.as_str(),
+                        repo_url,
+                        error = %err,
+                        "updates: failed to query component repo release fallback"
+                    );
+                }
             }
         }
     }

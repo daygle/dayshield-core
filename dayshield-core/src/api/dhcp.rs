@@ -986,14 +986,18 @@ fn ipv4_in_range(value: &str, start: &str, end: &str) -> bool {
     value >= start && value <= end
 }
 
+fn dhcp_scope_contains_client_ip(scope: &DhcpScope, ip: &str) -> bool {
+    ipv4_in_range(ip, &scope.pool_start, &scope.pool_end)
+        || scope
+            .reservations
+            .iter()
+            .any(|reservation| reservation.ip_address == ip)
+}
+
 fn dhcp_config_contains_client_ip(cfg: &DhcpConfig, ip: &str) -> bool {
-    cfg.scopes.iter().any(|scope| {
-        ipv4_in_range(ip, &scope.pool_start, &scope.pool_end)
-            || scope
-                .reservations
-                .iter()
-                .any(|reservation| reservation.ip_address == ip)
-    })
+    cfg.scopes
+        .iter()
+        .any(|scope| dhcp_scope_contains_client_ip(scope, ip))
 }
 
 fn hostname_for_dhcp_client(cfg: &DhcpConfig, ip: &str, mac: &str) -> String {
@@ -1005,6 +1009,16 @@ fn hostname_for_dhcp_client(cfg: &DhcpConfig, ip: &str, mac: &str) -> String {
         })
         .and_then(|reservation| reservation.hostname.clone())
         .unwrap_or_default()
+}
+
+fn lease_seconds_for_dhcp_client(cfg: &DhcpConfig, ip: &str) -> u32 {
+    cfg.scopes
+        .iter()
+        .find(|scope| dhcp_scope_contains_client_ip(scope, ip))
+        .map(|scope| scope.lease_seconds)
+        .or_else(|| cfg.scopes.first().map(|scope| scope.lease_seconds))
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(86400)
 }
 
 fn neighbor_state_is_usable(value: &serde_json::Value) -> bool {
@@ -1023,7 +1037,7 @@ fn neighbor_state_is_usable(value: &serde_json::Value) -> bool {
         .any(|state| matches!(state.as_str(), "FAILED" | "INCOMPLETE"))
 }
 
-fn parse_ip_neighbor_json(output: &[u8], cfg: &DhcpConfig) -> Vec<DhcpLeaseResponse> {
+fn parse_ip_neighbor_json_at(output: &[u8], cfg: &DhcpConfig, now: u64) -> Vec<DhcpLeaseResponse> {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(output) else {
         return vec![];
     };
@@ -1045,13 +1059,15 @@ fn parse_ip_neighbor_json(output: &[u8], cfg: &DhcpConfig) -> Vec<DhcpLeaseRespo
         if !is_valid_ipv4_addr(ip) || !dhcp_config_contains_client_ip(cfg, ip) {
             continue;
         }
+        let lease_seconds = lease_seconds_for_dhcp_client(cfg, ip);
+        let ends = now.saturating_add(u64::from(lease_seconds)).to_string();
 
         leases.push(DhcpLeaseResponse {
             mac: mac.to_ascii_lowercase(),
             ip_address: ip.to_string(),
             hostname: hostname_for_dhcp_client(cfg, ip, mac),
-            starts: String::new(),
-            ends: String::new(),
+            starts: now.to_string(),
+            ends,
             state: "active".to_string(),
         });
     }
@@ -1059,6 +1075,14 @@ fn parse_ip_neighbor_json(output: &[u8], cfg: &DhcpConfig) -> Vec<DhcpLeaseRespo
     leases.sort_by(|a, b| a.ip_address.cmp(&b.ip_address).then(a.mac.cmp(&b.mac)));
     leases.dedup_by(|a, b| a.ip_address == b.ip_address && a.mac.eq_ignore_ascii_case(&b.mac));
     leases
+}
+
+fn parse_ip_neighbor_json(output: &[u8], cfg: &DhcpConfig) -> Vec<DhcpLeaseResponse> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    parse_ip_neighbor_json_at(output, cfg, now)
 }
 
 async fn read_neighbor_dhcp_clients(
@@ -1110,7 +1134,7 @@ async fn read_neighbor_dhcp_clients(
 #[cfg(test)]
 mod kea4_lease_parser_tests {
     use super::{
-        dhcp_config_matches_requested_iface, parse_csv_line, parse_ip_neighbor_json,
+        dhcp_config_matches_requested_iface, parse_csv_line, parse_ip_neighbor_json_at,
         parse_kea4_lease_line, DhcpConfig, DhcpReservation, DhcpScope,
     };
     use uuid::Uuid;
@@ -1201,10 +1225,12 @@ mod kea4_lease_parser_tests {
             {"dst":"192.168.20.121","dev":"ens19","lladdr":"22:22:22:22:22:22","state":["FAILED"]}
         ]"#;
 
-        let leases = parse_ip_neighbor_json(json, &cfg);
+        let leases = parse_ip_neighbor_json_at(json, &cfg, 1_700_000_000);
         assert_eq!(leases.len(), 2);
         assert_eq!(leases[0].ip_address, "192.168.20.120");
         assert_eq!(leases[0].state, "active");
+        assert_eq!(leases[0].starts, "1700000000");
+        assert_eq!(leases[0].ends, "1700086400");
         assert_eq!(leases[1].ip_address, "192.168.20.50");
         assert_eq!(leases[1].hostname, "printer");
     }
@@ -1230,7 +1256,7 @@ pub async fn list_active_leases(
         .await;
         if !fallback.is_empty() {
             if !DHCP_NEIGHBOR_FALLBACK_WARNED.swap(true, Ordering::Relaxed) {
-                warn!(
+                info!(
                     leases = fallback.len(),
                     "dhcp: Kea lease files contained no active rows; using neighbor-table fallback"
                 );

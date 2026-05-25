@@ -25,7 +25,8 @@ use crate::{
     config::{
         models::{
             is_valid_ip, is_valid_mac, validate_captive_portal_config_with_ipv6,
-            CaptivePortalAuthMode, CaptivePortalConfig, CaptivePortalSession,
+            CaptivePortalAuthMode, CaptivePortalConfig, CaptivePortalSession, Interface, NatConfig,
+            OutboundMode,
         },
         ConfigStore,
     },
@@ -634,6 +635,7 @@ pub async fn apply_current_ruleset(config_store: &ConfigStore) -> Result<(), Cap
 
 pub async fn apply_current_ruleset_nft(config_store: &ConfigStore) -> Result<(), NftError> {
     let cfg = config_store.load().map_err(NftError::StorageError)?;
+    let nat = effective_nat_config(cfg.nat.clone(), &cfg.interfaces);
     let mut sessions = load_sessions(config_store).map_err(NftError::StorageError)?;
     let active_sessions = if let Some(portal) = cfg.captive_portal.as_ref() {
         if prune_expired_sessions(portal, &mut sessions) {
@@ -646,7 +648,7 @@ pub async fn apply_current_ruleset_nft(config_store: &ConfigStore) -> Result<(),
 
     apply_rules_with_captive(
         &cfg.firewall_rules,
-        cfg.nat.as_ref(),
+        nat.as_ref(),
         &cfg.firewall_aliases,
         cfg.firewall_settings.as_ref(),
         cfg.system_settings.as_ref(),
@@ -659,6 +661,32 @@ pub async fn apply_current_ruleset_nft(config_store: &ConfigStore) -> Result<(),
         &cfg.interfaces,
     )
     .await
+}
+
+fn effective_nat_config(nat: Option<NatConfig>, interfaces: &[Interface]) -> Option<NatConfig> {
+    let derived_wans = interfaces
+        .iter()
+        .filter(|iface| iface.enabled && (iface.wan_mode.is_some() || iface.gateway.is_some()))
+        .map(|iface| iface.name.clone())
+        .collect::<Vec<_>>();
+
+    match nat {
+        Some(mut nat) => {
+            if matches!(
+                nat.outbound_mode,
+                OutboundMode::Automatic | OutboundMode::Hybrid
+            ) && nat.wan_interfaces.is_empty()
+            {
+                nat.wan_interfaces = derived_wans;
+            }
+            Some(nat)
+        }
+        None if derived_wans.is_empty() => None,
+        None => Some(NatConfig {
+            wan_interfaces: derived_wans,
+            ..NatConfig::default()
+        }),
+    }
 }
 
 fn nft_error_to_portal_error(err: NftError) -> CaptivePortalError {

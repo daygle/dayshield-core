@@ -128,6 +128,10 @@ async fn main() -> anyhow::Result<()> {
     // the distro config mirrors before those services are expected healthy.
     reconcile_dhcp_runtime(&app_state.config_store).await;
 
+    if let Err(err) = captive_portal::apply_current_ruleset_nft(&app_state.config_store).await {
+        warn!("failed to reconcile nftables runtime config: {err:#}");
+    }
+
     // Start the background metrics collector.
     metrics::collector::start_metrics_collector(Arc::clone(&app_state)).await;
 

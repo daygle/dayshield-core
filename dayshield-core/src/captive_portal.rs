@@ -185,6 +185,17 @@ pub fn start_portal_server(state: Arc<AppState>) {
                 .ok()
                 .flatten()
                 .unwrap_or_default();
+
+            if !cfg.enabled {
+                if let Some((old_addr, handle)) = active.take() {
+                    info!(%old_addr, "captive-portal: stopping public portal listener (disabled)");
+                    handle.abort();
+                    state.set_unhealthy(SVC_CAPTIVE_PORTAL).await;
+                }
+                tokio::time::sleep(Duration::from_secs(LISTENER_CONFIG_POLL_SECONDS)).await;
+                continue;
+            }
+
             let addr = parse_listen_addr(&cfg).unwrap_or_else(|err| {
                 warn!(error = %err, "captive-portal: invalid listen address; using 0.0.0.0:8080");
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8080)

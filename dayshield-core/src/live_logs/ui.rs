@@ -10,7 +10,7 @@ use tokio::{
     io::AsyncWriteExt,
     sync::{broadcast, mpsc::Sender},
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::live_logs::LogEvent;
 
@@ -98,14 +98,14 @@ pub async fn append_record(record: &UiLogRecord) -> Result<(), std::io::Error> {
 
 /// Forward UI events from the in-memory broadcast channel into the live log stream.
 pub async fn stream_ui(tx: Sender<LogEvent>) {
-    info!("ui: live UI log subscriber connected");
+    debug!("ui: live UI log subscriber connected");
     let mut rx = subscribe();
 
     loop {
         match rx.recv().await {
             Ok(event) => {
                 if tx.send(event).await.is_err() {
-                    info!("ui: live UI log subscriber disconnected");
+                    debug!("ui: live UI log subscriber disconnected");
                     break;
                 }
             }

@@ -335,6 +335,8 @@ fn classify_system_source(unit: &str, message: &str) -> &'static str {
         || hay.contains("named")
     {
         "dns"
+    } else if hay.contains("kea") || hay.contains("dhcp") || hay.contains("dnsmasq") {
+        "dhcp"
     } else if hay.contains("gateway")
         || hay.contains("default route")
         || hay.contains("ip route")
@@ -360,8 +362,6 @@ fn classify_system_source(unit: &str, message: &str) -> &'static str {
         || hay.contains("rollback")
     {
         "updates"
-    } else if hay.contains("kea") || hay.contains("dhcp") || hay.contains("dnsmasq") {
-        "dhcp"
     } else if hay.contains("wireguard") || hay.contains("wg-") || hay.contains("vpn") {
         "vpn"
     } else if hay.contains("cloudflared") {

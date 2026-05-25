@@ -1653,7 +1653,10 @@ async fn download_artifact(url: &str, destination: &Path) -> Result<()> {
 
 /// Query artifact registry for latest versions
 async fn query_registry(registry_url: &str) -> Result<RegistryManifest> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("failed to build HTTP client")?;
 
     if let Some(github_api_url) = github_repo_api_url(registry_url) {
         return query_github_releases(&github_api_url, &client).await;
@@ -3190,7 +3193,23 @@ async fn apply_updates_registry(
             ));
 
             download_artifact(&artifact.download_url, &dest).await?;
-            verify_checksum(&dest, &artifact.checksum_sha256)?;
+            if artifact.checksum_sha256.is_empty() {
+                if settings.verify_artifact_signatures {
+                    anyhow::bail!(
+                        "no checksum available for {}-{}.tar.zst; cannot verify artifact integrity",
+                        artifact.component,
+                        artifact.version
+                    );
+                } else {
+                    warn!(
+                        component = %artifact.component,
+                        version = %artifact.version,
+                        "updates: no checksum available for artifact; skipping verification"
+                    );
+                }
+            } else {
+                verify_checksum(&dest, &artifact.checksum_sha256)?;
+            }
 
             downloads.push((artifact.component.clone(), artifact.version.clone(), dest));
             details.push(format!(

@@ -8,6 +8,11 @@
 //! - `PUT  /system/config`   - update host-level settings
 //! - `POST /system/reboot`   - schedule an immediate systemctl reboot
 //! - `POST /system/shutdown` - schedule an immediate systemctl poweroff
+//! - `GET  /system/ostree/status` - OSTree deployment/update status for appliance UI
+//! - `POST /system/ostree/check`  - check for OSTree updates
+//! - `POST /system/ostree/stage`  - pre-download OSTree update payload
+//! - `POST /system/ostree/apply`  - stage OSTree update deployment
+//! - `GET  /system/ostree/reboot-required` - report reboot-required state for OSTree updates
 //! - `GET  /system/updates/status`   - get artifact update status for core/ui
 //! - `GET  /system/updates/settings` - get update settings
 //! - `PUT  /system/updates/settings` - update settings (interval/reboot policy/registry)
@@ -36,6 +41,7 @@ use crate::{
         dns::apply_config_with_ipv6 as apply_dns_config, interfaces::refresh_router_advertisements,
         ipv6::apply_ipv6_setting, kea,
     },
+    ostree,
     state::{
         AppState, SVC_CLOUDFLARED, SVC_CROWDSEC, SVC_DHCP, SVC_DNS, SVC_NFTABLES, SVC_SURICATA,
         SVC_VPN,
@@ -1107,6 +1113,98 @@ pub async fn shutdown(
         .await
         .map_err(|e| SystemApiError::CommandError(format!("systemctl poweroff failed: {e}")))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// OSTree updates
+// ---------------------------------------------------------------------------
+
+/// Handler: return OSTree deployment/update status for UI workflow rendering.
+pub async fn get_ostree_status() -> impl IntoResponse {
+    Json(ostree::status().await)
+}
+
+/// Handler: trigger an immediate OSTree update check.
+pub async fn check_ostree_updates() -> impl IntoResponse {
+    match ostree::check_for_updates().await {
+        Ok(result) => (StatusCode::OK, Json(serde_json::json!(result))).into_response(),
+        Err(err) => {
+            let status = ostree::status().await;
+            let code = if status.supported {
+                StatusCode::INTERNAL_SERVER_ERROR
+            } else {
+                StatusCode::NOT_IMPLEMENTED
+            };
+            (
+                code,
+                Json(serde_json::json!({
+                    "operation": "check",
+                    "success": false,
+                    "message": format!("failed to check OSTree updates: {err:#}"),
+                    "details": [],
+                    "status": status
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Handler: pre-download OSTree payloads for an upcoming apply operation.
+pub async fn stage_ostree_update() -> impl IntoResponse {
+    match ostree::stage_update().await {
+        Ok(result) => (StatusCode::OK, Json(serde_json::json!(result))).into_response(),
+        Err(err) => {
+            let status = ostree::status().await;
+            let code = if status.supported {
+                StatusCode::INTERNAL_SERVER_ERROR
+            } else {
+                StatusCode::NOT_IMPLEMENTED
+            };
+            (
+                code,
+                Json(serde_json::json!({
+                    "operation": "stage",
+                    "success": false,
+                    "message": format!("failed to stage OSTree update: {err:#}"),
+                    "details": [],
+                    "status": status
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Handler: apply/stage OSTree update deployment.
+pub async fn apply_ostree_update() -> impl IntoResponse {
+    match ostree::apply_update().await {
+        Ok(result) => (StatusCode::OK, Json(serde_json::json!(result))).into_response(),
+        Err(err) => {
+            let status = ostree::status().await;
+            let code = if status.supported {
+                StatusCode::INTERNAL_SERVER_ERROR
+            } else {
+                StatusCode::NOT_IMPLEMENTED
+            };
+            (
+                code,
+                Json(serde_json::json!({
+                    "operation": "apply",
+                    "success": false,
+                    "message": format!("failed to apply OSTree update: {err:#}"),
+                    "details": [],
+                    "status": status
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Handler: return compact reboot-required state for OSTree update UX.
+pub async fn get_ostree_reboot_required() -> impl IntoResponse {
+    Json(ostree::reboot_state().await)
 }
 
 // ---------------------------------------------------------------------------

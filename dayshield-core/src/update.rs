@@ -2078,6 +2078,14 @@ async fn copy_persistent_path(mount_dir: &Path, path: &str) -> Result<()> {
             if mount_dir.starts_with(&entry_path) {
                 continue;
             }
+            // Skip the artifact-staging directory — it is transient, can be
+            // several hundred MB (rootfs + other update tarballs), and is
+            // removed from the inactive mount immediately after this loop.
+            // Copying it wastes space on the inactive partition and can cause
+            // ENOSPC on smaller devices.
+            if entry.file_name() == std::ffi::OsStr::new("update-staging") {
+                continue;
+            }
             run_system_command(
                 "cp",
                 &["-a", "--parents", &entry_path.to_string_lossy(), &mount_dir_arg],
@@ -2133,7 +2141,13 @@ fn newest_boot_file(source_boot: &Path, prefix: &str) -> Result<PathBuf> {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();
         if name == prefix.trim_end_matches('-') || name.starts_with(prefix) {
-            candidates.push(entry.path());
+            let path = entry.path();
+            // Exclude dangling symlinks: path.exists() follows symlinks and returns
+            // false when the ultimate target is missing (e.g. absolute symlinks in
+            // an extracted rootfs that point to /vmlinuz-* on the running system).
+            if path.exists() {
+                candidates.push(path);
+            }
         }
     }
     candidates.sort();
@@ -2227,10 +2241,34 @@ fn copy_slot_boot_files_from_dir(source_boot: &Path, slot_name: &str) -> Result<
     let slot_dir = Path::new(ROOTFS_BOOT_SLOT_DIR).join(format!("slot-{slot_name}"));
     fs::create_dir_all(&slot_dir)
         .with_context(|| format!("failed to create {}", slot_dir.display()))?;
-    fs::copy(&vmlinuz, slot_dir.join("vmlinuz"))
-        .with_context(|| format!("failed to copy {}", vmlinuz.display()))?;
-    fs::copy(&initrd, slot_dir.join("initrd.img"))
-        .with_context(|| format!("failed to copy {}", initrd.display()))?;
+
+    // Preflight write test so we can fail fast with a clearer message when
+    // /boot is read-only or out of space.
+    let write_probe = slot_dir.join(".dayshield-write-probe");
+    fs::write(&write_probe, b"probe").with_context(|| {
+        format!(
+            "boot slot directory {} is not writable (check /boot mount mode and free space)",
+            slot_dir.display()
+        )
+    })?;
+    let _ = fs::remove_file(&write_probe);
+
+    let vmlinuz_target = slot_dir.join("vmlinuz");
+    fs::copy(&vmlinuz, &vmlinuz_target).with_context(|| {
+        format!(
+            "failed to copy {} to {}",
+            vmlinuz.display(),
+            vmlinuz_target.display()
+        )
+    })?;
+    let initrd_target = slot_dir.join("initrd.img");
+    fs::copy(&initrd, &initrd_target).with_context(|| {
+        format!(
+            "failed to copy {} to {}",
+            initrd.display(),
+            initrd_target.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -2250,8 +2288,10 @@ fn copy_slot_boot_files_between_slots(source_slot: &str, target_slot: &str) -> R
                 target_slot
             );
         }
-        fs::copy(&source, target_dir.join(name))
-            .with_context(|| format!("failed to copy {}", source.display()))?;
+        let target = target_dir.join(name);
+        fs::copy(&source, &target).with_context(|| {
+            format!("failed to copy {} to {}", source.display(), target.display())
+        })?;
     }
 
     Ok(())
@@ -2553,8 +2593,14 @@ async fn stage_rootfs_ab_update(
                 while let Some(Ok(entry)) = rd.next() {
                     if let Some(name) = entry.file_name().to_str() {
                         if name.starts_with("vmlinuz") || name.starts_with("initrd.img") || name.starts_with("System.map") {
-                            boot_ok = true;
-                            break;
+                            // Only count the entry as present if it is actually
+                            // readable — dangling symlinks (e.g. absolute symlinks
+                            // in an extracted rootfs) must not suppress the
+                            // extract_boot_from_archive fallback.
+                            if entry.path().exists() {
+                                boot_ok = true;
+                                break;
+                            }
                         }
                     }
                 }
@@ -3205,12 +3251,12 @@ async fn apply_updates_registry(
             {
                 Ok(()) => continue,
                 Err(err) => {
-                    details.push(format!("FAILED to stage rootfs: {}", err));
+                    details.push(format!("FAILED to stage rootfs: {:#}", err));
                     append_operation_log(
                         &mut state_file,
                         "apply",
                         "error",
-                        format!("Failed to stage rootfs: {}", err),
+                        format!("Failed to stage rootfs: {:#}", err),
                         Some("rootfs"),
                     );
                     if let Some(entry) = state_file
@@ -3218,14 +3264,14 @@ async fn apply_updates_registry(
                         .iter_mut()
                         .find(|c| c.component == "rootfs")
                     {
-                        entry.last_error = Some(err.to_string());
+                        entry.last_error = Some(format!("{:#}", err));
                     }
                     save_state(state, &state_file)?;
 
                     return Ok(UpdatesActionResult {
                         operation: "apply".to_string(),
                         success: false,
-                        message: format!("failed to stage rootfs update: {}", err),
+                        message: format!("failed to stage rootfs update: {:#}", err),
                         details,
                         status: get_status(state).await,
                     });

@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveTime, Timelike, Utc};
 use reqwest::header::{HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde::{Deserialize, Serialize};
-use tokio::{process::Command, sync::Mutex};
+use tokio::{process::Command, sync::Mutex, time as tokio_time};
 use tracing::{info, warn};
 
 use crate::backup::{
@@ -2264,6 +2264,83 @@ fn newest_boot_file(source_boot: &Path, prefix: &str) -> Result<PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("no {} file found in {}", prefix, source_boot.display()))
 }
 
+// Extract only entries that are under boot/ (or ./boot/) from a zstd-compressed
+// tar archive into the provided destination path. This is a focused helper
+// that can be called from code and unit tests.
+fn extract_boot_from_archive(artifact_path: &Path, inactive_mount: &Path) -> Result<()> {
+    let artifact_file = std::fs::File::open(artifact_path)
+        .with_context(|| format!("failed to open artifact {}", artifact_path.display()))?;
+    let decoder = zstd::stream::Decoder::new(artifact_file)
+        .with_context(|| format!("failed to initialize zstd decoder for {}", artifact_path.display()))?;
+    let mut archive = tar::Archive::new(decoder);
+    for entry_res in archive.entries().with_context(|| "failed to read entries from rootfs archive")? {
+        let mut entry = entry_res.with_context(|| "failed to read archive entry")?;
+        let path = entry.path().with_context(|| "failed to get entry path")?;
+        let path_str = path.to_string_lossy();
+        if path_str.starts_with("boot/") || path_str.starts_with("./boot/") {
+            entry.unpack_in(inactive_mount).with_context(|| {
+                format!("failed to unpack {} into {}", path.display(), inactive_mount.display())
+            })?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests_boot {
+    use super::extract_boot_from_archive;
+    use std::fs::{self, File};
+    use std::io::Write;
+    use std::path::Path;
+    use tar::Builder;
+
+    #[test]
+    fn test_extract_boot_from_archive() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmpdir = tmp.path();
+
+        // create a small boot tree in a temp dir
+        let bootdir = tmpdir.join("boot-src");
+        fs::create_dir_all(&bootdir).unwrap();
+        let vmlinuz = bootdir.join("vmlinuz-test");
+        let mut f = File::create(&vmlinuz).unwrap();
+        writeln!(f, "kernel").unwrap();
+        let initrd = bootdir.join("initrd.img-test");
+        let mut f2 = File::create(&initrd).unwrap();
+        writeln!(f2, "initrd").unwrap();
+
+        // create a tar archive with boot/ files
+        let tar_path = tmpdir.join("rootfs.tar");
+        let tar_gz = File::create(&tar_path).unwrap();
+        let mut tar_builder = Builder::new(tar_gz);
+
+        tar_builder
+            .append_path_with_name(&vmlinuz, Path::new("boot").join("vmlinuz-test"))
+            .unwrap();
+        tar_builder
+            .append_path_with_name(&initrd, Path::new("boot").join("initrd.img-test"))
+            .unwrap();
+        tar_builder.finish().unwrap();
+
+        // compress with zstd
+        let tar_bytes = fs::read(&tar_path).unwrap();
+        let zst_path = tmpdir.join("rootfs.tar.zst");
+        let zst_file = File::create(&zst_path).unwrap();
+        zstd::stream::copy_encode(&tar_bytes[..], zst_file, 0).unwrap();
+
+        // prepare dest
+        let dest = tmpdir.join("dest");
+        fs::create_dir_all(&dest).unwrap();
+
+        // call helper
+        extract_boot_from_archive(&zst_path, &dest).expect("extract should succeed");
+
+        // assert files exist
+        assert!(dest.join("boot/vmlinuz-test").exists());
+        assert!(dest.join("boot/initrd.img-test").exists());
+    }
+}
+
 fn copy_slot_boot_files_from_dir(source_boot: &Path, slot_name: &str) -> Result<()> {
     let vmlinuz = newest_boot_file(source_boot, "vmlinuz-")
         .or_else(|_| newest_boot_file(source_boot, "vmlinuz"))?;
@@ -2518,19 +2595,131 @@ async fn stage_rootfs_ab_update(
 
     run_system_command("mount", &[&inactive_device_arg, &inactive_mount_arg]).await?;
 
+    // Ensure the inactive mount is writable; if it's mounted read-only try remounting RW.
+    let write_test = inactive_mount.join(".dayshield_write_test");
+    match std::fs::OpenOptions::new().write(true).create(true).open(&write_test) {
+        Ok(mut f) => {
+            let _ = f.write_all(b"ok");
+            let _ = std::fs::remove_file(&write_test);
+        }
+        Err(_) => {
+            append_operation_log(
+                state_file,
+                "apply",
+                "info",
+                format!("inactive mount {} appears read-only; attempting remount rw", inactive_mount.display()),
+                Some("rootfs"),
+            );
+            // attempt remount read-write
+            run_system_command("mount", &["-o", "remount,rw", &inactive_mount_arg]).await?;
+            // try write again
+            match std::fs::OpenOptions::new().write(true).create(true).open(&write_test) {
+                Ok(mut f) => {
+                    let _ = f.write_all(b"ok");
+                    let _ = std::fs::remove_file(&write_test);
+                }
+                Err(e) => {
+                    anyhow::bail!("inactive mount {} is not writable: {}", inactive_mount.display(), e);
+                }
+            }
+        }
+    }
+
     let result: Result<()> = async {
-        let artifact_file = std::fs::File::open(artifact_path)
-            .with_context(|| format!("failed to open artifact {}", artifact_path.display()))?;
-        let decoder = zstd::stream::Decoder::new(artifact_file).with_context(|| {
-            format!(
-                "failed to initialize zstd decoder for {}",
-                artifact_path.display()
-            )
-        })?;
-        let mut archive = tar::Archive::new(decoder);
-        archive.unpack(&inactive_mount).with_context(|| {
-            format!("failed to extract rootfs into {}", inactive_mount.display())
-        })?;
+        // Try to unpack the full archive with retries. The decoder consumes the
+        // underlying file, so reopen per attempt.
+        let mut unpack_ok = false;
+        for attempt in 1..=3 {
+            let artifact_file = std::fs::File::open(artifact_path)
+                .with_context(|| format!("failed to open artifact {}", artifact_path.display()))?;
+            let decoder = zstd::stream::Decoder::new(artifact_file).with_context(|| {
+                format!("failed to initialize zstd decoder for {}", artifact_path.display())
+            })?;
+            let mut archive = tar::Archive::new(decoder);
+            match archive.unpack(&inactive_mount) {
+                Ok(()) => {
+                    unpack_ok = true;
+                    break;
+                }
+                Err(e) => {
+                    append_operation_log(
+                        state_file,
+                        "apply",
+                        "warning",
+                        format!("attempt {} to extract rootfs failed: {}", attempt, e),
+                        Some("rootfs"),
+                    );
+                    if attempt < 3 {
+                        tokio_time::sleep(Duration::from_secs(2)).await;
+                        continue;
+                    } else {
+                        anyhow::bail!("failed to extract rootfs into {} after retries: {}", inactive_mount.display(), e);
+                    }
+                }
+            }
+        }
+
+        if !unpack_ok {
+            anyhow::bail!("failed to extract rootfs into {}", inactive_mount.display());
+        }
+
+        // Defensive check: ensure the extracted inactive mount has boot files.
+        // In some failure modes the boot directory can be missing (e.g. if mount failed
+        // or extraction was partial). If boot files are missing, extract only
+        // the boot/ tree from the artifact into the inactive mount to ensure the
+        // follow-up copy of boot files works reliably.
+        let boot_dir = inactive_mount.join("boot");
+        let mut boot_ok = false;
+        if boot_dir.exists() {
+            if let Ok(mut rd) = fs::read_dir(&boot_dir) {
+                while let Some(Ok(entry)) = rd.next() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        if name.starts_with("vmlinuz") || name.starts_with("initrd.img") || name.starts_with("System.map") {
+                            boot_ok = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !boot_ok {
+            append_operation_log(
+                state_file,
+                "apply",
+                "info",
+                format!("boot files missing in {} — extracting boot/ from artifact", inactive_mount.display()),
+                Some("rootfs"),
+            );
+
+            // helper: extract only entries that start with boot/ or ./boot/
+            fn extract_boot_from_archive(artifact_path: &Path, inactive_mount: &Path) -> Result<()> {
+                let artifact_file = std::fs::File::open(artifact_path)
+                    .with_context(|| format!("failed to open artifact {}", artifact_path.display()))?;
+                let decoder = zstd::stream::Decoder::new(artifact_file)
+                    .with_context(|| format!("failed to initialize zstd decoder for {}", artifact_path.display()))?;
+                let mut archive = tar::Archive::new(decoder);
+                for entry_res in archive.entries().with_context(|| "failed to read entries from rootfs archive")? {
+                    let mut entry = entry_res.with_context(|| "failed to read archive entry")?;
+                    let path = entry.path().with_context(|| "failed to get entry path")?;
+                    let path_str = path.to_string_lossy();
+                    if path_str.starts_with("boot/") || path_str.starts_with("./boot/") {
+                        entry.unpack_in(inactive_mount).with_context(|| {
+                            format!("failed to unpack {} into {}", path.display(), inactive_mount.display())
+                        })?;
+                    }
+                }
+                Ok(())
+            }
+
+            extract_boot_from_archive(artifact_path, &inactive_mount)
+                .with_context(|| format!("failed to extract boot/ from {}", artifact_path.display()))?;
+
+            // re-check boot_dir now
+            if !boot_dir.exists() {
+                anyhow::bail!("boot directory still missing after attempting extraction into {}", inactive_mount.display());
+            }
+        }
 
         copy_persistent_state_to_inactive(&inactive_mount).await?;
         write_rootfs_fstab(&inactive_mount, &layout, &layout.inactive)?;

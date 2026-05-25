@@ -48,17 +48,20 @@ impl Default for SystemSchedulesConfig {
                 SystemScheduleJobConfig {
                     job: ScheduleJobType::DynamicDnsUpdate,
                     enabled: false,
-                    interval_minutes: 10,
+                    // default to hourly for Dynamic DNS to reduce update frequency
+                    interval_minutes: 60,
                 },
                 SystemScheduleJobConfig {
                     job: ScheduleJobType::AcmeRenew,
                     enabled: false,
-                    interval_minutes: 360,
+                    // run ACME renewal checks once per day by default
+                    interval_minutes: 1440,
                 },
                 SystemScheduleJobConfig {
                     job: ScheduleJobType::SuricataRulesetsUpdate,
                     enabled: false,
-                    interval_minutes: 240,
+                    // check Suricata rulesets daily by default
+                    interval_minutes: 1440,
                 },
             ],
         }

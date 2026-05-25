@@ -1,0 +1,9 @@
+[Unit]
+Description=DayShield RootFS staging fixer
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/dayshield-fix-rootfs-staging.sh
+StandardOutput=journal
+StandardError=journal

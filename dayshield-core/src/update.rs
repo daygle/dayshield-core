@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     env, fs,
+    io::Write,
     path::{Path, PathBuf},
     process::Command as StdCommand,
     sync::OnceLock,
@@ -2275,7 +2276,7 @@ fn extract_boot_from_archive(artifact_path: &Path, inactive_mount: &Path) -> Res
     let mut archive = tar::Archive::new(decoder);
     for entry_res in archive.entries().with_context(|| "failed to read entries from rootfs archive")? {
         let mut entry = entry_res.with_context(|| "failed to read archive entry")?;
-        let path = entry.path().with_context(|| "failed to get entry path")?;
+        let path = entry.path().with_context(|| "failed to get entry path")?.into_owned();
         let path_str = path.to_string_lossy();
         if path_str.starts_with("boot/") || path_str.starts_with("./boot/") {
             entry.unpack_in(inactive_mount).with_context(|| {
@@ -2701,7 +2702,7 @@ async fn stage_rootfs_ab_update(
                 let mut archive = tar::Archive::new(decoder);
                 for entry_res in archive.entries().with_context(|| "failed to read entries from rootfs archive")? {
                     let mut entry = entry_res.with_context(|| "failed to read archive entry")?;
-                    let path = entry.path().with_context(|| "failed to get entry path")?;
+                    let path = entry.path().with_context(|| "failed to get entry path")?.into_owned();
                     let path_str = path.to_string_lossy();
                     if path_str.starts_with("boot/") || path_str.starts_with("./boot/") {
                         entry.unpack_in(inactive_mount).with_context(|| {

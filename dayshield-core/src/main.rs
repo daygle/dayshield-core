@@ -33,6 +33,7 @@ mod metrics;
 mod nat;
 mod notify;
 mod ntp;
+mod ostree;
 mod rules;
 mod schedules;
 mod state;

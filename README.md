@@ -63,3 +63,25 @@ cargo test -p dayshield-core
 - This repo focuses on core service behavior and API/runtime integration.
 - The UI frontend and appliance root filesystem are maintained in separate repositories.
 - Developers should validate changes with workspace build/test commands and ensure runtime integration compatibility.
+
+## OSTree update workflow endpoints
+
+`dayshield-core` now exposes a practical OSTree-focused backend slice:
+
+- `GET  /system/ostree/status` - full OSTree workflow status for UI cards/views
+- `POST /system/ostree/check` - run `rpm-ostree upgrade --check`
+- `POST /system/ostree/stage` - run `rpm-ostree upgrade --download-only`
+- `POST /system/ostree/apply` - run `rpm-ostree upgrade` (stages deployment for reboot)
+- `GET  /system/ostree/reboot-required` - compact reboot-required payload for UX banners
+
+### Assumptions
+
+- The appliance image provides `rpm-ostree` and supports `rpm-ostree status --json`.
+- OSTree operations are driven by CLI invocations in `dayshield-core` and are not yet mediated by a privileged helper/agent.
+
+### TODOs for production hardening
+
+- Gate `stage`/`apply` operations behind stricter authorization and audit policy hooks.
+- Add operation locking/queueing to prevent concurrent OSTree transactions.
+- Add stronger parsing for additional rpm-ostree JSON variants and explicit transaction-state reporting.
+- Add integration tests with mocked `rpm-ostree` command outputs (success, no-update, failure, command-missing).

@@ -2315,6 +2315,51 @@ fn copy_slot_boot_files_between_slots(source_slot: &str, target_slot: &str) -> R
     Ok(())
 }
 
+/// Generates a complete /boot/grub/grub.cfg that GRUB can boot directly.
+/// Uses the standard next_entry / saved_entry pattern so that grub-reboot
+/// can schedule a one-shot boot into the target slot.
+fn grub_cfg_content(layout: &RootfsAbLayout) -> String {
+    format!(
+        r#"# DayShield A/B system GRUB configuration
+insmod part_gpt
+insmod part_msdos
+insmod ext2
+insmod loadenv
+load_env
+
+if [ x"${{next_entry}}" = x ] ; then
+  set default="${{saved_entry}}"
+else
+  set default="${{next_entry}}"
+  set next_entry=
+  save_env next_entry
+  set boot_once=true
+fi
+if [ x"${{default}}" = x ] ; then
+  set default=dayshield-a
+fi
+
+set timeout=5
+set timeout_style=menu
+
+menuentry 'DayShield Primary System' --id 'dayshield-a' {{
+    search --no-floppy --fs-uuid --set=root {boot_uuid}
+    linux /dayshield/slot-a/vmlinuz root=UUID={slot_a_uuid} ro quiet splash
+    initrd /dayshield/slot-a/initrd.img
+}}
+
+menuentry 'DayShield Secondary System' --id 'dayshield-b' {{
+    search --no-floppy --fs-uuid --set=root {boot_uuid}
+    linux /dayshield/slot-b/vmlinuz root=UUID={slot_b_uuid} ro quiet splash
+    initrd /dayshield/slot-b/initrd.img
+}}
+"#,
+        boot_uuid = layout.boot_uuid,
+        slot_a_uuid = layout.slot_a.uuid,
+        slot_b_uuid = layout.slot_b.uuid
+    )
+}
+
 fn grub_script_content(layout: &RootfsAbLayout) -> String {
     format!(
         r#"#!/bin/sh
@@ -2372,32 +2417,33 @@ fn write_grub_saved_default(path: &Path) -> Result<()> {
 }
 
 async fn install_grub_ab_entries(layout: &RootfsAbLayout, inactive_mount: &Path) -> Result<()> {
-    let content = grub_script_content(layout);
-    fs::write(ROOTFS_GRUB_SCRIPT, &content)
-        .with_context(|| format!("failed to write {ROOTFS_GRUB_SCRIPT}"))?;
+    // Write the grub snippet and /etc/default/grub into the inactive mount so
+    // the new system has them after promotion (e.g., for manual grub-mkconfig runs).
+    let script_content = grub_script_content(layout);
     let inactive_script = rootfs_target_path(inactive_mount, Path::new(ROOTFS_GRUB_SCRIPT));
     if let Some(parent) = inactive_script.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&inactive_script, &content)
+    fs::write(&inactive_script, &script_content)
         .with_context(|| format!("failed to write {}", inactive_script.display()))?;
-
-    run_system_command("chmod", &["+x", ROOTFS_GRUB_SCRIPT]).await?;
     let inactive_script_arg = inactive_script.to_string_lossy().to_string();
     run_system_command("chmod", &["+x", &inactive_script_arg]).await?;
 
-    write_grub_saved_default(Path::new("/etc/default/grub"))?;
     write_grub_saved_default(&rootfs_target_path(
         inactive_mount,
         Path::new("/etc/default/grub"),
     ))?;
 
-    if run_system_command("grub-mkconfig", &["-o", "/boot/grub/grub.cfg"])
-        .await
-        .is_err()
-    {
-        run_system_command("update-grub", &[]).await?;
-    }
+    // The live rootfs is read-only on this appliance so grub-mkconfig cannot
+    // be used (it requires writing to the live /etc/grub.d/ and /etc/default/).
+    // Instead, generate /boot/grub/grub.cfg directly from the known layout.
+    // /boot is already remounted read-write by the caller.
+    let grub_cfg_dir = Path::new("/boot/grub");
+    fs::create_dir_all(grub_cfg_dir)
+        .with_context(|| format!("failed to create {}", grub_cfg_dir.display()))?;
+    let grub_cfg_path = grub_cfg_dir.join("grub.cfg");
+    fs::write(&grub_cfg_path, grub_cfg_content(layout))
+        .with_context(|| format!("failed to write {}", grub_cfg_path.display()))?;
 
     Ok(())
 }

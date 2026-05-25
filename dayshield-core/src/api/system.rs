@@ -755,7 +755,7 @@ pub async fn update_config(
         .save_system_settings(settings.clone())
         .map_err(SystemApiError::StorageError)?;
 
-    apply_ssh_settings(&state, &settings).await?;
+    apply_ssh_settings(&state, &previous, &settings).await?;
 
     if previous.ipv6_enabled != settings.ipv6_enabled {
         apply_ipv6_setting(settings.ipv6_enabled)
@@ -859,6 +859,7 @@ fn validate_system_settings(
 
 async fn apply_ssh_settings(
     state: &AppState,
+    previous: &SystemSettings,
     settings: &SystemSettings,
 ) -> Result<(), SystemApiError> {
     let full_cfg = state
@@ -868,7 +869,11 @@ async fn apply_ssh_settings(
     let listen_addresses =
         resolve_ssh_listen_addresses(&settings.ssh_listen_interfaces, &full_cfg.interfaces).await;
     render_and_write_ssh_config(settings, &listen_addresses)?;
-    write_authorized_keys(&settings.ssh_authorized_keys)?;
+    if normalized_authorized_keys(&previous.ssh_authorized_keys)
+        != normalized_authorized_keys(&settings.ssh_authorized_keys)
+    {
+        write_authorized_keys(&settings.ssh_authorized_keys)?;
+    }
 
     if settings.ssh_enabled {
         run_systemctl(["enable", "--now", "ssh"]).await?;
@@ -968,6 +973,21 @@ fn write_authorized_keys(keys: &[String]) -> Result<(), SystemApiError> {
         let _ = fs::set_permissions(SSH_AUTHORIZED_KEYS_PATH, fs::Permissions::from_mode(0o600));
     }
     Ok(())
+}
+
+fn normalized_authorized_keys(keys: &[String]) -> String {
+    let mut normalized = keys
+        .iter()
+        .map(|key| key.trim())
+        .filter(|key| !key.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if !normalized.is_empty() {
+        normalized.push('\n');
+    }
+
+    normalized
 }
 
 async fn resolve_ssh_listen_addresses(

@@ -16,7 +16,8 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::live_logs::{
-    firewall::stream_firewall, suricata::stream_suricata, system::stream_system, LogEvent,
+    firewall::stream_firewall, suricata::stream_suricata, system::stream_system, ui::stream_ui,
+    LogEvent,
 };
 
 /// Capacity of the merge channel.  Large enough to absorb short bursts without
@@ -46,6 +47,11 @@ pub async fn logs_websocket(mut ws: WebSocket) {
     let h_system = tokio::spawn({
         let tx = tx.clone();
         async move { stream_system(tx).await }
+    });
+
+    let h_ui = tokio::spawn({
+        let tx = tx.clone();
+        async move { stream_ui(tx).await }
     });
 
     // Drop the original sender so the channel closes when all three tasks
@@ -101,6 +107,7 @@ pub async fn logs_websocket(mut ws: WebSocket) {
     h_suricata.abort();
     h_firewall.abort();
     h_system.abort();
+    h_ui.abort();
 
     info!("logs/ws: connection closed, source tasks aborted");
 }

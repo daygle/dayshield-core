@@ -9,6 +9,7 @@
 //! via [`websocket::logs_websocket`].
 
 pub mod firewall;
+pub mod ui;
 pub mod suricata;
 pub mod system;
 pub mod tail;
@@ -82,6 +83,26 @@ pub enum LogEvent {
         priority: Option<u8>,
         /// Human-readable log message.
         message: String,
+    },
+
+    /// A browser/UI event captured by the management interface.
+    UiEvent {
+        /// ISO-8601 timestamp.
+        timestamp: String,
+        /// UI component or reporter name.
+        component: String,
+        /// Log level emitted by the browser client.
+        level: String,
+        /// Human-readable log message.
+        message: String,
+        /// Current route path when the event was captured.
+        route: Option<String>,
+        /// Optional page or resource URL for context.
+        url: Option<String>,
+        /// Optional stack trace or exception string.
+        stack: Option<String>,
+        /// Additional structured details supplied by the browser.
+        details: Option<Value>,
     },
 }
 
@@ -223,7 +244,41 @@ impl LogEvent {
                     }
                 })
             }
+            LogEvent::UiEvent {
+                timestamp,
+                component,
+                level,
+                message,
+                route,
+                url,
+                stack,
+                details,
+            } => {
+                json!({
+                    "type": "ui_event",
+                    "timestamp": timestamp,
+                    "source": "ui",
+                    "level": classify_ui_level(level),
+                    "message": message,
+                    "component": component,
+                    "route": route,
+                    "url": url,
+                    "stack": stack,
+                    "meta": details,
+                })
+            }
         }
+    }
+}
+
+fn classify_ui_level(level: &str) -> &str {
+    match level.trim().to_lowercase().as_str() {
+        "debug" => "debug",
+        "info" => "info",
+        "warning" | "warn" => "warning",
+        "error" => "error",
+        "critical" => "critical",
+        _ => "info",
     }
 }
 

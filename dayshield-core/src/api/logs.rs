@@ -17,6 +17,7 @@ use tracing::warn;
 
 use crate::live_logs::{
     firewall::{parse_dmesg_firewall_line, parse_journald_firewall_line},
+    ui::{self, UiLogRecord, DAYSHIELD_UI_LOG_PATH},
     suricata::parse_eve_line,
     system::{parse_journald_system_line, parse_system_text_line},
     websocket::logs_websocket,
@@ -35,6 +36,17 @@ pub struct SearchLogsQuery {
     pub query: Option<String>,
     pub search: Option<String>,
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UiLogRequest {
+    pub component: String,
+    pub level: String,
+    pub message: String,
+    pub route: Option<String>,
+    pub url: Option<String>,
+    pub stack: Option<String>,
+    pub details: Option<serde_json::Value>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -116,6 +128,7 @@ fn parse_event_ts(event: &LogEvent) -> Option<DateTime<Utc>> {
         LogEvent::SuricataAlert { timestamp, .. } => timestamp,
         LogEvent::FirewallEvent { timestamp, .. } => timestamp,
         LogEvent::SystemEvent { timestamp, .. } => timestamp,
+        LogEvent::UiEvent { timestamp, .. } => timestamp,
     };
 
     DateTime::parse_from_rfc3339(raw)
@@ -132,6 +145,7 @@ fn event_matches_source(event: &LogEvent, source: &str) -> bool {
         ("suricata", LogEvent::SuricataAlert { .. }) => true,
         ("firewall", LogEvent::FirewallEvent { .. }) => true,
         ("system", LogEvent::SystemEvent { .. }) => true,
+        ("ui", LogEvent::UiEvent { .. }) => true,
         _ => false,
     }
 }
@@ -153,6 +167,19 @@ fn event_search_text(event: &LogEvent) -> String {
             ..
         } => format!("{action} {src_ip} {dest_ip} {iface}"),
         LogEvent::SystemEvent { unit, message, .. } => format!("{unit} {message}"),
+        LogEvent::UiEvent {
+            component,
+            message,
+            route,
+            url,
+            stack,
+            ..
+        } => format!(
+            "{component} {message} {} {} {}",
+            route.as_deref().unwrap_or_default(),
+            url.as_deref().unwrap_or_default(),
+            stack.as_deref().unwrap_or_default()
+        ),
     }
 }
 
@@ -191,6 +218,89 @@ async fn query_journal_system(from: &str, to: &str) -> Result<Vec<LogEvent>, Log
         .lines()
         .filter_map(parse_journald_system_line)
         .collect::<Vec<_>>())
+}
+
+async fn query_ui_range(from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<LogEvent>, LogsApiError> {
+    let content = match tokio::fs::read_to_string(DAYSHIELD_UI_LOG_PATH).await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, path = DAYSHIELD_UI_LOG_PATH, "logs/search: could not read UI log");
+            return Ok(vec![]);
+        }
+    };
+
+    Ok(content
+        .lines()
+        .filter_map(|line| serde_json::from_str::<UiLogRecord>(line).ok())
+        .filter_map(|record| {
+            let ts = ui::parse_timestamp(&record.timestamp)?;
+            if ts < from || ts > to {
+                return None;
+            }
+            Some(record.into_event())
+        })
+        .collect())
+}
+
+fn normalize_ui_level(level: &str) -> &'static str {
+    match level.trim().to_lowercase().as_str() {
+        "debug" => "debug",
+        "info" => "info",
+        "warning" | "warn" => "warning",
+        "error" => "error",
+        "critical" => "critical",
+        _ => "info",
+    }
+}
+
+fn build_ui_log_record(request: UiLogRequest) -> Result<UiLogRecord, LogsApiError> {
+    let component = request.component.trim();
+    if component.is_empty() {
+        return Err(LogsApiError::Validation("component is required".to_string()));
+    }
+
+    let message = request.message.trim();
+    if message.is_empty() {
+        return Err(LogsApiError::Validation("message is required".to_string()));
+    }
+
+    Ok(UiLogRecord {
+        timestamp: Utc::now().to_rfc3339(),
+        component: component.to_string(),
+        level: normalize_ui_level(&request.level).to_string(),
+        message: message.to_string(),
+        route: request.route.and_then(|value| {
+            let value = value.trim().to_string();
+            (!value.is_empty()).then_some(value)
+        }),
+        url: request.url.and_then(|value| {
+            let value = value.trim().to_string();
+            (!value.is_empty()).then_some(value)
+        }),
+        stack: request.stack.and_then(|value| {
+            let value = value.trim().to_string();
+            (!value.is_empty()).then_some(value)
+        }),
+        details: request.details,
+    })
+}
+
+/// Handler: ingest browser/UI errors and operational messages.
+pub async fn ingest_ui_log(
+    Json(request): Json<UiLogRequest>,
+) -> Result<impl IntoResponse, LogsApiError> {
+    let record = build_ui_log_record(request)?;
+    let event = record.clone().into_event();
+
+    ui::append_record(&record)
+        .await
+        .map_err(|e| LogsApiError::Search(format!("failed to append UI log: {e}")))?;
+    ui::publish(event);
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": null,
+    })))
 }
 
 async fn query_core_log_range(
@@ -369,6 +479,9 @@ pub async fn search_logs(
     if matches!(source.as_str(), "all" | "suricata") {
         events.extend(query_suricata_range(from, to).await?);
     }
+    if matches!(source.as_str(), "all" | "ui") {
+        events.extend(query_ui_range(from, to).await?);
+    }
 
     events.retain(|event| {
         if let Some(ts) = parse_event_ts(event) {
@@ -453,5 +566,24 @@ mod tests {
         };
 
         assert_eq!(search_needle(&query).as_deref(), Some("drop"));
+    }
+
+    #[test]
+    fn search_needle_includes_ui_source_queries() {
+        let event = LogEvent::UiEvent {
+            timestamp: "2026-05-23T02:03:04Z".to_string(),
+            component: "error-boundary".to_string(),
+            level: "error".to_string(),
+            message: "Something went wrong".to_string(),
+            route: Some("/dashboard".to_string()),
+            url: Some("/dashboard".to_string()),
+            stack: None,
+            details: None,
+        };
+
+        let text = event_search_text(&event);
+        assert!(text.contains("error-boundary"));
+        assert!(text.contains("Something went wrong"));
+        assert!(text.contains("/dashboard"));
     }
 }

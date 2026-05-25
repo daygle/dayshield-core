@@ -213,13 +213,22 @@ pub fn generate_ruleset_with_ipv6_and_system_settings(
         None,
         &[],
         &[],
+        Some(53),
     )
 }
 
+/// Returns the set of system-managed firewall rules for the current config.
+///
+/// `dns_port` controls the automatic LAN → DNS allow rules:
+/// - `Some(port)`: generate allow rules for the given DNS port (use the
+///   value from [`DnsConfig::port`] when `manage_firewall` is enabled).
+/// - `None`: skip automatic DNS rules (user has disabled auto-management
+///   via `DnsConfig::manage_firewall`).
 pub fn system_firewall_rules(
     interfaces: &[Interface],
     firewall_settings: &FirewallSettings,
     system_settings: Option<&SystemSettings>,
+    dns_port: Option<u16>,
     ipv6_enabled: bool,
 ) -> Vec<FirewallRule> {
     let mut rules = Vec::new();
@@ -281,7 +290,7 @@ pub fn system_firewall_rules(
         .iter()
         .filter(|iface| iface.enabled && !is_wan_interface(iface))
     {
-        rules.extend(system_lan_service_rules(iface, ipv6_enabled));
+        rules.extend(system_lan_service_rules(iface, dns_port, ipv6_enabled));
     }
     let management_ports = effective_management_ports(firewall_settings, system_settings);
     if firewall_settings.management_anti_lockout && !management_ports.is_empty() {
@@ -295,36 +304,41 @@ pub fn system_firewall_rules(
     rules
 }
 
-fn system_lan_service_rules(iface: &Interface, ipv6_enabled: bool) -> Vec<FirewallRule> {
-    let mut rules = vec![
-        system_lan_service_rule(
-            iface,
-            "dhcp4-server",
-            "Allow DHCPv4 requests from LAN clients",
-            Some(Protocol::Udp),
-            Some(68),
-            Some(67),
-            FirewallAddressFamily::Ipv4,
-        ),
-        system_lan_service_rule(
+fn system_lan_service_rules(
+    iface: &Interface,
+    dns_port: Option<u16>,
+    ipv6_enabled: bool,
+) -> Vec<FirewallRule> {
+    let mut rules = vec![system_lan_service_rule(
+        iface,
+        "dhcp4-server",
+        "Allow DHCPv4 requests from LAN clients",
+        Some(Protocol::Udp),
+        Some(68),
+        Some(67),
+        FirewallAddressFamily::Ipv4,
+    )];
+
+    if let Some(port) = dns_port {
+        rules.push(system_lan_service_rule(
             iface,
             "dns-udp",
             "Allow DNS over UDP from LAN clients",
             Some(Protocol::Udp),
             None,
-            Some(53),
+            Some(port),
             FirewallAddressFamily::Ipv4Ipv6,
-        ),
-        system_lan_service_rule(
+        ));
+        rules.push(system_lan_service_rule(
             iface,
             "dns-tcp",
             "Allow DNS over TCP from LAN clients",
             Some(Protocol::Tcp),
             None,
-            Some(53),
+            Some(port),
             FirewallAddressFamily::Ipv4Ipv6,
-        ),
-    ];
+        ));
+    }
 
     if ipv6_enabled {
         rules.push(system_lan_service_rule(
@@ -544,6 +558,7 @@ pub fn generate_ruleset_with_captive(
     ipv6_enabled: bool,
     captive_portal: Option<&CaptivePortalConfig>,
     captive_sessions: &[CaptivePortalSession],
+    dns_port: Option<u16>,
 ) -> String {
     generate_ruleset_with_captive_and_interfaces(
         rules,
@@ -556,6 +571,7 @@ pub fn generate_ruleset_with_captive(
         captive_portal,
         captive_sessions,
         &[],
+        dns_port,
     )
 }
 
@@ -570,9 +586,11 @@ pub fn generate_ruleset_with_captive_and_interfaces(
     captive_portal: Option<&CaptivePortalConfig>,
     captive_sessions: &[CaptivePortalSession],
     interfaces: &[Interface],
+    dns_port: Option<u16>,
 ) -> String {
     let settings = firewall_settings.cloned().unwrap_or_default();
-    let system_rules = system_firewall_rules(interfaces, &settings, system_settings, ipv6_enabled);
+    let system_rules =
+        system_firewall_rules(interfaces, &settings, system_settings, dns_port, ipv6_enabled);
     // Only emit rules that are enabled and whose schedule (if any) is currently active.
     let mut sorted: Vec<&FirewallRule> = system_rules
         .iter()
@@ -872,11 +890,15 @@ pub async fn apply_rules(
         None,
         &[],
         &[],
+        Some(53),
     )
     .await
 }
 
 /// Apply a complete nftables ruleset with optional captive portal enforcement.
+///
+/// `dns_port` controls automatic LAN → DNS firewall rules; see
+/// [`system_firewall_rules`] for the full semantics.
 pub async fn apply_rules_with_captive(
     rules: &[FirewallRule],
     nat_config: Option<&NatConfig>,
@@ -887,6 +909,7 @@ pub async fn apply_rules_with_captive(
     captive_portal: Option<&CaptivePortalConfig>,
     captive_sessions: &[CaptivePortalSession],
     interfaces: &[Interface],
+    dns_port: Option<u16>,
 ) -> Result<(), NftError> {
     // Resolve URL-table aliases (fetch + cache).
     let resolved_url_tables = resolve_url_tables(aliases).await;
@@ -902,6 +925,7 @@ pub async fn apply_rules_with_captive(
         captive_portal,
         captive_sessions,
         interfaces,
+        dns_port,
     );
 
     if nat_requires_ipv4_forwarding(nat_config) {
@@ -2396,6 +2420,7 @@ mod tests {
             None,
             &[],
             &interfaces,
+            Some(53),
         );
 
         assert!(rs.contains("iifname \"lan0\" meta nfproto ipv4 udp sport 68 udp dport 67"));
@@ -2418,6 +2443,7 @@ mod tests {
             None,
             &[],
             &interfaces,
+            Some(53),
         );
 
         assert!(rs.contains("iifname \"lan0\" meta nfproto ipv6 udp sport 546 udp dport 547"));

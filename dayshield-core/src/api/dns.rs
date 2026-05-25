@@ -97,6 +97,14 @@ pub struct UpdateDnsConfigRequest {
     pub dot_acme_domain: Option<String>,
     #[serde(default)]
     pub dot_acme_cert_storage_path: Option<String>,
+    /// When true (default), the system automatically manages firewall rules
+    /// to allow DNS traffic on the configured port from LAN clients.
+    #[serde(default = "default_manage_firewall")]
+    pub manage_firewall: bool,
+}
+
+fn default_manage_firewall() -> bool {
+    true
 }
 
 /// Request body for creating a per-interface DNS blocklist URL.
@@ -333,6 +341,7 @@ pub async fn update_config(
         interface_blocklists: req
             .interface_blocklists
             .unwrap_or(existing.interface_blocklists),
+        manage_firewall: req.manage_firewall,
     };
 
     let dot_acme_domain = req.dot_acme_domain.filter(|s| !s.trim().is_empty());
@@ -403,6 +412,14 @@ pub async fn update_config(
         .map_err(|e| DnsError::EngineError(e.to_string()))?;
 
     info!("dns: engine apply complete");
+
+    // Re-apply firewall so that any port or manage_firewall change takes
+    // effect immediately (system LAN → DNS allow rules use the new port).
+    if let Err(e) = crate::captive_portal::apply_current_ruleset_nft(&state.config_store).await {
+        warn!(error = %e, "dns: firewall re-apply failed after config change");
+    } else {
+        info!("dns: firewall ruleset updated for new DNS port/manage_firewall setting");
+    }
 
     Ok(Json(serde_json::json!({ "success": true, "data": cfg })))
 }

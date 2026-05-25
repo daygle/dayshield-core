@@ -1518,6 +1518,15 @@ pub struct DnsConfig {
     /// Per-interface DNS blocklist sources.
     #[serde(default)]
     pub interface_blocklists: Vec<DnsInterfaceBlocklists>,
+    /// When true (default), the system automatically creates and updates
+    /// firewall rules to allow DNS traffic on the configured port from LAN
+    /// clients.  Disable this if you manage DNS firewall rules manually.
+    #[serde(default = "default_manage_firewall")]
+    pub manage_firewall: bool,
+}
+
+fn default_manage_firewall() -> bool {
+    true
 }
 
 impl Default for DnsConfig {
@@ -1530,6 +1539,7 @@ impl Default for DnsConfig {
             dnssec: true,
             local_records: vec![],
             interface_blocklists: vec![],
+            manage_firewall: true,
         }
     }
 }

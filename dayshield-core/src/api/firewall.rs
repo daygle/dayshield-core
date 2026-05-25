@@ -69,6 +69,7 @@ pub async fn list_rules(State(state): State<Arc<AppState>>) -> Result<impl IntoR
         &cfg.interfaces,
         &firewall_settings,
         cfg.system_settings.as_ref(),
+        crate::captive_portal::effective_dns_port(cfg.dns.as_ref()),
         ipv6_enabled,
     );
 

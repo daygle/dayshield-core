@@ -659,8 +659,21 @@ pub async fn apply_current_ruleset_nft(config_store: &ConfigStore) -> Result<(),
         cfg.captive_portal.as_ref(),
         &active_sessions,
         &cfg.interfaces,
+        effective_dns_port(cfg.dns.as_ref()),
     )
     .await
+}
+
+/// Compute the DNS port to use for automatic firewall rule generation.
+///
+/// Returns `Some(port)` when `manage_firewall` is enabled, `None` when the
+/// user has opted out of automatic DNS firewall management.
+pub fn effective_dns_port(dns: Option<&crate::config::models::DnsConfig>) -> Option<u16> {
+    match dns {
+        Some(d) if !d.manage_firewall => None,
+        Some(d) => Some(d.port),
+        None => Some(53),
+    }
 }
 
 fn effective_nat_config(nat: Option<NatConfig>, interfaces: &[Interface]) -> Option<NatConfig> {

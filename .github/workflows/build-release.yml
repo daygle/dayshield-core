@@ -45,13 +45,6 @@ jobs:
           rustup target add x86_64-unknown-linux-musl --toolchain 1.88.0
           rustup default 1.88.0
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          workspaces: |
-            . -> target
-          key: x86_64-unknown-linux-musl
-
       - name: Install musl tools
         run: |
           sudo apt-get update
@@ -83,15 +76,16 @@ jobs:
           sha256sum core-*.tar.zst > checksums.txt
           cat checksums.txt
 
-      # Create GitHub Release with artifacts
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.version.outputs.VERSION }}
-          files: |
-            release-artifacts/core-*.tar.zst
-            release-artifacts/checksums.txt
-          generate_release_notes: true
+      # Create or update GitHub Release with artifacts
+      - name: Create or update Release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ steps.version.outputs.VERSION }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" release-artifacts/core-*.tar.zst release-artifacts/checksums.txt --clobber
+          else
+            gh release create "$TAG_NAME" release-artifacts/core-*.tar.zst release-artifacts/checksums.txt --generate-notes
+          fi
 

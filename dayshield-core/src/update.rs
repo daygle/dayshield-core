@@ -1501,7 +1501,7 @@ async fn query_registry_with_component_fallbacks(
             }
             Err(err) => {
                 let err_text = err.to_string();
-                if err_text.contains("HTTP 404") {
+                if err_text.contains("HTTP 404") || component.as_str() == "rootfs" {
                     info!(
                         component = component.as_str(),
                         repo_url,

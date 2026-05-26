@@ -69,19 +69,19 @@ cargo test -p dayshield-core
 `dayshield-core` now exposes a practical OSTree-focused backend slice:
 
 - `GET  /system/ostree/status` - full OSTree workflow status for UI cards/views
-- `POST /system/ostree/check` - run `rpm-ostree upgrade --check`
-- `POST /system/ostree/stage` - run `rpm-ostree upgrade --download-only`
-- `POST /system/ostree/apply` - run `rpm-ostree upgrade` (stages deployment for reboot)
+- `POST /system/ostree/check` - query the configured DayShield OSTree remote
+- `POST /system/ostree/stage` - stage the next OSTree deployment
+- `POST /system/ostree/apply` - stage/apply the next OSTree deployment for reboot
 - `GET  /system/ostree/reboot-required` - compact reboot-required payload for UX banners
 
 ### Assumptions
 
-- The appliance image provides `rpm-ostree` and supports `rpm-ostree status --json`.
-- OSTree operations are driven by CLI invocations in `dayshield-core` and are not yet mediated by a privileged helper/agent.
+- The appliance image provides `ostree` and the DayShield helper at `/usr/local/lib/dayshield/ostree-update.sh`.
+- `dayshield-core` uses the helper when present, falls back to native `ostree admin` commands, and keeps `rpm-ostree` only as a compatibility fallback.
 
 ### Production hardening in place
 
 - `stage` and `apply` require the authenticated admin identity and emit audit-targeted tracing events.
-- `check`, `stage`, and `apply` operations are serialized behind an in-process OSTree operation queue to avoid concurrent rpm-ostree transactions.
-- Status responses include explicit `transactionState` data and tolerate common rpm-ostree JSON field variants.
-- Mocked rpm-ostree tests cover success, no-update, failure, command-missing, and transaction-serialization paths.
+- `check`, `stage`, and `apply` operations are serialized behind an in-process OSTree operation queue to avoid concurrent OSTree transactions.
+- Status responses include explicit `transactionState` data and tolerate common OSTree text output plus rpm-ostree JSON variants.
+- Mocked OSTree tests cover success, no-update, failure, command-missing, and transaction-serialization paths.

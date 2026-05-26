@@ -1,6 +1,8 @@
 use std::{
+    env,
     future::Future,
     io::ErrorKind,
+    path::Path,
     pin::Pin,
     sync::{Mutex as StdMutex, OnceLock},
 };
@@ -12,6 +14,9 @@ use serde_json::{Map, Value};
 use tokio::{process::Command, sync::Mutex as AsyncMutex};
 
 const MAX_COMMAND_OUTPUT_LINES: usize = 20;
+const DAYSHIELD_OSTREE_HELPER: &str = "/usr/local/lib/dayshield/ostree-update.sh";
+const DEFAULT_OSTREE_OS: &str = "dayshield";
+const DEFAULT_OSTREE_REMOTE: &str = "dayshield";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -89,6 +94,7 @@ pub struct OstreeRebootState {
 
 #[derive(Debug)]
 struct ProcessOutput {
+    label: String,
     success: bool,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
@@ -96,28 +102,137 @@ struct ProcessOutput {
 
 type CommandFuture<'a> = Pin<Box<dyn Future<Output = Result<ProcessOutput>> + Send + 'a>>;
 
-trait RpmOstreeRunner: Send + Sync {
-    fn run(&self, args: Vec<String>) -> CommandFuture<'_>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OstreeCommand {
+    Status,
+    Check,
+    Stage,
+    Apply,
 }
 
-struct SystemRpmOstreeRunner;
+trait OstreeRunner: Send + Sync {
+    fn run(&self, command: OstreeCommand) -> CommandFuture<'_>;
+}
 
-impl RpmOstreeRunner for SystemRpmOstreeRunner {
-    fn run(&self, args: Vec<String>) -> CommandFuture<'_> {
+struct SystemOstreeRunner;
+
+impl OstreeRunner for SystemOstreeRunner {
+    fn run(&self, command: OstreeCommand) -> CommandFuture<'_> {
         Box::pin(async move {
-            let label = rpm_ostree_command_label(&args);
-            let output = Command::new("rpm-ostree")
-                .args(&args)
+            let invocation = system_ostree_invocation(command);
+            let output = Command::new(&invocation.program)
+                .args(&invocation.args)
                 .output()
                 .await
-                .with_context(|| format!("failed to execute `{label}`"))?;
+                .with_context(|| format!("failed to execute `{}`", invocation.label))?;
 
             Ok(ProcessOutput {
+                label: invocation.label,
                 success: output.status.success(),
                 stdout: output.stdout,
                 stderr: output.stderr,
             })
         })
+    }
+}
+
+struct CommandInvocation {
+    program: String,
+    args: Vec<String>,
+    label: String,
+}
+
+fn system_ostree_invocation(command: OstreeCommand) -> CommandInvocation {
+    if Path::new(DAYSHIELD_OSTREE_HELPER).is_file() {
+        return helper_ostree_invocation(command);
+    }
+
+    if let Some(ostree) = known_binary_path("ostree", &["/usr/bin/ostree", "/bin/ostree"]) {
+        return native_ostree_invocation(&ostree, command);
+    }
+
+    rpm_ostree_invocation(command)
+}
+
+fn known_binary_path(command: &str, candidates: &[&str]) -> Option<String> {
+    candidates
+        .iter()
+        .find(|candidate| Path::new(candidate).is_file())
+        .map(|candidate| (*candidate).to_string())
+        .or_else(|| {
+            env::var_os("PATH").and_then(|path| {
+                env::split_paths(&path)
+                    .map(|dir| dir.join(command))
+                    .find(|candidate| candidate.is_file())
+                    .map(|candidate| candidate.to_string_lossy().into_owned())
+            })
+        })
+}
+
+fn helper_ostree_invocation(command: OstreeCommand) -> CommandInvocation {
+    let action = match command {
+        OstreeCommand::Status => "status",
+        OstreeCommand::Check => "check",
+        OstreeCommand::Stage | OstreeCommand::Apply => "stage",
+    };
+    CommandInvocation {
+        program: DAYSHIELD_OSTREE_HELPER.to_string(),
+        args: vec![action.to_string()],
+        label: format!("{DAYSHIELD_OSTREE_HELPER} {action}"),
+    }
+}
+
+fn native_ostree_invocation(program: &str, command: OstreeCommand) -> CommandInvocation {
+    let args = match command {
+        OstreeCommand::Status => vec!["admin".to_string(), "status".to_string()],
+        OstreeCommand::Check => vec!["remote".to_string(), "refs".to_string(), ostree_remote()],
+        OstreeCommand::Stage | OstreeCommand::Apply => vec![
+            "admin".to_string(),
+            "upgrade".to_string(),
+            "--os".to_string(),
+            ostree_os(),
+            "--stage".to_string(),
+        ],
+    };
+
+    CommandInvocation {
+        program: program.to_string(),
+        label: command_label(program, &args),
+        args,
+    }
+}
+
+fn rpm_ostree_invocation(command: OstreeCommand) -> CommandInvocation {
+    let args = match command {
+        OstreeCommand::Status => vec!["status", "--json"],
+        OstreeCommand::Check => vec!["upgrade", "--check"],
+        OstreeCommand::Stage => vec!["upgrade", "--download-only"],
+        OstreeCommand::Apply => vec!["upgrade"],
+    }
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+
+    CommandInvocation {
+        program: "rpm-ostree".to_string(),
+        label: command_label("rpm-ostree", &args),
+        args,
+    }
+}
+
+fn ostree_remote() -> String {
+    env::var("DAYSHIELD_OSTREE_REMOTE").unwrap_or_else(|_| DEFAULT_OSTREE_REMOTE.to_string())
+}
+
+fn ostree_os() -> String {
+    env::var("DAYSHIELD_OSTREE_OS").unwrap_or_else(|_| DEFAULT_OSTREE_OS.to_string())
+}
+
+fn command_label(program: &str, args: &[String]) -> String {
+    if args.is_empty() {
+        program.to_string()
+    } else {
+        format!("{} {}", program, args.join(" "))
     }
 }
 
@@ -145,10 +260,10 @@ impl Drop for ActiveOperationGuard {
     }
 }
 
-static SYSTEM_RPM_OSTREE_RUNNER: SystemRpmOstreeRunner = SystemRpmOstreeRunner;
+static SYSTEM_OSTREE_RUNNER: SystemOstreeRunner = SystemOstreeRunner;
 
 pub async fn status() -> OstreeStatus {
-    status_with(&SYSTEM_RPM_OSTREE_RUNNER).await
+    status_with(&SYSTEM_OSTREE_RUNNER).await
 }
 
 pub async fn reboot_state() -> OstreeRebootState {
@@ -172,18 +287,18 @@ pub async fn reboot_state() -> OstreeRebootState {
 }
 
 pub async fn check_for_updates() -> Result<OstreeActionResult> {
-    check_for_updates_with(&SYSTEM_RPM_OSTREE_RUNNER).await
+    check_for_updates_with(&SYSTEM_OSTREE_RUNNER).await
 }
 
 pub async fn stage_update() -> Result<OstreeActionResult> {
-    stage_update_with(&SYSTEM_RPM_OSTREE_RUNNER).await
+    stage_update_with(&SYSTEM_OSTREE_RUNNER).await
 }
 
 pub async fn apply_update() -> Result<OstreeActionResult> {
-    apply_update_with(&SYSTEM_RPM_OSTREE_RUNNER).await
+    apply_update_with(&SYSTEM_OSTREE_RUNNER).await
 }
 
-async fn status_with(runner: &dyn RpmOstreeRunner) -> OstreeStatus {
+async fn status_with(runner: &dyn OstreeRunner) -> OstreeStatus {
     match run_status_command_with(runner).await {
         Ok(stdout) => match parse_status_payload(&stdout) {
             Ok(status) => with_local_transaction_state(status),
@@ -197,7 +312,7 @@ async fn status_with(runner: &dyn RpmOstreeRunner) -> OstreeStatus {
                 reboot_required: false,
                 transaction_state: local_transaction_state()
                     .unwrap_or_else(OstreeTransactionState::idle),
-                last_error: Some(format!("failed to parse rpm-ostree status JSON: {err:#}")),
+                last_error: Some(format!("failed to parse OSTree status output: {err:#}")),
             },
         },
         Err(err) if is_command_not_found(&err) => unsupported_status(err),
@@ -211,13 +326,13 @@ async fn status_with(runner: &dyn RpmOstreeRunner) -> OstreeStatus {
             reboot_required: false,
             transaction_state: local_transaction_state()
                 .unwrap_or_else(OstreeTransactionState::idle),
-            last_error: Some(format!("failed to query rpm-ostree status: {err:#}")),
+            last_error: Some(format!("failed to query OSTree status: {err:#}")),
         },
     }
 }
 
-async fn check_for_updates_with(runner: &dyn RpmOstreeRunner) -> Result<OstreeActionResult> {
-    let command = run_ostree_operation_with(runner, "check", &["upgrade", "--check"]).await?;
+async fn check_for_updates_with(runner: &dyn OstreeRunner) -> Result<OstreeActionResult> {
+    let command = run_ostree_operation_with(runner, "check", OstreeCommand::Check).await?;
     let status = status_with(runner).await;
     Ok(OstreeActionResult {
         operation: "check",
@@ -226,19 +341,18 @@ async fn check_for_updates_with(runner: &dyn RpmOstreeRunner) -> Result<OstreeAc
             if status.update_available {
                 "OSTree updates checked: update available".to_string()
             } else {
-                "OSTree updates checked: system is up to date".to_string()
+                "OSTree remote checked: no staged deployment detected".to_string()
             }
         } else {
-            "rpm-ostree is not available on this appliance image".to_string()
+            "OSTree update tooling is not available on this appliance image".to_string()
         },
         details: command.details,
         status,
     })
 }
 
-async fn stage_update_with(runner: &dyn RpmOstreeRunner) -> Result<OstreeActionResult> {
-    let command =
-        run_ostree_operation_with(runner, "stage", &["upgrade", "--download-only"]).await?;
+async fn stage_update_with(runner: &dyn OstreeRunner) -> Result<OstreeActionResult> {
+    let command = run_ostree_operation_with(runner, "stage", OstreeCommand::Stage).await?;
     let status = status_with(runner).await;
     Ok(OstreeActionResult {
         operation: "stage",
@@ -253,8 +367,8 @@ async fn stage_update_with(runner: &dyn RpmOstreeRunner) -> Result<OstreeActionR
     })
 }
 
-async fn apply_update_with(runner: &dyn RpmOstreeRunner) -> Result<OstreeActionResult> {
-    let command = run_ostree_operation_with(runner, "apply", &["upgrade"]).await?;
+async fn apply_update_with(runner: &dyn OstreeRunner) -> Result<OstreeActionResult> {
+    let command = run_ostree_operation_with(runner, "apply", OstreeCommand::Apply).await?;
     let status = status_with(runner).await;
     let message = if status.reboot_required {
         "OSTree update applied and staged for reboot".to_string()
@@ -275,41 +389,36 @@ struct CommandOutcome {
     details: Vec<String>,
 }
 
-async fn run_status_command_with(runner: &dyn RpmOstreeRunner) -> Result<String> {
-    let args = vec!["status".to_string(), "--json".to_string()];
-    let label = rpm_ostree_command_label(&args);
-    let output = runner.run(args).await?;
+async fn run_status_command_with(runner: &dyn OstreeRunner) -> Result<String> {
+    let output = runner.run(OstreeCommand::Status).await?;
 
     if !output.success {
-        bail!("`{label}` failed: {}", command_error_detail(&output));
+        bail!(
+            "`{}` failed: {}",
+            output.label,
+            command_error_detail(&output)
+        );
     }
 
-    String::from_utf8(output.stdout).context("rpm-ostree status output is not valid UTF-8")
+    String::from_utf8(output.stdout)
+        .with_context(|| format!("{} output is not valid UTF-8", output.label))
 }
 
 async fn run_ostree_operation_with(
-    runner: &dyn RpmOstreeRunner,
+    runner: &dyn OstreeRunner,
     operation: &'static str,
-    args: &[&str],
+    command: OstreeCommand,
 ) -> Result<CommandOutcome> {
     let _queue_guard = operation_lock().lock().await;
     let _active_guard = ActiveOperationGuard::start(operation);
-    run_rpm_ostree_with(runner, args).await
-}
-
-async fn run_rpm_ostree_with(
-    runner: &dyn RpmOstreeRunner,
-    args: &[&str],
-) -> Result<CommandOutcome> {
-    let owned_args = args
-        .iter()
-        .map(|arg| (*arg).to_string())
-        .collect::<Vec<_>>();
-    let label = rpm_ostree_command_label(&owned_args);
-    let output = runner.run(owned_args).await?;
+    let output = runner.run(command).await?;
 
     if !output.success {
-        bail!("`{label}` failed: {}", command_error_detail(&output));
+        bail!(
+            "`{}` failed: {}",
+            output.label,
+            command_error_detail(&output)
+        );
     }
 
     Ok(CommandOutcome {
@@ -343,14 +452,6 @@ fn command_error_detail(output: &ProcessOutput) -> String {
     }
 }
 
-fn rpm_ostree_command_label(args: &[String]) -> String {
-    if args.is_empty() {
-        "rpm-ostree".to_string()
-    } else {
-        format!("rpm-ostree {}", args.join(" "))
-    }
-}
-
 fn unsupported_status(err: anyhow::Error) -> OstreeStatus {
     OstreeStatus {
         supported: false,
@@ -361,7 +462,7 @@ fn unsupported_status(err: anyhow::Error) -> OstreeStatus {
         update_available: false,
         reboot_required: false,
         transaction_state: local_transaction_state().unwrap_or_else(OstreeTransactionState::idle),
-        last_error: Some(format!("rpm-ostree command unavailable: {err:#}")),
+        last_error: Some(format!("OSTree update command unavailable: {err:#}")),
     }
 }
 
@@ -399,12 +500,25 @@ fn local_transaction_state() -> Option<OstreeTransactionState> {
             operation: Some(operation.operation.to_string()),
             source: Some("dayshield".to_string()),
             started_at: Some(operation.started_at),
-            message: Some("DayShield rpm-ostree operation is running".to_string()),
+            message: Some("DayShield OSTree operation is running".to_string()),
         })
 }
 
 fn parse_status_payload(payload: &str) -> Result<OstreeStatus> {
-    let value: Value = serde_json::from_str(payload).context("invalid JSON")?;
+    let trimmed = payload.trim();
+    if trimmed.is_empty() {
+        bail!("empty status output");
+    }
+
+    match serde_json::from_str::<Value>(trimmed) {
+        Ok(value) => parse_json_status_payload(&value),
+        Err(json_err) => parse_admin_status_payload(trimmed).with_context(|| {
+            format!("invalid JSON and invalid ostree admin status text: {json_err}")
+        }),
+    }
+}
+
+fn parse_json_status_payload(value: &Value) -> Result<OstreeStatus> {
     let deployments = value
         .get("deployments")
         .or_else(|| value.get("deploymentList"))
@@ -476,6 +590,140 @@ fn parse_status_payload(payload: &str) -> Result<OstreeStatus> {
         transaction_state,
         last_error: None,
     })
+}
+
+fn parse_admin_status_payload(payload: &str) -> Result<OstreeStatus> {
+    let mut deployments = Vec::new();
+
+    for line in payload
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if let Some(deployment) = parse_admin_status_deployment_line(line) {
+            deployments.push(deployment);
+            continue;
+        }
+
+        if let Some(deployment) = deployments.last_mut() {
+            apply_admin_status_detail_line(deployment, line);
+        }
+    }
+
+    if deployments.is_empty() {
+        bail!("no deployments found");
+    }
+
+    let booted_index = deployments
+        .iter()
+        .position(|deployment| deployment.booted)
+        .unwrap_or(0);
+    if !deployments.iter().any(|deployment| deployment.booted) {
+        deployments[0].booted = true;
+    }
+    if booted_index > 0 {
+        deployments[0].staged = true;
+    }
+
+    let current = deployments
+        .iter()
+        .find(|deployment| deployment.booted)
+        .cloned()
+        .or_else(|| deployments.first().cloned());
+    let staged_deployment = deployments
+        .iter()
+        .find(|deployment| deployment.staged)
+        .cloned();
+    let available_update = staged_deployment
+        .clone()
+        .filter(|deployment| deployment_differs_from_current(deployment, current.as_ref()));
+
+    Ok(OstreeStatus {
+        supported: true,
+        checked_at: Utc::now().to_rfc3339(),
+        current_deployment: current,
+        staged_deployment: staged_deployment.clone(),
+        update_available: available_update.is_some(),
+        reboot_required: staged_deployment.is_some(),
+        available_update,
+        transaction_state: OstreeTransactionState::idle(),
+        last_error: None,
+    })
+}
+
+fn parse_admin_status_deployment_line(line: &str) -> Option<OstreeDeployment> {
+    let booted = line.starts_with('*');
+    let text = if booted { line[1..].trim() } else { line };
+    let lower = text.to_ascii_lowercase();
+    if lower.starts_with("version:")
+        || lower.starts_with("origin")
+        || lower.starts_with("gpg")
+        || lower.starts_with("signatures")
+    {
+        return None;
+    }
+
+    let mut parts = text.split_whitespace();
+    let os_name = parts.next()?;
+    let checksum_raw = parts.next()?;
+    if !looks_like_ostree_checksum(checksum_raw) {
+        return None;
+    }
+
+    Some(OstreeDeployment {
+        id: None,
+        os_name: Some(os_name.to_string()),
+        version: None,
+        checksum: Some(normalize_admin_status_checksum(checksum_raw)),
+        origin: None,
+        booted,
+        staged: lower.contains("(staged)")
+            || lower.contains("[staged]")
+            || lower.contains("pending"),
+        pinned: lower.contains("pinned"),
+    })
+}
+
+fn apply_admin_status_detail_line(deployment: &mut OstreeDeployment, line: &str) {
+    let lower = line.to_ascii_lowercase();
+    if let Some(value) = line
+        .strip_prefix("Version:")
+        .or_else(|| line.strip_prefix("version:"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        deployment.version = Some(value.to_string());
+        return;
+    }
+
+    if let Some(value) = line
+        .strip_prefix("origin refspec:")
+        .or_else(|| line.strip_prefix("Origin refspec:"))
+        .or_else(|| line.strip_prefix("origin:"))
+        .or_else(|| line.strip_prefix("Origin:"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        deployment.origin = Some(value.to_string());
+    }
+
+    if lower.contains("pinned") {
+        deployment.pinned = true;
+    }
+}
+
+fn looks_like_ostree_checksum(value: &str) -> bool {
+    let checksum = normalize_admin_status_checksum(value);
+    checksum.len() >= 8 && checksum.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn normalize_admin_status_checksum(value: &str) -> String {
+    value
+        .trim_matches(|ch: char| !ch.is_ascii_hexdigit() && ch != '.')
+        .split('.')
+        .next()
+        .unwrap_or(value)
+        .to_string()
 }
 
 fn with_local_transaction_state(mut status: OstreeStatus) -> OstreeStatus {
@@ -702,7 +950,7 @@ fn transaction_state_from_value(value: &Value) -> OstreeTransactionState {
                 active: true,
                 state,
                 operation,
-                source: Some("rpm-ostree".to_string()),
+                source: Some("ostree".to_string()),
                 started_at: string_field_any(object, &["startedAt", "started_at", "startTime"]),
                 message,
             }
@@ -719,7 +967,7 @@ fn active_transaction_state(
         active: true,
         state: state.to_string(),
         operation,
-        source: Some("rpm-ostree".to_string()),
+        source: Some("ostree".to_string()),
         started_at: None,
         message,
     }
@@ -838,20 +1086,20 @@ mod tests {
         }
     }
 
-    impl RpmOstreeRunner for MockRunner {
-        fn run(&self, _args: Vec<String>) -> CommandFuture<'_> {
+    impl OstreeRunner for MockRunner {
+        fn run(&self, _command: OstreeCommand) -> CommandFuture<'_> {
             let step = self
                 .steps
                 .lock()
                 .unwrap()
                 .pop_front()
-                .expect("mock rpm-ostree response missing");
+                .expect("mock OSTree response missing");
             Box::pin(async move {
                 match step {
                     MockStep::Output(output) => Ok(output),
                     MockStep::MissingCommand => Err(std::io::Error::new(
                         ErrorKind::NotFound,
-                        "mock rpm-ostree missing",
+                        "mock OSTree command missing",
                     )
                     .into()),
                 }
@@ -864,9 +1112,9 @@ mod tests {
         max_active_upgrades: AtomicUsize,
     }
 
-    impl RpmOstreeRunner for CountingRunner {
-        fn run(&self, args: Vec<String>) -> CommandFuture<'_> {
-            let is_upgrade = args.first().map(String::as_str) == Some("upgrade");
+    impl OstreeRunner for CountingRunner {
+        fn run(&self, command: OstreeCommand) -> CommandFuture<'_> {
+            let is_upgrade = matches!(command, OstreeCommand::Stage | OstreeCommand::Apply);
             let active_upgrades = &self.active_upgrades;
             let max_active_upgrades = &self.max_active_upgrades;
             Box::pin(async move {
@@ -902,6 +1150,7 @@ mod tests {
         stderr: impl Into<Vec<u8>>,
     ) -> ProcessOutput {
         ProcessOutput {
+            label: "mock ostree".to_string(),
             success,
             stdout: stdout.into(),
             stderr: stderr.into(),
@@ -968,6 +1217,37 @@ mod tests {
         assert!(status.reboot_required);
         assert!(status.update_available);
         assert!(!status.transaction_state.active);
+    }
+
+    #[test]
+    fn parse_status_accepts_ostree_admin_status_text() {
+        let payload = r#"
+  dayshield def4567890abcdef.0
+      Version: 1.1.0
+      origin refspec: dayshield:dayshield/amd64
+* dayshield abc1234567890def.0
+      Version: 1.0.0
+      origin refspec: dayshield:dayshield/amd64
+        "#;
+
+        let status = parse_status_payload(payload).expect("status should parse");
+
+        assert_eq!(
+            status
+                .current_deployment
+                .as_ref()
+                .and_then(|deployment| deployment.version.as_deref()),
+            Some("1.0.0")
+        );
+        assert_eq!(
+            status
+                .available_update
+                .as_ref()
+                .and_then(|deployment| deployment.version.as_deref()),
+            Some("1.1.0")
+        );
+        assert!(status.reboot_required);
+        assert!(status.update_available);
     }
 
     #[test]

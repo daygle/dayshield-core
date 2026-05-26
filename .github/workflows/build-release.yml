@@ -21,10 +21,15 @@ jobs:
       - name: Determine version
         id: version
         run: |
+          set -euo pipefail
           if [ -n "${{ github.event.inputs.tag }}" ]; then
             VERSION="${{ github.event.inputs.tag }}"
           else
             VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]]; then
+            echo "Invalid version tag: $VERSION"
+            exit 1
           fi
           RELEASE_VERSION="${VERSION#v}"
           echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
@@ -42,9 +47,8 @@ jobs:
       # Build core binary
       - name: Setup Rust
         run: |
-          rustup toolchain install 1.88.0
+          rustup toolchain install 1.88.0 --profile minimal
           rustup target add x86_64-unknown-linux-musl --toolchain 1.88.0
-          rustup default 1.88.0
 
       - name: Install musl tools
         run: |
@@ -60,7 +64,7 @@ jobs:
 
       - name: Build core binary
         run: |
-          cargo build --release -p dayshield-core --target x86_64-unknown-linux-musl
+          cargo +1.88.0 build --release -p dayshield-core --target x86_64-unknown-linux-musl
           mkdir -p release-artifacts
           cp target/x86_64-unknown-linux-musl/release/dayshield-core release-artifacts/
 
@@ -87,6 +91,7 @@ jobs:
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
             gh release upload "$TAG_NAME" release-artifacts/core-*.tar.zst release-artifacts/checksums.txt --clobber
           else
-            gh release create "$TAG_NAME" release-artifacts/core-*.tar.zst release-artifacts/checksums.txt --generate-notes
+            gh release create "$TAG_NAME" --title "DayShield Core $TAG_NAME" --generate-notes
+            gh release upload "$TAG_NAME" release-artifacts/core-*.tar.zst release-artifacts/checksums.txt --clobber
           fi
 

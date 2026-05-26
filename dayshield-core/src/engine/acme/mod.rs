@@ -569,8 +569,8 @@ impl AcmeEngine {
                 &record_name,
                 dns_value,
             )
-                .await
-                .map_err(|e| format!("cloudflare DNS update failed: {e}"))?;
+            .await
+            .map_err(|e| format!("cloudflare DNS update failed: {e}"))?;
             "updated"
         } else {
             self.create_cloudflare_txt_record(&client, zone_id, token, &record_name, dns_value)
@@ -623,11 +623,11 @@ impl AcmeEngine {
             return Err(format!("HTTP {}: {}", status.as_u16(), body));
         }
 
-        let payload: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|err| err.to_string())?;
-        let success = payload.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        let payload: serde_json::Value = response.json().await.map_err(|err| err.to_string())?;
+        let success = payload
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if !success {
             return Err(format!("cloudflare lookup rejected: {}", payload));
         }
@@ -677,11 +677,11 @@ impl AcmeEngine {
             return Err(format!("HTTP {}: {}", status.as_u16(), body));
         }
 
-        let payload: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|err| err.to_string())?;
-        let success = payload.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        let payload: serde_json::Value = response.json().await.map_err(|err| err.to_string())?;
+        let success = payload
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if !success {
             return Err(format!("cloudflare create rejected: {}", payload));
         }
@@ -724,11 +724,11 @@ impl AcmeEngine {
             return Err(format!("HTTP {}: {}", status.as_u16(), body));
         }
 
-        let payload: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|err| err.to_string())?;
-        let success = payload.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        let payload: serde_json::Value = response.json().await.map_err(|err| err.to_string())?;
+        let success = payload
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if !success {
             return Err(format!("cloudflare update rejected: {}", payload));
         }
@@ -744,7 +744,7 @@ impl AcmeEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::models::{AcmeChallengeType, AcmeProvider, AcmeDnsProvider};
+    use crate::config::models::{AcmeChallengeType, AcmeDnsProvider, AcmeProvider};
 
     fn test_config() -> AcmeConfig {
         AcmeConfig {

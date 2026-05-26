@@ -79,9 +79,9 @@ cargo test -p dayshield-core
 - The appliance image provides `rpm-ostree` and supports `rpm-ostree status --json`.
 - OSTree operations are driven by CLI invocations in `dayshield-core` and are not yet mediated by a privileged helper/agent.
 
-### TODOs for production hardening
+### Production hardening in place
 
-- Gate `stage`/`apply` operations behind stricter authorization and audit policy hooks.
-- Add operation locking/queueing to prevent concurrent OSTree transactions.
-- Add stronger parsing for additional rpm-ostree JSON variants and explicit transaction-state reporting.
-- Add integration tests with mocked `rpm-ostree` command outputs (success, no-update, failure, command-missing).
+- `stage` and `apply` require the authenticated admin identity and emit audit-targeted tracing events.
+- `check`, `stage`, and `apply` operations are serialized behind an in-process OSTree operation queue to avoid concurrent rpm-ostree transactions.
+- Status responses include explicit `transactionState` data and tolerate common rpm-ostree JSON field variants.
+- Mocked rpm-ostree tests cover success, no-update, failure, command-missing, and transaction-serialization paths.

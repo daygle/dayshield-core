@@ -48,23 +48,14 @@ use crate::auth::{model::AuthenticatedUser, session::validate_token};
 ///
 /// Matching is exact for fixed routes and scoped-prefix for selected public
 /// namespaces.
-const PUBLIC_PATHS: &[&str] = &[
-    "/auth/login",
-    "/auth/status",
-    "/system/status",
-];
+const PUBLIC_PATHS: &[&str] = &["/auth/login", "/auth/status", "/system/status"];
 
 /// Public path prefixes for scoped namespaces.
 const PUBLIC_PREFIXES: &[&str] = &["/installer/", "/portal"];
 
 /// Paths allowed to use `?token=<jwt>` transport for browser clients that
 /// cannot set custom headers during WebSocket handshake.
-const QUERY_TOKEN_ALLOWED_PATHS: &[&str] = &[
-    "/logs/ws",
-    "/logs/live",
-    "/live-logs",
-    "/metrics/ws",
-];
+const QUERY_TOKEN_ALLOWED_PATHS: &[&str] = &["/logs/ws", "/logs/live", "/live-logs", "/metrics/ws"];
 
 /// Returns `true` if `path` is on the public allow-list.
 fn is_public_path(path: &str) -> bool {

@@ -1718,14 +1718,16 @@ impl ConfigStore {
     fn normalize_config(config: &mut SystemConfig) {
         if let Some(dhcp) = &mut config.dhcp {
             for scope in &mut dhcp.scopes {
-                if let Some(normalized) = crate::config::models::normalize_ipv4_cidr(&scope.subnet) {
+                if let Some(normalized) = crate::config::models::normalize_ipv4_cidr(&scope.subnet)
+                {
                     scope.subnet = normalized;
                 }
             }
         }
         if let Some(dhcp6) = &mut config.dhcp6 {
             for scope in &mut dhcp6.scopes {
-                if let Some(normalized) = crate::config::models::normalize_ipv6_cidr(&scope.subnet) {
+                if let Some(normalized) = crate::config::models::normalize_ipv6_cidr(&scope.subnet)
+                {
                     scope.subnet = normalized;
                 }
             }
@@ -2588,6 +2590,7 @@ mod tests {
             dnssec: false,
             local_records: vec![],
             interface_blocklists: vec![],
+            manage_firewall: true,
         }
     }
 
@@ -2813,6 +2816,7 @@ mod tests {
             dnssec: false,
             local_records: vec![],
             interface_blocklists: vec![],
+            manage_firewall: true,
         });
         assert!(store.validate(&cfg).is_err());
 

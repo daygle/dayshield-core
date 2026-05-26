@@ -165,7 +165,10 @@ mod tests {
         assert_eq!(v["type"], "firewall_event");
         assert_eq!(v["source"], "firewall");
         assert_eq!(v["level"], "warning");
-        assert_eq!(v["message"], "DROP on eth0 192.168.1.1:54321 -> 10.0.0.1:80");
+        assert_eq!(
+            v["message"],
+            "DROP on eth0 192.168.1.1:54321 -> 10.0.0.1:80"
+        );
         assert_eq!(v["action"], "DROP");
         assert_eq!(v["sport"], 54321);
         assert_eq!(v["proto"], "TCP");

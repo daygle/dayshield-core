@@ -9,10 +9,10 @@
 //! via [`websocket::logs_websocket`].
 
 pub mod firewall;
-pub mod ui;
 pub mod suricata;
 pub mod system;
 pub mod tail;
+pub mod ui;
 pub mod websocket;
 
 use serde::Serialize;
@@ -507,7 +507,10 @@ mod tests {
         let payload = event.to_client_payload();
         assert_eq!(payload["source"], "firewall");
         assert_eq!(payload["level"], "warning");
-        assert_eq!(payload["message"], "DROP on wan 192.0.2.10 -> 198.51.100.7:443");
+        assert_eq!(
+            payload["message"],
+            "DROP on wan 192.0.2.10 -> 198.51.100.7:443"
+        );
     }
 
     #[test]

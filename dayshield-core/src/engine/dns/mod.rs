@@ -445,6 +445,7 @@ mod tests {
             dnssec: false,
             local_records: vec![],
             interface_blocklists: vec![],
+            manage_firewall: true,
         }
     }
 

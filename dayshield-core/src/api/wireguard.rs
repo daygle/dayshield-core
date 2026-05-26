@@ -18,8 +18,8 @@ use tracing::{info, warn};
 
 use crate::{
     config::models::{
-        ensure_ipv6_allowed, validate_cidr, validate_endpoint, validate_wg_interface_name,
-        validate_wg_key, is_valid_mtu, WireGuardInterface, WireGuardPeer,
+        ensure_ipv6_allowed, is_valid_mtu, validate_cidr, validate_endpoint,
+        validate_wg_interface_name, validate_wg_key, WireGuardInterface, WireGuardPeer,
     },
     engine::vpn::{apply_interface, generate_keypair, remove_interface},
     state::AppState,

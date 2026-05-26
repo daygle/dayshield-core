@@ -92,7 +92,10 @@ pub fn resolve_intent(event: &Event, intents: &[Intent]) -> Option<ResolvedInten
 
         return Some(ResolvedIntent {
             action: intent.desired_action.clone(),
-            reason: format!("Intent '{}' matched the observed traffic pattern", intent.name),
+            reason: format!(
+                "Intent '{}' matched the observed traffic pattern",
+                intent.name
+            ),
             confidence: 0.92,
             intent_id: intent.id.clone(),
             intent_name: intent.name.clone(),

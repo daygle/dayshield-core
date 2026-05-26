@@ -54,10 +54,7 @@ pub fn audit_rules(rules: &[FirewallRule], intents: &[Intent], timestamp: &str) 
                 return false;
             }
             if !matches!(
-                (
-                    &rule.protocol,
-                    protocol.to_ascii_lowercase().as_str()
-                ),
+                (&rule.protocol, protocol.to_ascii_lowercase().as_str()),
                 (Some(Protocol::Tcp), "tcp")
                     | (Some(Protocol::Udp), "udp")
                     | (Some(Protocol::Any), _)
@@ -66,7 +63,10 @@ pub fn audit_rules(rules: &[FirewallRule], intents: &[Intent], timestamp: &str) 
                 return false;
             }
 
-            rule.source.as_deref().map(is_private_source).unwrap_or(false)
+            rule.source
+                .as_deref()
+                .map(is_private_source)
+                .unwrap_or(false)
         });
 
         if !has_lan_restriction {

@@ -339,9 +339,7 @@ fn ensure_registry_updatable_selection(selected_components: &[RepoComponent]) ->
         .iter()
         .any(|c| matches!(c, RepoComponent::Rootfs))
     {
-        anyhow::bail!(
-            "rootfs deployment updates are managed through OSTree (/system/ostree/*)"
-        );
+        anyhow::bail!("rootfs deployment updates are managed through OSTree (/system/ostree/*)");
     }
 
     Ok(())
@@ -1446,9 +1444,7 @@ async fn query_registry(registry_url: &str) -> Result<RegistryManifest> {
         return query_github_releases(&github_api_url, &client).await;
     }
 
-    anyhow::bail!(
-        "updates: registry URL must point to a GitHub repository"
-    )
+    anyhow::bail!("updates: registry URL must point to a GitHub repository")
 }
 
 async fn query_registry_with_component_fallbacks(
@@ -1846,7 +1842,9 @@ async fn extract_and_deploy_artifact(
             let _ = fs::remove_dir_all(&tmp_dir);
         }
         RepoComponent::Rootfs => {
-            anyhow::bail!("rootfs deployment updates are managed through OSTree (/system/ostree/*)");
+            anyhow::bail!(
+                "rootfs deployment updates are managed through OSTree (/system/ostree/*)"
+            );
         }
     }
 
@@ -2733,7 +2731,10 @@ pub async fn rollback_updates(
         &mut state_file,
         "rollback",
         "success",
-        format!("Restored config backup archive: {}", snapshot_path.display()),
+        format!(
+            "Restored config backup archive: {}",
+            snapshot_path.display()
+        ),
         None,
     );
     state_file.config_rollback_path = None;

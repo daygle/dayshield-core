@@ -193,15 +193,17 @@ mod tests {
     #[test]
     fn generate_config_static_reservation_with_dns_and_ntp_overrides() {
         let mut cfg = base_config();
-        cfg.scopes[0].reservations.push(crate::config::models::Dhcp6Reservation {
-            id: Uuid::new_v4(),
-            duid: "00:03:00:01:aa:bb:cc:dd:ee:ff".into(),
-            ip_address: "fd00:1::50".into(),
-            hostname: Some("sensor".into()),
-            dns_servers: vec!["fd00:1::1".into()],
-            ntp_servers: vec!["fd00:1::2".into()],
-            description: String::new(),
-        });
+        cfg.scopes[0]
+            .reservations
+            .push(crate::config::models::Dhcp6Reservation {
+                id: Uuid::new_v4(),
+                duid: "00:03:00:01:aa:bb:cc:dd:ee:ff".into(),
+                ip_address: "fd00:1::50".into(),
+                hostname: Some("sensor".into()),
+                dns_servers: vec!["fd00:1::1".into()],
+                ntp_servers: vec!["fd00:1::2".into()],
+                description: String::new(),
+            });
         let out = generate_config(&cfg);
         assert!(out.contains("dns-servers"));
         assert!(out.contains("sntp-servers"));

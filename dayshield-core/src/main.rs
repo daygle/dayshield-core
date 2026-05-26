@@ -18,8 +18,8 @@ use tokio::net::TcpListener;
 use tracing::{info, warn};
 
 mod ai_engine;
-mod ai_model;
 mod ai_firewall;
+mod ai_model;
 mod api;
 mod auth;
 mod backup;
@@ -163,7 +163,10 @@ async fn main() -> anyhow::Result<()> {
     let app: Router = api::router(Arc::clone(&app_state));
 
     // Determine bind address from environment and persisted system settings.
-    let system_settings = app_state.config_store.load_system_settings().unwrap_or_default();
+    let system_settings = app_state
+        .config_store
+        .load_system_settings()
+        .unwrap_or_default();
     let addr = resolve_bind_addr(ipv6_enabled, &system_settings);
     let listener = TcpListener::bind(&addr).await?;
     info!("Listening on http://{}", addr);
@@ -238,7 +241,10 @@ fn print_update_status(status: &update::UpdatesStatus) {
         "  Last applied update:    {}",
         status.last_applied_at.as_deref().unwrap_or("never")
     );
-    println!("  Reboot required:        {}", yes_no(status.pending_reboot));
+    println!(
+        "  Reboot required:        {}",
+        yes_no(status.pending_reboot)
+    );
     println!(
         "  Appliance rebuild:      {}",
         yes_no(status.pending_appliance_rebuild)

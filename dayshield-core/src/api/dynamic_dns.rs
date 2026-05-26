@@ -589,10 +589,19 @@ async fn apply_cloudflare_update(
         .map_err(|err| format!("cloudflare lookup decode failed: {err}"))?;
 
     let mut payload = serde_json::Map::new();
-    payload.insert("type".into(), serde_json::Value::String(record_type.to_string()));
-    payload.insert("name".into(), serde_json::Value::String(hostname.to_string()));
+    payload.insert(
+        "type".into(),
+        serde_json::Value::String(record_type.to_string()),
+    );
+    payload.insert(
+        "name".into(),
+        serde_json::Value::String(hostname.to_string()),
+    );
     payload.insert("content".into(), serde_json::Value::String(ip.to_string()));
-    payload.insert("ttl".into(), serde_json::Value::Number(serde_json::Number::from(120)));
+    payload.insert(
+        "ttl".into(),
+        serde_json::Value::Number(serde_json::Number::from(120)),
+    );
 
     let (request, action) = if let Some(existing) = list_payload.result.first() {
         (

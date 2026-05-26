@@ -28,7 +28,7 @@ use axum::{
     extract::{Path as AxumPath, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
+    Extension, Json,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -36,6 +36,7 @@ use serde_json::Value;
 use tracing::{info, warn};
 
 use crate::{
+    auth::model::AuthenticatedUser,
     config::models::SystemSettings,
     engine::{
         dns::apply_config_with_ipv6 as apply_dns_config, interfaces::refresh_router_advertisements,
@@ -1133,18 +1134,42 @@ pub async fn check_ostree_updates() -> impl IntoResponse {
 }
 
 /// Handler: pre-download OSTree payloads for an upcoming apply operation.
-pub async fn stage_ostree_update() -> impl IntoResponse {
+pub async fn stage_ostree_update(
+    Extension(user): Extension<AuthenticatedUser>,
+) -> impl IntoResponse {
+    if let Err(reason) = authorize_sensitive_ostree_operation("stage", &user) {
+        return ostree_authorization_error_response("stage", &user, &reason);
+    }
+
     match ostree::stage_update().await {
-        Ok(result) => (StatusCode::OK, Json(serde_json::json!(result))).into_response(),
-        Err(err) => ostree_action_error_response("stage", err).await,
+        Ok(result) => {
+            audit_sensitive_ostree_result("stage", &user, result.success, &result.message);
+            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+        }
+        Err(err) => {
+            audit_sensitive_ostree_error("stage", &user, &err);
+            ostree_action_error_response("stage", err).await
+        }
     }
 }
 
 /// Handler: apply/stage OSTree update deployment.
-pub async fn apply_ostree_update() -> impl IntoResponse {
+pub async fn apply_ostree_update(
+    Extension(user): Extension<AuthenticatedUser>,
+) -> impl IntoResponse {
+    if let Err(reason) = authorize_sensitive_ostree_operation("apply", &user) {
+        return ostree_authorization_error_response("apply", &user, &reason);
+    }
+
     match ostree::apply_update().await {
-        Ok(result) => (StatusCode::OK, Json(serde_json::json!(result))).into_response(),
-        Err(err) => ostree_action_error_response("apply", err).await,
+        Ok(result) => {
+            audit_sensitive_ostree_result("apply", &user, result.success, &result.message);
+            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+        }
+        Err(err) => {
+            audit_sensitive_ostree_error("apply", &user, &err);
+            ostree_action_error_response("apply", err).await
+        }
     }
 }
 
@@ -1153,7 +1178,10 @@ pub async fn get_ostree_reboot_required() -> impl IntoResponse {
     Json(ostree::reboot_state().await)
 }
 
-async fn ostree_action_error_response(operation: &str, err: anyhow::Error) -> axum::response::Response {
+async fn ostree_action_error_response(
+    operation: &str,
+    err: anyhow::Error,
+) -> axum::response::Response {
     let status = ostree::status().await;
     let code = if status.supported {
         StatusCode::INTERNAL_SERVER_ERROR
@@ -1171,6 +1199,88 @@ async fn ostree_action_error_response(operation: &str, err: anyhow::Error) -> ax
         })),
     )
         .into_response()
+}
+
+/// Policy hook for OSTree operations that can mutate the boot deployment.
+fn authorize_sensitive_ostree_operation(
+    operation: &str,
+    user: &AuthenticatedUser,
+) -> Result<(), String> {
+    if user.username == "admin" {
+        info!(
+            target: "audit",
+            username = %user.username,
+            operation,
+            "ostree: sensitive operation authorized"
+        );
+        return Ok(());
+    }
+
+    let reason = format!(
+        "user '{}' is not allowed to run OSTree {operation}; admin identity required",
+        user.username
+    );
+    warn!(
+        target: "audit",
+        username = %user.username,
+        operation,
+        reason = %reason,
+        "ostree: sensitive operation denied"
+    );
+    Err(reason)
+}
+
+fn ostree_authorization_error_response(
+    operation: &str,
+    user: &AuthenticatedUser,
+    reason: &str,
+) -> axum::response::Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "operation": operation,
+            "success": false,
+            "message": format!("not authorized to {operation} OSTree updates"),
+            "details": [reason],
+            "user": user.username
+        })),
+    )
+        .into_response()
+}
+
+fn audit_sensitive_ostree_result(
+    operation: &str,
+    user: &AuthenticatedUser,
+    success: bool,
+    message: &str,
+) {
+    if success {
+        info!(
+            target: "audit",
+            username = %user.username,
+            operation,
+            message,
+            "ostree: sensitive operation completed"
+        );
+    } else {
+        warn!(
+            target: "audit",
+            username = %user.username,
+            operation,
+            message,
+            "ostree: sensitive operation completed unsuccessfully"
+        );
+    }
+}
+
+fn audit_sensitive_ostree_error(operation: &str, user: &AuthenticatedUser, err: &anyhow::Error) {
+    warn!(
+        target: "audit",
+        username = %user.username,
+        operation,
+        error = %err,
+        "ostree: sensitive operation failed"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1451,5 +1561,18 @@ mod tests {
             find_service_definition("anything-else"),
             Err(SystemApiError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn ostree_sensitive_operation_policy_requires_admin_identity() {
+        let admin = AuthenticatedUser {
+            username: "admin".to_string(),
+        };
+        let viewer = AuthenticatedUser {
+            username: "viewer".to_string(),
+        };
+
+        assert!(authorize_sensitive_ostree_operation("apply", &admin).is_ok());
+        assert!(authorize_sensitive_ostree_operation("apply", &viewer).is_err());
     }
 }

@@ -18,9 +18,9 @@ use tracing::{info, warn};
 
 use crate::live_logs::{
     firewall::{parse_dmesg_firewall_line, parse_journald_firewall_line},
-    ui::{self, UiLogRecord, DAYSHIELD_UI_LOG_PATH},
     suricata::parse_eve_line,
     system::{parse_journald_system_line, parse_system_text_line},
+    ui::{self, UiLogRecord, DAYSHIELD_UI_LOG_PATH},
     websocket::logs_websocket,
     LogEvent,
 };
@@ -227,13 +227,19 @@ async fn query_journal_system(from: &str, to: &str) -> Result<Vec<LogEvent>, Log
         .collect::<Vec<_>>())
 }
 
-async fn query_ui_range(from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<LogEvent>, LogsApiError> {
+async fn query_ui_range(
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Vec<LogEvent>, LogsApiError> {
     let content = match tokio::fs::read_to_string(DAYSHIELD_UI_LOG_PATH).await {
         Ok(v) => v,
         Err(e) => {
             if e.kind() == ErrorKind::NotFound {
                 if !UI_LOG_MISSING_WARNED.swap(true, Ordering::Relaxed) {
-                    info!(path = DAYSHIELD_UI_LOG_PATH, "logs/search: UI log not present yet; returning empty result");
+                    info!(
+                        path = DAYSHIELD_UI_LOG_PATH,
+                        "logs/search: UI log not present yet; returning empty result"
+                    );
                 }
                 return Ok(vec![]);
             }
@@ -269,7 +275,9 @@ fn normalize_ui_level(level: &str) -> &'static str {
 fn build_ui_log_record(request: UiLogRequest) -> Result<UiLogRecord, LogsApiError> {
     let component = request.component.trim();
     if component.is_empty() {
-        return Err(LogsApiError::Validation("component is required".to_string()));
+        return Err(LogsApiError::Validation(
+            "component is required".to_string(),
+        ));
     }
 
     let message = request.message.trim();

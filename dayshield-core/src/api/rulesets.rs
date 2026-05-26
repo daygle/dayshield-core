@@ -377,7 +377,9 @@ pub async fn list_installed(
 ) -> Result<impl IntoResponse, RulesetError> {
     let scoped_iface = normalize_scope_iface(query.iface)?;
     let rulesets = RulesetStore::new().load().unwrap_or_default();
-    let overrides = RulesetStore::new().load_interface_enabled().unwrap_or_default();
+    let overrides = RulesetStore::new()
+        .load_interface_enabled()
+        .unwrap_or_default();
     let response: Vec<InstalledRulesetResponse> = rulesets
         .iter()
         .map(|ruleset| {
@@ -505,9 +507,9 @@ pub async fn enable_ruleset(
 
         let mut overrides = store.load_interface_enabled().unwrap_or_default();
         ensure_interface_seed(&mut overrides, &iface, &rulesets);
-        let ids = overrides
-            .get_mut(&iface)
-            .ok_or_else(|| RulesetError::OperationFailed(anyhow::anyhow!("failed to scope ruleset")))?;
+        let ids = overrides.get_mut(&iface).ok_or_else(|| {
+            RulesetError::OperationFailed(anyhow::anyhow!("failed to scope ruleset"))
+        })?;
         let scoped_changed = set_iface_membership(ids, &id, true);
         if scoped_changed {
             store.save_interface_enabled(&overrides)?;
@@ -569,9 +571,9 @@ pub async fn disable_ruleset(
 
         let mut overrides = store.load_interface_enabled().unwrap_or_default();
         ensure_interface_seed(&mut overrides, &iface, &rulesets);
-        let ids = overrides
-            .get_mut(&iface)
-            .ok_or_else(|| RulesetError::OperationFailed(anyhow::anyhow!("failed to scope ruleset")))?;
+        let ids = overrides.get_mut(&iface).ok_or_else(|| {
+            RulesetError::OperationFailed(anyhow::anyhow!("failed to scope ruleset"))
+        })?;
         let scoped_changed = set_iface_membership(ids, &id, false);
         if scoped_changed {
             store.save_interface_enabled(&overrides)?;

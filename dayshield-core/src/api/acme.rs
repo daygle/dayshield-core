@@ -295,13 +295,15 @@ pub async fn delete_certificate(
     let mut deleted = false;
 
     if cert_path.exists() {
-        std::fs::remove_file(&cert_path)
-            .map_err(|err| AcmeApiError::EngineError(format!("failed to delete cert file: {err}")))?;
+        std::fs::remove_file(&cert_path).map_err(|err| {
+            AcmeApiError::EngineError(format!("failed to delete cert file: {err}"))
+        })?;
         deleted = true;
     }
     if key_path.exists() {
-        std::fs::remove_file(&key_path)
-            .map_err(|err| AcmeApiError::EngineError(format!("failed to delete key file: {err}")))?;
+        std::fs::remove_file(&key_path).map_err(|err| {
+            AcmeApiError::EngineError(format!("failed to delete key file: {err}"))
+        })?;
         deleted = true;
     }
 

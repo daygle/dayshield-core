@@ -141,10 +141,6 @@ fn default_encrypt_update_config_backups() -> bool {
     false
 }
 
-fn default_enable_rootfs_ab_updates() -> bool {
-    true
-}
-
 fn parse_auto_check_time(value: &str) -> Option<NaiveTime> {
     NaiveTime::parse_from_str(value.trim(), "%H:%M").ok()
 }
@@ -284,8 +280,6 @@ pub struct UpdateSettings {
     pub verify_artifact_signatures: bool,
     #[serde(default = "default_encrypt_update_config_backups")]
     pub encrypt_update_config_backups: bool,
-    #[serde(default = "default_enable_rootfs_ab_updates")]
-    pub enable_rootfs_ab_updates: bool,
 }
 
 impl Default for UpdateSettings {
@@ -314,7 +308,6 @@ impl Default for UpdateSettings {
             registry_url: default_registry_url(),
             verify_artifact_signatures: default_verify_artifact_signatures(),
             encrypt_update_config_backups: default_encrypt_update_config_backups(),
-            enable_rootfs_ab_updates: default_enable_rootfs_ab_updates(),
         }
     }
 }
@@ -413,8 +406,10 @@ pub struct UpdateStateFile {
 #[serde(rename_all = "camelCase")]
 pub struct RootfsUpdateState {
     pub status: String,
-    pub target_slot: Option<String>,
-    pub previous_slot: Option<String>,
+    #[serde(default, alias = "target_slot")]
+    pub target_deployment: Option<String>,
+    #[serde(default, alias = "previous_slot")]
+    pub previous_deployment: Option<String>,
     pub target_version: Option<String>,
     pub prepared_at: Option<String>,
     pub booted_at: Option<String>,
@@ -467,8 +462,6 @@ pub struct UpdatesStatus {
     pub pending_appliance_rebuild: bool,
     pub appliance_rebuild_reason: Option<String>,
     pub appliance_rebuild_marked_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rootfs_slot_status: Option<RootfsSlotStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rootfs_update: Option<RootfsUpdateState>,
     pub components: Vec<ComponentUpdateStatus>,
@@ -672,18 +665,6 @@ fn component_supports_runtime_deploy(component: RepoComponent) -> bool {
     matches!(component, RepoComponent::Core | RepoComponent::Ui)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RootfsSlotStatus {
-    pub supported: bool,
-    pub active_slot: Option<String>,
-    pub inactive_slot: Option<String>,
-    pub boot_uuid: Option<String>,
-    pub slot_a_uuid: Option<String>,
-    pub slot_b_uuid: Option<String>,
-    pub reason: Option<String>,
-}
-
 fn built_appliance_version() -> String {
     env!("CARGO_PKG_VERSION")
         .trim_start_matches('v')
@@ -844,52 +825,6 @@ fn detect_rootfs_ab_layout() -> Result<RootfsAbLayout> {
         slot_b,
         boot_uuid,
         efi_uuid,
-    })
-}
-
-fn rootfs_slot_status(
-    settings: &UpdateSettings,
-    state_file: &UpdateStateFile,
-) -> Option<RootfsSlotStatus> {
-    if !settings.enable_rootfs_ab_updates {
-        return Some(RootfsSlotStatus {
-            supported: false,
-            active_slot: None,
-            inactive_slot: None,
-            boot_uuid: None,
-            slot_a_uuid: None,
-            slot_b_uuid: None,
-            reason: Some("Primary/Secondary rootfs updates are disabled in update settings".to_string()),
-        });
-    }
-
-    match detect_rootfs_ab_layout() {
-        Ok(layout) => Some(RootfsSlotStatus {
-            supported: true,
-            active_slot: Some(layout.active.name),
-            inactive_slot: Some(layout.inactive.name),
-            boot_uuid: Some(layout.boot_uuid),
-            slot_a_uuid: Some(layout.slot_a.uuid),
-            slot_b_uuid: Some(layout.slot_b.uuid),
-            reason: None,
-        }),
-        Err(err) => Some(RootfsSlotStatus {
-            supported: false,
-            active_slot: None,
-            inactive_slot: None,
-            boot_uuid: None,
-            slot_a_uuid: None,
-            slot_b_uuid: None,
-            reason: Some(err.to_string()),
-        }),
-    }
-    .map(|mut status| {
-        if let Some(update) = &state_file.rootfs_update {
-            if status.reason.is_none() {
-                status.reason = update.last_error.clone();
-            }
-        }
-        status
     })
 }
 
@@ -2017,9 +1952,7 @@ async fn extract_and_deploy_artifact(
             let _ = fs::remove_dir_all(&tmp_dir);
         }
         RepoComponent::Rootfs => {
-            anyhow::bail!(
-                "rootfs artifacts must be staged through the Primary/Secondary slot updater"
-            );
+            anyhow::bail!("rootfs deployment updates are managed through OSTree (/system/ostree/*)");
         }
     }
 
@@ -2550,264 +2483,15 @@ async fn promote_secondary_to_primary(
 }
 
 async fn stage_rootfs_ab_update(
-    state: &AppState,
-    artifact_path: &Path,
-    version: &str,
-    state_file: &mut UpdateStateFile,
-    details: &mut Vec<String>,
+    _state: &AppState,
+    _artifact_path: &Path,
+    _version: &str,
+    _state_file: &mut UpdateStateFile,
+    _details: &mut Vec<String>,
 ) -> Result<()> {
-    let settings = load_settings(state);
-    if !settings.enable_rootfs_ab_updates {
-        anyhow::bail!("Primary/Secondary rootfs updates are disabled in update settings");
-    }
-
-    let mut layout = detect_rootfs_ab_layout()
-        .context("Primary/Secondary rootfs layout is not available on this appliance")?;
-    let inactive_name = layout.inactive.name.clone();
-    let inactive_label = layout.inactive.label.clone();
-    let inactive_device = layout.inactive.device.clone();
-    let inactive_device_arg = inactive_device.to_string_lossy().to_string();
-    let inactive_mount = Path::new(ROOTFS_SLOT_MOUNT_DIR).join(&inactive_name);
-
-    fs::create_dir_all(&inactive_mount)
-        .with_context(|| format!("failed to create {}", inactive_mount.display()))?;
-    let inactive_mount_arg = inactive_mount.to_string_lossy().to_string();
-    let _ = run_system_command("umount", &[&inactive_mount_arg]).await;
-
-    append_operation_log(
-        state_file,
-        "apply",
-        "info",
-        format!(
-            "Preparing rootfs slot {} on {}",
-            inactive_name,
-            inactive_device.display()
-        ),
-        Some("rootfs"),
-    );
-
-    run_system_command(
-        "mkfs.ext4",
-        &["-F", "-L", &inactive_label, &inactive_device_arg],
+    anyhow::bail!(
+        "Legacy rootfs slot updates are no longer supported. Root filesystem updates are managed through OSTree deployments via /system/ostree/*."
     )
-    .await?;
-    let new_uuid = device_uuid(&inactive_device)?;
-    update_layout_after_format(&mut layout, &inactive_name, new_uuid);
-
-    run_system_command("mount", &[&inactive_device_arg, &inactive_mount_arg]).await?;
-
-    // Ensure the inactive mount is writable; if it's mounted read-only try remounting RW.
-    let write_test = inactive_mount.join(".dayshield_write_test");
-    match std::fs::OpenOptions::new().write(true).create(true).open(&write_test) {
-        Ok(mut f) => {
-            let _ = f.write_all(b"ok");
-            let _ = std::fs::remove_file(&write_test);
-        }
-        Err(_) => {
-            append_operation_log(
-                state_file,
-                "apply",
-                "info",
-                format!("inactive mount {} appears read-only; attempting remount rw", inactive_mount.display()),
-                Some("rootfs"),
-            );
-            // attempt remount read-write
-            run_system_command("mount", &["-o", "remount,rw", &inactive_mount_arg]).await?;
-            // try write again
-            match std::fs::OpenOptions::new().write(true).create(true).open(&write_test) {
-                Ok(mut f) => {
-                    let _ = f.write_all(b"ok");
-                    let _ = std::fs::remove_file(&write_test);
-                }
-                Err(e) => {
-                    anyhow::bail!("inactive mount {} is not writable: {}", inactive_mount.display(), e);
-                }
-            }
-        }
-    }
-
-    let result: Result<()> = async {
-        // Try to unpack the full archive with retries. The decoder consumes the
-        // underlying file, so reopen per attempt.
-        let mut unpack_ok = false;
-        for attempt in 1..=3 {
-            let artifact_file = std::fs::File::open(artifact_path)
-                .with_context(|| format!("failed to open artifact {}", artifact_path.display()))?;
-            let decoder = zstd::stream::Decoder::new(artifact_file).with_context(|| {
-                format!("failed to initialize zstd decoder for {}", artifact_path.display())
-            })?;
-            let mut archive = tar::Archive::new(decoder);
-            match archive.unpack(&inactive_mount) {
-                Ok(()) => {
-                    unpack_ok = true;
-                    break;
-                }
-                Err(e) => {
-                    append_operation_log(
-                        state_file,
-                        "apply",
-                        "warning",
-                        format!("attempt {} to extract rootfs failed: {}", attempt, e),
-                        Some("rootfs"),
-                    );
-                    if attempt < 3 {
-                        tokio_time::sleep(Duration::from_secs(2)).await;
-                        continue;
-                    } else {
-                        anyhow::bail!("failed to extract rootfs into {} after retries: {}", inactive_mount.display(), e);
-                    }
-                }
-            }
-        }
-
-        if !unpack_ok {
-            anyhow::bail!("failed to extract rootfs into {}", inactive_mount.display());
-        }
-
-        // Defensive check: ensure the extracted inactive mount has boot files.
-        // In some failure modes the boot directory can be missing (e.g. if mount failed
-        // or extraction was partial). If boot files are missing, extract only
-        // the boot/ tree from the artifact into the inactive mount to ensure the
-        // follow-up copy of boot files works reliably.
-        let boot_dir = inactive_mount.join("boot");
-        let mut boot_ok = false;
-        if boot_dir.exists() {
-            if let Ok(mut rd) = fs::read_dir(&boot_dir) {
-                while let Some(Ok(entry)) = rd.next() {
-                    if let Some(name) = entry.file_name().to_str() {
-                        if name.starts_with("vmlinuz") || name.starts_with("initrd.img") || name.starts_with("System.map") {
-                            // Only count the entry as present if it is actually
-                            // readable — dangling symlinks (e.g. absolute symlinks
-                            // in an extracted rootfs) must not suppress the
-                            // extract_boot_from_archive fallback.
-                            if entry.path().exists() {
-                                boot_ok = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if !boot_ok {
-            append_operation_log(
-                state_file,
-                "apply",
-                "info",
-                format!("boot files missing in {} — extracting boot/ from artifact", inactive_mount.display()),
-                Some("rootfs"),
-            );
-
-            // helper: extract only entries that start with boot/ or ./boot/
-            fn extract_boot_from_archive(artifact_path: &Path, inactive_mount: &Path) -> Result<()> {
-                let artifact_file = std::fs::File::open(artifact_path)
-                    .with_context(|| format!("failed to open artifact {}", artifact_path.display()))?;
-                let decoder = zstd::stream::Decoder::new(artifact_file)
-                    .with_context(|| format!("failed to initialize zstd decoder for {}", artifact_path.display()))?;
-                let mut archive = tar::Archive::new(decoder);
-                for entry_res in archive.entries().with_context(|| "failed to read entries from rootfs archive")? {
-                    let mut entry = entry_res.with_context(|| "failed to read archive entry")?;
-                    let path = entry.path().with_context(|| "failed to get entry path")?.into_owned();
-                    let path_str = path.to_string_lossy();
-                    if path_str.starts_with("boot/") || path_str.starts_with("./boot/") {
-                        entry.unpack_in(inactive_mount).with_context(|| {
-                            format!("failed to unpack {} into {}", path.display(), inactive_mount.display())
-                        })?;
-                    }
-                }
-                Ok(())
-            }
-
-            extract_boot_from_archive(artifact_path, &inactive_mount)
-                .with_context(|| format!("failed to extract boot/ from {}", artifact_path.display()))?;
-
-            // re-check boot_dir now
-            if !boot_dir.exists() {
-                anyhow::bail!("boot directory still missing after attempting extraction into {}", inactive_mount.display());
-            }
-        }
-
-        copy_persistent_state_to_inactive(&inactive_mount).await?;
-        write_rootfs_fstab(&inactive_mount, &layout, &layout.inactive)?;
-        fs::create_dir_all(rootfs_target_path(
-            &inactive_mount,
-            Path::new("/etc/dayshield"),
-        ))?;
-        fs::write(
-            rootfs_target_path(&inactive_mount, Path::new("/etc/dayshield/rootfs-slot")),
-            format!("{}\n", layout.inactive.name),
-        )?;
-
-        // /boot is often mounted read-only on appliances.  Remount it
-        // read-write for the duration of slot file and GRUB updates.
-        let boot_was_readonly = boot_is_readonly();
-        if boot_was_readonly {
-            run_system_command("mount", &["-o", "remount,rw", "/boot"])
-                .await
-                .context("failed to remount /boot read-write")?;
-        }
-
-        let _ = copy_slot_boot_files_from_dir(Path::new("/boot"), &layout.active.name);
-        copy_slot_boot_files_from_dir(&inactive_mount.join("boot"), &layout.inactive.name)?;
-        install_grub_ab_entries(&layout, &inactive_mount).await?;
-
-        let rootfs_state = ensure_component_state(state_file, RepoComponent::Rootfs);
-        rootfs_state.rollback_version = rootfs_state
-            .current_version
-            .clone()
-            .or_else(|| rootfs_state.last_applied_version.clone());
-        rootfs_state.remote_version = Some(version.to_string());
-        rootfs_state.update_available = true;
-        rootfs_state.last_error = None;
-
-        state_file.pending_reboot = true;
-        state_file.pending_appliance_rebuild = false;
-        state_file.appliance_rebuild_reason = None;
-        state_file.rootfs_update = Some(RootfsUpdateState {
-            status: "staged".to_string(),
-            target_slot: Some(layout.inactive.name.clone()),
-            previous_slot: Some(layout.active.name.clone()),
-            target_version: Some(version.to_string()),
-            prepared_at: Some(Utc::now().to_rfc3339()),
-            booted_at: None,
-            confirmed_at: None,
-            last_error: None,
-        });
-
-        save_state(state, state_file)?;
-        mirror_update_state_to_inactive(state, state_file, &inactive_mount)?;
-
-        let target_entry = layout.inactive.grub_entry_id();
-        run_system_command("grub-reboot", &[&target_entry]).await?;
-        run_system_command("sync", &[]).await?;
-
-        // Restore /boot to read-only if it was read-only before staging.
-        if boot_was_readonly {
-            let _ = run_system_command("mount", &["-o", "remount,ro", "/boot"]).await;
-        }
-
-        details.push(format!(
-            "staged rootfs {} into slot {}; reboot will trial boot {}",
-            version, layout.inactive.name, target_entry
-        ));
-        append_operation_log(
-            state_file,
-            "apply",
-            "success",
-            format!(
-                "Rootfs {} staged to slot {}; next reboot will trial boot the new slot",
-                version, layout.inactive.name
-            ),
-            Some("rootfs"),
-        );
-        Ok(())
-    }
-    .await;
-
-    let _ = run_system_command("umount", &[&inactive_mount_arg]).await;
-
-    result
 }
 
 async fn build_component_status(
@@ -2886,23 +2570,12 @@ async fn bootstrap_missing_registry_remote_versions(
                 let rootfs_remote_version = rootfs_state.remote_version.clone();
 
                 if rootfs_update_available {
-                    let slot_status = rootfs_slot_status(settings, state_file);
-                    if slot_status.as_ref().map(|s| s.supported).unwrap_or(false) {
-                        clear_appliance_rebuild_required(state_file);
-                    } else {
-                        let reason = slot_status
-                            .and_then(|s| s.reason)
-                            .unwrap_or_else(|| {
-                                "Primary/Secondary rootfs slot layout is not available".to_string()
-                            });
-                        state_file.pending_appliance_rebuild = true;
-                        state_file.appliance_rebuild_reason = Some(format!(
-                            "Root filesystem image v{} is available, but in-place rootfs updates require a Primary/Secondary root layout with shared /boot: {}.",
-                            rootfs_remote_version.as_deref().unwrap_or("unknown"),
-                            reason
-                        ));
-                        state_file.appliance_rebuild_marked_at = None;
-                    }
+                    state_file.pending_appliance_rebuild = true;
+                    state_file.appliance_rebuild_reason = Some(format!(
+                        "Root filesystem image v{} is available. Root filesystem deployment updates are managed through OSTree (/system/ostree/*).",
+                        rootfs_remote_version.as_deref().unwrap_or("unknown")
+                    ));
+                    state_file.appliance_rebuild_marked_at = None;
                 } else {
                     clear_appliance_rebuild_required(state_file);
                 }
@@ -2930,8 +2603,6 @@ pub async fn get_status(state: &AppState) -> UpdatesStatus {
 
     let components = vec![core, ui, rootfs];
     let available_update_count = components.iter().filter(|c| c.update_available).count();
-    let rootfs_slot_status = rootfs_slot_status(&settings, &state_file);
-
     UpdatesStatus {
         settings,
         last_checked_at: state_file.last_checked_at,
@@ -2940,7 +2611,6 @@ pub async fn get_status(state: &AppState) -> UpdatesStatus {
         pending_appliance_rebuild: state_file.pending_appliance_rebuild,
         appliance_rebuild_reason: state_file.appliance_rebuild_reason,
         appliance_rebuild_marked_at: state_file.appliance_rebuild_marked_at,
-        rootfs_slot_status,
         rootfs_update: state_file.rootfs_update,
         components,
         available_update_count: if available_update_count > 0 {
@@ -3085,20 +2755,12 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
 
                 if matches!(comp, RepoComponent::Rootfs) {
                     if update_available {
-                        let slot_status = rootfs_slot_status(&settings, &state_file);
-                        if slot_status.as_ref().map(|s| s.supported).unwrap_or(false) {
-                            clear_appliance_rebuild_required(&mut state_file);
-                        } else {
-                            let reason = slot_status.and_then(|s| s.reason).unwrap_or_else(|| {
-                                "Primary/Secondary rootfs slot layout is not available".to_string()
-                            });
-                            state_file.pending_appliance_rebuild = true;
-                            state_file.appliance_rebuild_reason = Some(format!(
-                                "Root filesystem image v{} is available, but in-place rootfs updates require a Primary/Secondary root layout with shared /boot: {}.",
-                                artifact.version, reason
-                            ));
-                            state_file.appliance_rebuild_marked_at = None;
-                        }
+                        state_file.pending_appliance_rebuild = true;
+                        state_file.appliance_rebuild_reason = Some(format!(
+                            "Root filesystem image v{} is available. Root filesystem deployment updates are managed through OSTree (/system/ostree/*).",
+                            artifact.version
+                        ));
+                        state_file.appliance_rebuild_marked_at = None;
                     } else {
                         clear_appliance_rebuild_required(&mut state_file);
                     }
@@ -3493,14 +3155,7 @@ async fn apply_updates_registry(
     Ok(UpdatesActionResult {
         operation: "apply".to_string(),
         success: true,
-        message: if components_to_update
-            .iter()
-            .any(|c| matches!(c, RepoComponent::Rootfs))
-        {
-            "rootfs update staged; reboot required to trial boot the new slot".to_string()
-        } else {
-            "updates applied successfully".to_string()
-        },
+        message: "updates applied successfully".to_string(),
         details,
         status: get_status(state).await,
     })
@@ -3578,45 +3233,14 @@ pub async fn apply_updates(
 
 async fn rollback_rootfs_update(state: &AppState) -> Result<UpdatesActionResult> {
     let mut state_file = load_state(state);
-    let update = state_file.rootfs_update.clone();
-    let previous_slot = update
-        .as_ref()
-        .and_then(|state| state.previous_slot.clone())
-        .ok_or_else(|| anyhow::anyhow!("no previous rootfs slot is recorded for rollback"))?;
-
-    let entry = format!("{ROOTFS_GRUB_ENTRY_PREFIX}{previous_slot}");
-    run_system_command("grub-reboot", &[&entry]).await?;
-    state_file.pending_reboot = true;
-    state_file.rootfs_update = Some(RootfsUpdateState {
-        status: "rollbackScheduled".to_string(),
-        last_error: None,
-        ..update.unwrap_or(RootfsUpdateState {
-            status: "rollbackScheduled".to_string(),
-            target_slot: None,
-            previous_slot: Some(previous_slot.clone()),
-            target_version: None,
-            prepared_at: None,
-            booted_at: None,
-            confirmed_at: None,
-            last_error: None,
-        })
-    });
-    append_operation_log(
-        &mut state_file,
-        "rollback",
-        "success",
-        format!("Rootfs rollback scheduled to slot {previous_slot}; reboot required"),
-        Some("rootfs"),
-    );
+    let message = "Legacy rootfs slot rollback is no longer supported. Use OSTree deployment rollback workflow instead.";
+    append_operation_log(&mut state_file, "rollback", "error", message, Some("rootfs"));
     save_state(state, &state_file)?;
-
     Ok(UpdatesActionResult {
         operation: "rollback".to_string(),
-        success: true,
-        message: "rootfs rollback scheduled; reboot required".to_string(),
-        details: vec![format!(
-            "scheduled next boot into rootfs slot {previous_slot}"
-        )],
+        success: false,
+        message: message.to_string(),
+        details: vec![message.to_string()],
         status: get_status(state).await,
     })
 }
@@ -4101,7 +3725,7 @@ async fn reconcile_rootfs_boot_state(state: &AppState) -> Result<()> {
             _ => return Ok(()),
         },
     };
-    let target_slot = match update.target_slot.clone() {
+    let target_slot = match update.target_deployment.clone() {
         Some(slot) => slot,
         None => return Ok(()),
     };
@@ -4233,7 +3857,7 @@ async fn reconcile_rootfs_boot_state(state: &AppState) -> Result<()> {
             let previous_slot = state_file
                 .rootfs_update
                 .as_ref()
-                .and_then(|update| update.previous_slot.clone());
+                .and_then(|update| update.previous_deployment.clone());
             let message = format!("Rootfs slot {target_slot} failed health confirmation: {err}");
             if let Some(update) = &mut state_file.rootfs_update {
                 update.status = "rollbackScheduled".to_string();

@@ -144,7 +144,6 @@ async fn main() -> anyhow::Result<()> {
 
     // Start the periodic software update checker.
     update::start_update_checker(Arc::clone(&app_state)).await;
-    update::start_rootfs_boot_finalizer(Arc::clone(&app_state));
 
     // Start AI engine background maintenance.
     ai_engine::start_background_tasks(Arc::clone(&app_state)).await;
@@ -222,10 +221,9 @@ fn parse_update_component(value: Option<&str>) -> anyhow::Result<update::UpdateC
     match value.unwrap_or("both") {
         "core" => Ok(update::UpdateComponent::Core),
         "ui" => Ok(update::UpdateComponent::Ui),
-        "rootfs" => Ok(update::UpdateComponent::Rootfs),
         "both" => Ok(update::UpdateComponent::Both),
         other => {
-            anyhow::bail!("invalid update component '{other}' (expected core, ui, rootfs, or both)")
+            anyhow::bail!("invalid update component '{other}' (expected core, ui, or both)")
         }
     }
 }
@@ -264,24 +262,6 @@ fn print_update_status(status: &update::UpdatesStatus) {
         if let Some(error) = component.last_error.as_deref() {
             if !error.trim().is_empty() {
                 println!("    Error:     {error}");
-            }
-        }
-    }
-    if let Some(slot) = &status.rootfs_slot_status {
-        println!();
-        println!("Rootfs slots:");
-        println!("  Supported: {}", yes_no(slot.supported));
-        println!(
-            "  Active:    {}",
-            slot.active_slot.as_deref().unwrap_or("unknown")
-        );
-        println!(
-            "  Inactive:  {}",
-            slot.inactive_slot.as_deref().unwrap_or("unknown")
-        );
-        if let Some(reason) = slot.reason.as_deref() {
-            if !reason.trim().is_empty() {
-                println!("  Note:      {reason}");
             }
         }
     }

@@ -1329,6 +1329,39 @@ fn clear_appliance_rebuild_required(state_file: &mut UpdateStateFile) {
     state_file.appliance_rebuild_marked_at = Some(Utc::now().to_rfc3339());
 }
 
+fn clear_rootfs_update_required(state_file: &mut UpdateStateFile) {
+    clear_appliance_rebuild_required(state_file);
+    let rootfs = ensure_component_state(state_file, RepoComponent::Rootfs);
+    rootfs.remote_version = rootfs
+        .current_version
+        .clone()
+        .or_else(|| rootfs.last_applied_version.clone())
+        .or_else(|| Some(built_appliance_version()));
+    rootfs.update_available = false;
+    rootfs.last_error = None;
+}
+
+fn sanitize_rootfs_update_state(state_file: &mut UpdateStateFile) -> bool {
+    let Some(rootfs) = state_file
+        .components
+        .iter()
+        .find(|c| c.component == RepoComponent::Rootfs.as_str())
+    else {
+        return false;
+    };
+
+    let Some(remote_version) = rootfs.remote_version.as_deref() else {
+        return false;
+    };
+
+    if is_artifact_version(remote_version) {
+        return false;
+    }
+
+    clear_rootfs_update_required(state_file);
+    true
+}
+
 fn acknowledge_rootfs_rebuild(state_file: &mut UpdateStateFile) {
     let rootfs = ensure_component_state(state_file, RepoComponent::Rootfs);
     if let Some(remote_version) = rootfs.remote_version.clone() {
@@ -1491,10 +1524,55 @@ async fn query_registry_with_component_fallbacks(
 }
 
 fn artifact_version_from_name(component: &str, asset_name: &str) -> Option<String> {
-    asset_name
+    let version = asset_name
         .strip_prefix(&format!("{component}-v"))
         .and_then(|s| s.strip_suffix(".tar.zst"))
-        .map(|s| s.to_string())
+        .filter(|version| is_artifact_version(version))?;
+
+    Some(version.to_string())
+}
+
+fn is_artifact_version(version: &str) -> bool {
+    let mut segment_count = 0;
+    for segment in version.split('.') {
+        if segment.is_empty() || !segment.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        segment_count += 1;
+    }
+
+    segment_count >= 2
+}
+
+fn artifact_version_segments(version: &str) -> Option<Vec<u64>> {
+    if !is_artifact_version(version) {
+        return None;
+    }
+
+    version
+        .split('.')
+        .map(|segment| segment.parse::<u64>().ok())
+        .collect()
+}
+
+fn is_remote_version_newer(current: &str, remote: &str) -> bool {
+    let (Some(current_segments), Some(remote_segments)) = (
+        artifact_version_segments(current),
+        artifact_version_segments(remote),
+    ) else {
+        return current != remote;
+    };
+
+    let segment_count = current_segments.len().max(remote_segments.len());
+    for idx in 0..segment_count {
+        let current_segment = current_segments.get(idx).copied().unwrap_or(0);
+        let remote_segment = remote_segments.get(idx).copied().unwrap_or(0);
+        if remote_segment != current_segment {
+            return remote_segment > current_segment;
+        }
+    }
+
+    false
 }
 
 fn is_sha256_hex(value: &str) -> bool {
@@ -1838,7 +1916,7 @@ async fn bootstrap_missing_registry_remote_versions(
                 let update_available = comp_state
                     .current_version
                     .as_ref()
-                    .map(|current| current != &artifact.version)
+                    .map(|current| is_remote_version_newer(current, &artifact.version))
                     .unwrap_or(false);
 
                 comp_state.remote_version = Some(artifact.version.clone());
@@ -1858,7 +1936,7 @@ async fn bootstrap_missing_registry_remote_versions(
                     ));
                     state_file.appliance_rebuild_marked_at = None;
                 } else {
-                    clear_appliance_rebuild_required(state_file);
+                    clear_rootfs_update_required(state_file);
                 }
             }
 
@@ -1875,6 +1953,12 @@ async fn bootstrap_missing_registry_remote_versions(
 pub async fn get_status(state: &AppState) -> UpdatesStatus {
     let settings = load_settings(state);
     let mut state_file = load_state(state);
+
+    if sanitize_rootfs_update_state(&mut state_file) {
+        if let Err(err) = save_state(state, &state_file) {
+            warn!(error = %err, "updates: failed to persist sanitized rootfs update state");
+        }
+    }
 
     bootstrap_missing_registry_remote_versions(state, &settings, &mut state_file).await;
 
@@ -2025,7 +2109,7 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
                     let update_available = comp_state
                         .current_version
                         .as_ref()
-                        .map(|current| current != &artifact.version)
+                        .map(|current| is_remote_version_newer(current, &artifact.version))
                         .unwrap_or(false);
                     comp_state.remote_version = Some(artifact.version.clone());
                     comp_state.update_available = update_available;
@@ -2042,7 +2126,7 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
                         ));
                         state_file.appliance_rebuild_marked_at = None;
                     } else {
-                        clear_appliance_rebuild_required(&mut state_file);
+                        clear_rootfs_update_required(&mut state_file);
                     }
                 }
 
@@ -2055,7 +2139,7 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
             }
 
             if !seen_components.contains(RepoComponent::Rootfs.as_str()) {
-                clear_appliance_rebuild_required(&mut state_file);
+                clear_rootfs_update_required(&mut state_file);
             }
 
             save_state(state, &state_file)?;
@@ -2118,14 +2202,18 @@ async fn apply_updates_registry(
                         .or_else(|| entry.last_applied_version.clone())
                 });
 
-            if current_version.as_deref() == Some(artifact.version.as_str()) {
+            if current_version
+                .as_deref()
+                .map(|current| !is_remote_version_newer(current, &artifact.version))
+                .unwrap_or(false)
+            {
                 skipped_up_to_date.push(format!("{}-{}", artifact.component, artifact.version));
                 append_operation_log(
                     &mut state_file,
                     "apply",
                     "info",
                     format!(
-                        "{} already at v{}; skipping apply",
+                        "{} already at or newer than v{}; skipping apply",
                         artifact.component, artifact.version
                     ),
                     Some(&artifact.component),
@@ -3020,6 +3108,10 @@ mod tests {
             Some("1.2.3".to_string())
         );
         assert_eq!(
+            artifact_version_from_name("rootfs", "rootfs-v1.0.1.tar.zst"),
+            Some("1.0.1".to_string())
+        );
+        assert_eq!(
             artifact_version_from_name("rootfs", "rootfs-v2026.05.21.tar.zst"),
             Some("2026.05.21".to_string())
         );
@@ -3027,6 +3119,48 @@ mod tests {
             artifact_version_from_name("ui", "dayshield-ui-v1.2.3.tar.zst"),
             None
         );
+        assert_eq!(
+            artifact_version_from_name("rootfs", "rootfs-v1.0.0-ostree-repo.tar.zst"),
+            None
+        );
+    }
+
+    #[test]
+    fn sanitize_rootfs_update_state_clears_ostree_repo_asset_version() {
+        let mut state = super::UpdateStateFile {
+            pending_appliance_rebuild: true,
+            appliance_rebuild_reason: Some(
+                "Root filesystem image v1.0.0-ostree-repo is available".to_string(),
+            ),
+            components: vec![super::ComponentState {
+                component: "rootfs".to_string(),
+                current_version: Some("1.0.0".to_string()),
+                remote_version: Some("1.0.0-ostree-repo".to_string()),
+                update_available: true,
+                ..super::ComponentState::default()
+            }],
+            ..super::UpdateStateFile::default()
+        };
+
+        assert!(super::sanitize_rootfs_update_state(&mut state));
+        let rootfs = state
+            .components
+            .iter()
+            .find(|component| component.component == "rootfs")
+            .expect("rootfs component");
+        assert_eq!(rootfs.remote_version.as_deref(), Some("1.0.0"));
+        assert!(!rootfs.update_available);
+        assert!(!state.pending_appliance_rebuild);
+        assert!(state.appliance_rebuild_reason.is_none());
+    }
+
+    #[test]
+    fn remote_version_detection_requires_newer_numeric_version() {
+        assert!(super::is_remote_version_newer("1.0.0", "1.0.1"));
+        assert!(super::is_remote_version_newer("1.0.9", "1.0.10"));
+        assert!(!super::is_remote_version_newer("1.0.0", "1.0.0"));
+        assert!(!super::is_remote_version_newer("1.0.1", "1.0.0"));
+        assert!(!super::is_remote_version_newer("1.0.0", "1.0"));
     }
 
     #[test]

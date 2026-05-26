@@ -1,18 +1,16 @@
 use std::{
     collections::HashSet,
     env, fs,
-    io::Write,
     path::{Path, PathBuf},
-    process::Command as StdCommand,
     sync::OnceLock,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
 use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveTime, Timelike, Utc};
 use reqwest::header::{HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde::{Deserialize, Serialize};
-use tokio::{process::Command, sync::Mutex, time as tokio_time};
+use tokio::{process::Command, sync::Mutex};
 use tracing::{info, warn};
 
 use crate::backup::{
@@ -32,17 +30,6 @@ const RUNTIME_ROLLBACK_DIR: &str = "/var/lib/dayshield/update/rollback";
 const DEFAULT_TRUSTED_SIGNERS_FILE: &str = "/etc/dayshield/update_trusted_signers";
 const ARTIFACT_STAGING_DIR: &str = "/var/lib/dayshield/update-staging";
 const UPDATE_BACKUP_KEY_FILE: &str = "update_backup_key";
-const ROOTFS_SLOT_A_LABEL: &str = "DS_PRIMARY";
-const ROOTFS_SLOT_B_LABEL: &str = "DS_SECONDARY";
-const ROOTFS_SLOT_A_LEGACY_LABEL: &str = "DAYSHIELD_ROOT_A";
-const ROOTFS_SLOT_B_LEGACY_LABEL: &str = "DAYSHIELD_ROOT_B";
-const ROOTFS_BOOT_LABEL: &str = "DAYSHIELD_BOOT";
-const ROOTFS_SLOT_MOUNT_DIR: &str = "/var/lib/dayshield/update/rootfs-slot";
-const ROOTFS_BOOT_SLOT_DIR: &str = "/boot/dayshield";
-const ROOTFS_GRUB_SCRIPT: &str = "/etc/grub.d/09_dayshield_ab";
-const ROOTFS_GRUB_ENTRY_PREFIX: &str = "dayshield-";
-const ROOTFS_ISO_UPGRADE_MARKER: &str = "rootfs-iso-upgrade.json";
-const ROOTFS_BOOT_CONFIRM_DELAY_SECS: u64 = 90;
 const UPDATE_HTTP_USER_AGENT: &str = concat!("dayshield-core/", env!("CARGO_PKG_VERSION"));
 const ALL_REPO_COMPONENTS: [RepoComponent; 3] = [
     RepoComponent::Core,
@@ -348,11 +335,13 @@ impl RepoComponent {
 }
 
 fn ensure_registry_updatable_selection(selected_components: &[RepoComponent]) -> Result<()> {
-    let rootfs_selected = selected_components
+    if selected_components
         .iter()
-        .any(|c| matches!(c, RepoComponent::Rootfs));
-    if rootfs_selected && selected_components.len() > 1 {
-        anyhow::bail!("rootfs updates must be staged separately from runtime core/ui updates");
+        .any(|c| matches!(c, RepoComponent::Rootfs))
+    {
+        anyhow::bail!(
+            "rootfs deployment updates are managed through OSTree (/system/ostree/*)"
+        );
     }
 
     Ok(())
@@ -395,26 +384,9 @@ pub struct UpdateStateFile {
     #[serde(default)]
     pub config_rollback_path: Option<String>,
     #[serde(default)]
-    pub rootfs_update: Option<RootfsUpdateState>,
-    #[serde(default)]
     pub components: Vec<ComponentState>,
     #[serde(default)]
     pub operation_logs: Vec<UpdateLogEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RootfsUpdateState {
-    pub status: String,
-    #[serde(default, alias = "target_slot")]
-    pub target_deployment: Option<String>,
-    #[serde(default, alias = "previous_slot")]
-    pub previous_deployment: Option<String>,
-    pub target_version: Option<String>,
-    pub prepared_at: Option<String>,
-    pub booted_at: Option<String>,
-    pub confirmed_at: Option<String>,
-    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -462,8 +434,6 @@ pub struct UpdatesStatus {
     pub pending_appliance_rebuild: bool,
     pub appliance_rebuild_reason: Option<String>,
     pub appliance_rebuild_marked_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rootfs_update: Option<RootfsUpdateState>,
     pub components: Vec<ComponentUpdateStatus>,
     /// Number of components with available updates (computed server-side)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -582,10 +552,6 @@ fn state_path(state: &AppState) -> PathBuf {
     config_dir(state).join(STATE_FILE)
 }
 
-fn rootfs_iso_upgrade_marker_path(state: &AppState) -> PathBuf {
-    config_dir(state).join(ROOTFS_ISO_UPGRADE_MARKER)
-}
-
 fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -676,156 +642,6 @@ fn current_version_baseline(saved: Option<&ComponentState>) -> Option<String> {
         .and_then(|s| s.current_version.clone())
         .or_else(|| saved.and_then(|s| s.last_applied_version.clone()))
         .or_else(|| Some(built_appliance_version()))
-}
-
-#[derive(Debug, Clone)]
-struct RootfsSlot {
-    name: String,
-    label: String,
-    device: PathBuf,
-    uuid: String,
-}
-
-impl RootfsSlot {
-    fn grub_entry_id(&self) -> String {
-        format!("{ROOTFS_GRUB_ENTRY_PREFIX}{}", self.name)
-    }
-}
-
-#[derive(Debug, Clone)]
-struct RootfsAbLayout {
-    active: RootfsSlot,
-    inactive: RootfsSlot,
-    slot_a: RootfsSlot,
-    slot_b: RootfsSlot,
-    boot_uuid: String,
-    efi_uuid: Option<String>,
-}
-
-fn command_stdout_sync(program: &str, args: &[&str]) -> Result<String> {
-    let output = StdCommand::new(program)
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to run {program}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        anyhow::bail!(
-            "{} {} failed{}",
-            program,
-            args.join(" "),
-            if stderr.is_empty() {
-                String::new()
-            } else {
-                format!(": {stderr}")
-            }
-        );
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-async fn run_system_command(program: &str, args: &[&str]) -> Result<String> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .await
-        .with_context(|| format!("failed to run {program}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        anyhow::bail!(
-            "{} {} failed{}",
-            program,
-            args.join(" "),
-            if stderr.is_empty() {
-                String::new()
-            } else {
-                format!(": {stderr}")
-            }
-        );
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn device_by_label_optional(label: &str) -> Option<PathBuf> {
-    command_stdout_sync("blkid", &["-L", label])
-        .ok()
-        .filter(|device| !device.is_empty())
-        .map(PathBuf::from)
-}
-
-fn device_by_label(label: &str) -> Result<PathBuf> {
-    device_by_label_optional(label)
-        .ok_or_else(|| anyhow::anyhow!("no block device found with label {label}"))
-}
-
-fn device_uuid(device: &Path) -> Result<String> {
-    let device = device.to_string_lossy();
-    command_stdout_sync("blkid", &["-s", "UUID", "-o", "value", &device])
-}
-
-fn mount_uuid(target: &str) -> Result<String> {
-    command_stdout_sync("findmnt", &["-n", "-o", "UUID", "--target", target])
-}
-
-fn slot_from_labels(name: &str, label: &str, legacy_label: &str) -> Result<RootfsSlot> {
-    let device = device_by_label_optional(label)
-        .or_else(|| device_by_label_optional(legacy_label))
-        .ok_or_else(|| {
-            anyhow::anyhow!("no block device found with label {label} or {legacy_label}")
-        })?;
-    let uuid = device_uuid(&device)?;
-    Ok(RootfsSlot {
-        name: name.to_string(),
-        label: label.to_string(),
-        device,
-        uuid,
-    })
-}
-
-fn detect_rootfs_ab_layout() -> Result<RootfsAbLayout> {
-    let slot_a = slot_from_labels("a", ROOTFS_SLOT_A_LABEL, ROOTFS_SLOT_A_LEGACY_LABEL)?;
-    let slot_b = slot_from_labels("b", ROOTFS_SLOT_B_LABEL, ROOTFS_SLOT_B_LEGACY_LABEL)?;
-    let active_uuid = mount_uuid("/")?;
-    let boot_uuid = {
-        let boot_device = device_by_label(ROOTFS_BOOT_LABEL)?;
-        let boot_uuid = device_uuid(&boot_device)?;
-        let mounted_boot_uuid = mount_uuid("/boot")?;
-        if mounted_boot_uuid != boot_uuid {
-            anyhow::bail!(
-                "/boot is not mounted from {} (mounted UUID {}, expected {})",
-                ROOTFS_BOOT_LABEL,
-                mounted_boot_uuid,
-                boot_uuid
-            );
-        }
-        boot_uuid
-    };
-    let efi_uuid = mount_uuid("/boot/efi").ok();
-
-    let (active, inactive) = if active_uuid == slot_a.uuid {
-        (slot_a.clone(), slot_b.clone())
-    } else if active_uuid == slot_b.uuid {
-        (slot_b.clone(), slot_a.clone())
-    } else {
-        anyhow::bail!(
-            "active root UUID {} does not match {} or {}",
-            active_uuid,
-            ROOTFS_SLOT_A_LABEL,
-            ROOTFS_SLOT_B_LABEL
-        );
-    };
-
-    Ok(RootfsAbLayout {
-        active,
-        inactive,
-        slot_a,
-        slot_b,
-        boot_uuid,
-        efi_uuid,
-    })
 }
 
 fn runtime_marker_path(component: RepoComponent) -> PathBuf {
@@ -1959,541 +1775,6 @@ async fn extract_and_deploy_artifact(
     Ok(())
 }
 
-fn rootfs_target_path(mount_dir: &Path, absolute_path: &Path) -> PathBuf {
-    mount_dir.join(absolute_path.strip_prefix("/").unwrap_or(absolute_path))
-}
-
-fn write_rootfs_fstab(mount_dir: &Path, layout: &RootfsAbLayout, slot: &RootfsSlot) -> Result<()> {
-    let mut content = format!(
-        "# /etc/fstab - generated by DayShield Primary/Secondary rootfs updater\n\
-         UUID={}  /          ext4  errors=remount-ro,noatime  0  1\n\
-         UUID={}  /boot      ext4  defaults,noatime           0  2\n",
-        slot.uuid, layout.boot_uuid
-    );
-    if let Some(efi_uuid) = &layout.efi_uuid {
-        content.push_str(&format!(
-            "UUID={}  /boot/efi  vfat  umask=0077        0  2\n",
-            efi_uuid
-        ));
-    }
-    content.push_str("tmpfs     /tmp       tmpfs defaults           0  0\n");
-
-    let target = rootfs_target_path(mount_dir, Path::new("/etc/fstab"));
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&target, content).with_context(|| format!("failed to write {}", target.display()))
-}
-
-async fn copy_persistent_path(mount_dir: &Path, path: &str) -> Result<()> {
-    let source = Path::new(path);
-    if !source.exists() {
-        return Ok(());
-    }
-
-    let target = rootfs_target_path(mount_dir, source);
-    if target.is_dir() {
-        fs::remove_dir_all(&target)
-            .with_context(|| format!("failed to remove {}", target.display()))?;
-    } else if target.exists() {
-        fs::remove_file(&target)
-            .with_context(|| format!("failed to remove {}", target.display()))?;
-    }
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let mount_dir_arg = mount_dir.to_string_lossy().to_string();
-    if source.is_dir() && mount_dir.starts_with(source) {
-        // The mount point can be inside the source directory (for example,
-        // the inactive rootfs slot is mounted under /var/lib/dayshield/update/rootfs-slot).
-        // In that case, copying the whole source path would recurse into the mounted target.
-        for entry in fs::read_dir(source)? {
-            let entry = entry?;
-            let entry_path = entry.path();
-            if mount_dir.starts_with(&entry_path) {
-                continue;
-            }
-            // Skip the artifact-staging directory — it is transient, can be
-            // several hundred MB (rootfs + other update tarballs), and is
-            // removed from the inactive mount immediately after this loop.
-            // Copying it wastes space on the inactive partition and can cause
-            // ENOSPC on smaller devices.
-            if entry.file_name() == std::ffi::OsStr::new("update-staging") {
-                continue;
-            }
-            run_system_command(
-                "cp",
-                &["-a", "--parents", &entry_path.to_string_lossy(), &mount_dir_arg],
-            )
-            .await?;
-        }
-    } else {
-        run_system_command("cp", &["-a", "--parents", path, &mount_dir_arg]).await?;
-    }
-    Ok(())
-}
-
-async fn copy_persistent_state_to_inactive(mount_dir: &Path) -> Result<()> {
-    for path in [
-        "/etc/dayshield",
-        "/etc/wireguard",
-        "/etc/cloudflared",
-        "/etc/hostname",
-        "/etc/hosts",
-        "/etc/machine-id",
-        "/etc/passwd",
-        "/etc/shadow",
-        "/etc/group",
-        "/etc/gshadow",
-        "/etc/ssh",
-        "/etc/systemd/network",
-        "/var/lib/dayshield",
-        "/var/lib/cloudflared",
-    ] {
-        copy_persistent_path(mount_dir, path).await?;
-    }
-
-    for transient in [
-        "var/lib/dayshield/update-staging",
-        "var/lib/dayshield/update/rootfs-slot",
-    ] {
-        let target = mount_dir.join(transient);
-        if target.exists() {
-            fs::remove_dir_all(&target)
-                .with_context(|| format!("failed to remove {}", target.display()))?;
-        }
-    }
-
-    Ok(())
-}
-
-fn newest_boot_file(source_boot: &Path, prefix: &str) -> Result<PathBuf> {
-    let exact = source_boot.join(prefix.trim_end_matches('-'));
-    if exact.exists() {
-        return Ok(exact);
-    }
-
-    let mut candidates = Vec::new();
-    for entry in fs::read_dir(source_boot)
-        .with_context(|| format!("failed to read {}", source_boot.display()))?
-    {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name == prefix.trim_end_matches('-') || name.starts_with(prefix) {
-            let path = entry.path();
-            // Exclude dangling symlinks: path.exists() follows symlinks and returns
-            // false when the ultimate target is missing (e.g. absolute symlinks in
-            // an extracted rootfs that point to /vmlinuz-* on the running system).
-            if path.exists() {
-                candidates.push(path);
-            }
-        }
-    }
-    candidates.sort();
-    candidates
-        .pop()
-        .ok_or_else(|| anyhow::anyhow!("no {} file found in {}", prefix, source_boot.display()))
-}
-
-// Extract only entries that are under boot/ (or ./boot/) from a zstd-compressed
-// tar archive into the provided destination path. This is a focused helper
-// that can be called from code and unit tests.
-fn extract_boot_from_archive(artifact_path: &Path, inactive_mount: &Path) -> Result<()> {
-    let artifact_file = std::fs::File::open(artifact_path)
-        .with_context(|| format!("failed to open artifact {}", artifact_path.display()))?;
-    let decoder = zstd::stream::Decoder::new(artifact_file)
-        .with_context(|| format!("failed to initialize zstd decoder for {}", artifact_path.display()))?;
-    let mut archive = tar::Archive::new(decoder);
-    for entry_res in archive.entries().with_context(|| "failed to read entries from rootfs archive")? {
-        let mut entry = entry_res.with_context(|| "failed to read archive entry")?;
-        let path = entry.path().with_context(|| "failed to get entry path")?.into_owned();
-        let path_str = path.to_string_lossy();
-        if path_str.starts_with("boot/") || path_str.starts_with("./boot/") {
-            entry.unpack_in(inactive_mount).with_context(|| {
-                format!("failed to unpack {} into {}", path.display(), inactive_mount.display())
-            })?;
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests_boot {
-    use super::extract_boot_from_archive;
-    use std::fs::{self, File};
-    use std::io::Write;
-    use std::path::Path;
-    use tar::Builder;
-
-    #[test]
-    fn test_extract_boot_from_archive() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let tmpdir = tmp.path();
-
-        // create a small boot tree in a temp dir
-        let bootdir = tmpdir.join("boot-src");
-        fs::create_dir_all(&bootdir).unwrap();
-        let vmlinuz = bootdir.join("vmlinuz-test");
-        let mut f = File::create(&vmlinuz).unwrap();
-        writeln!(f, "kernel").unwrap();
-        let initrd = bootdir.join("initrd.img-test");
-        let mut f2 = File::create(&initrd).unwrap();
-        writeln!(f2, "initrd").unwrap();
-
-        // create a tar archive with boot/ files
-        let tar_path = tmpdir.join("rootfs.tar");
-        let tar_gz = File::create(&tar_path).unwrap();
-        let mut tar_builder = Builder::new(tar_gz);
-
-        tar_builder
-            .append_path_with_name(&vmlinuz, Path::new("boot").join("vmlinuz-test"))
-            .unwrap();
-        tar_builder
-            .append_path_with_name(&initrd, Path::new("boot").join("initrd.img-test"))
-            .unwrap();
-        tar_builder.finish().unwrap();
-
-        // compress with zstd
-        let tar_bytes = fs::read(&tar_path).unwrap();
-        let zst_path = tmpdir.join("rootfs.tar.zst");
-        let zst_file = File::create(&zst_path).unwrap();
-        zstd::stream::copy_encode(&tar_bytes[..], zst_file, 0).unwrap();
-
-        // prepare dest
-        let dest = tmpdir.join("dest");
-        fs::create_dir_all(&dest).unwrap();
-
-        // call helper
-        extract_boot_from_archive(&zst_path, &dest).expect("extract should succeed");
-
-        // assert files exist
-        assert!(dest.join("boot/vmlinuz-test").exists());
-        assert!(dest.join("boot/initrd.img-test").exists());
-    }
-}
-
-/// Returns true when /boot is currently mounted read-only.
-/// Probes by attempting a temporary write rather than parsing /proc/mounts,
-/// so it works regardless of how the filesystem was mounted.
-fn boot_is_readonly() -> bool {
-    let probe = Path::new("/boot/.dayshield-rw-probe");
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .open(probe)
-    {
-        Ok(_) => {
-            let _ = std::fs::remove_file(probe);
-            false
-        }
-        Err(_) => true,
-    }
-}
-
-fn copy_slot_boot_files_from_dir(source_boot: &Path, slot_name: &str) -> Result<()> {
-    let vmlinuz = newest_boot_file(source_boot, "vmlinuz-")
-        .or_else(|_| newest_boot_file(source_boot, "vmlinuz"))?;
-    let initrd = newest_boot_file(source_boot, "initrd.img-")
-        .or_else(|_| newest_boot_file(source_boot, "initrd.img"))?;
-    let slot_dir = Path::new(ROOTFS_BOOT_SLOT_DIR).join(format!("slot-{slot_name}"));
-    fs::create_dir_all(&slot_dir)
-        .with_context(|| format!("failed to create {}", slot_dir.display()))?;
-
-    // Preflight write test so we can fail fast with a clearer message when
-    // /boot is read-only or out of space.
-    let write_probe = slot_dir.join(".dayshield-write-probe");
-    fs::write(&write_probe, b"probe").with_context(|| {
-        format!(
-            "boot slot directory {} is not writable (check /boot mount mode and free space)",
-            slot_dir.display()
-        )
-    })?;
-    let _ = fs::remove_file(&write_probe);
-
-    let vmlinuz_target = slot_dir.join("vmlinuz");
-    fs::copy(&vmlinuz, &vmlinuz_target).with_context(|| {
-        format!(
-            "failed to copy {} to {}",
-            vmlinuz.display(),
-            vmlinuz_target.display()
-        )
-    })?;
-    let initrd_target = slot_dir.join("initrd.img");
-    fs::copy(&initrd, &initrd_target).with_context(|| {
-        format!(
-            "failed to copy {} to {}",
-            initrd.display(),
-            initrd_target.display()
-        )
-    })?;
-    Ok(())
-}
-
-fn copy_slot_boot_files_between_slots(source_slot: &str, target_slot: &str) -> Result<()> {
-    let source_dir = Path::new(ROOTFS_BOOT_SLOT_DIR).join(format!("slot-{source_slot}"));
-    let target_dir = Path::new(ROOTFS_BOOT_SLOT_DIR).join(format!("slot-{target_slot}"));
-    fs::create_dir_all(&target_dir)
-        .with_context(|| format!("failed to create {}", target_dir.display()))?;
-
-    for name in ["vmlinuz", "initrd.img"] {
-        let source = source_dir.join(name);
-        if !source.exists() {
-            anyhow::bail!(
-                "missing boot file {} while promoting rootfs slot {} to {}",
-                source.display(),
-                source_slot,
-                target_slot
-            );
-        }
-        let target = target_dir.join(name);
-        fs::copy(&source, &target).with_context(|| {
-            format!("failed to copy {} to {}", source.display(), target.display())
-        })?;
-    }
-
-    Ok(())
-}
-
-/// Generates a complete /boot/grub/grub.cfg that GRUB can boot directly.
-/// Uses the standard next_entry / saved_entry pattern so that grub-reboot
-/// can schedule a one-shot boot into the target slot.
-fn grub_cfg_content(layout: &RootfsAbLayout) -> String {
-    format!(
-        r#"# DayShield A/B system GRUB configuration
-insmod part_gpt
-insmod part_msdos
-insmod ext2
-insmod loadenv
-load_env
-
-if [ x"${{next_entry}}" = x ] ; then
-  set default="${{saved_entry}}"
-else
-  set default="${{next_entry}}"
-  set next_entry=
-  save_env next_entry
-  set boot_once=true
-fi
-if [ x"${{default}}" = x ] ; then
-  set default=dayshield-a
-fi
-
-set timeout=5
-set timeout_style=menu
-
-menuentry 'DayShield Primary System' --id 'dayshield-a' {{
-    search --no-floppy --fs-uuid --set=root {boot_uuid}
-    linux /dayshield/slot-a/vmlinuz root=UUID={slot_a_uuid} ro quiet
-    initrd /dayshield/slot-a/initrd.img
-}}
-
-menuentry 'DayShield Secondary System' --id 'dayshield-b' {{
-    search --no-floppy --fs-uuid --set=root {boot_uuid}
-    linux /dayshield/slot-b/vmlinuz root=UUID={slot_b_uuid} ro quiet
-    initrd /dayshield/slot-b/initrd.img
-}}
-"#,
-        boot_uuid = layout.boot_uuid,
-        slot_a_uuid = layout.slot_a.uuid,
-        slot_b_uuid = layout.slot_b.uuid
-    )
-}
-
-fn grub_script_content(layout: &RootfsAbLayout) -> String {
-    format!(
-        r#"#!/bin/sh
-set -e
-cat <<'EOF'
-menuentry 'DayShield Primary System' --id 'dayshield-a' {{
-    search --no-floppy --fs-uuid --set=root {boot_uuid}
-    linux /dayshield/slot-a/vmlinuz root=UUID={slot_a_uuid} ro quiet
-    initrd /dayshield/slot-a/initrd.img
-}}
-
-menuentry 'DayShield Secondary System' --id 'dayshield-b' {{
-    search --no-floppy --fs-uuid --set=root {boot_uuid}
-    linux /dayshield/slot-b/vmlinuz root=UUID={slot_b_uuid} ro quiet
-    initrd /dayshield/slot-b/initrd.img
-}}
-EOF
-"#,
-        boot_uuid = layout.boot_uuid,
-        slot_a_uuid = layout.slot_a.uuid,
-        slot_b_uuid = layout.slot_b.uuid
-    )
-}
-
-fn write_grub_saved_default(path: &Path) -> Result<()> {
-    let existing = fs::read_to_string(path).unwrap_or_default();
-    let mut lines = Vec::new();
-    let mut saw_default = false;
-    let mut saw_save_default = false;
-
-    for line in existing.lines() {
-        if line.trim_start().starts_with("GRUB_DEFAULT=") {
-            lines.push("GRUB_DEFAULT=saved".to_string());
-            saw_default = true;
-        } else if line.trim_start().starts_with("GRUB_SAVEDEFAULT=") {
-            lines.push("GRUB_SAVEDEFAULT=false".to_string());
-            saw_save_default = true;
-        } else {
-            lines.push(line.to_string());
-        }
-    }
-
-    if !saw_default {
-        lines.push("GRUB_DEFAULT=saved".to_string());
-    }
-    if !saw_save_default {
-        lines.push("GRUB_SAVEDEFAULT=false".to_string());
-    }
-
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, format!("{}\n", lines.join("\n")))
-        .with_context(|| format!("failed to write {}", path.display()))
-}
-
-async fn install_grub_ab_entries(layout: &RootfsAbLayout, inactive_mount: &Path) -> Result<()> {
-    // Write the grub snippet and /etc/default/grub into the inactive mount so
-    // the new system has them after promotion (e.g., for manual grub-mkconfig runs).
-    let script_content = grub_script_content(layout);
-    let inactive_script = rootfs_target_path(inactive_mount, Path::new(ROOTFS_GRUB_SCRIPT));
-    if let Some(parent) = inactive_script.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&inactive_script, &script_content)
-        .with_context(|| format!("failed to write {}", inactive_script.display()))?;
-    let inactive_script_arg = inactive_script.to_string_lossy().to_string();
-    run_system_command("chmod", &["+x", &inactive_script_arg]).await?;
-
-    write_grub_saved_default(&rootfs_target_path(
-        inactive_mount,
-        Path::new("/etc/default/grub"),
-    ))?;
-
-    // The live rootfs is read-only on this appliance so grub-mkconfig cannot
-    // be used (it requires writing to the live /etc/grub.d/ and /etc/default/).
-    // Instead, generate /boot/grub/grub.cfg directly from the known layout.
-    // /boot is already remounted read-write by the caller.
-    let grub_cfg_dir = Path::new("/boot/grub");
-    fs::create_dir_all(grub_cfg_dir)
-        .with_context(|| format!("failed to create {}", grub_cfg_dir.display()))?;
-    let grub_cfg_path = grub_cfg_dir.join("grub.cfg");
-    fs::write(&grub_cfg_path, grub_cfg_content(layout))
-        .with_context(|| format!("failed to write {}", grub_cfg_path.display()))?;
-
-    Ok(())
-}
-
-fn mirror_update_state_to_inactive(
-    state: &AppState,
-    state_file: &UpdateStateFile,
-    inactive_mount: &Path,
-) -> Result<()> {
-    let state_abs = state_path(state);
-    let inactive_state_path = rootfs_target_path(inactive_mount, &state_abs);
-    write_json_atomic(&inactive_state_path, state_file)
-}
-
-fn update_layout_after_format(layout: &mut RootfsAbLayout, slot_name: &str, new_uuid: String) {
-    layout.inactive.uuid = new_uuid.clone();
-    if slot_name == "a" {
-        layout.slot_a.uuid = new_uuid;
-    } else {
-        layout.slot_b.uuid = new_uuid;
-    }
-}
-
-async fn promote_secondary_to_primary(
-    state: &AppState,
-    layout: &mut RootfsAbLayout,
-    state_file: &UpdateStateFile,
-) -> Result<()> {
-    if layout.active.name != "b" {
-        return Ok(());
-    }
-
-    let primary_device = layout.slot_a.device.clone();
-    let primary_device_arg = primary_device.to_string_lossy().to_string();
-    let primary_mount = Path::new(ROOTFS_SLOT_MOUNT_DIR).join("promote-primary");
-    fs::create_dir_all(&primary_mount)
-        .with_context(|| format!("failed to create {}", primary_mount.display()))?;
-    let primary_mount_arg = primary_mount.to_string_lossy().to_string();
-    let _ = run_system_command("umount", &[&primary_mount_arg]).await;
-
-    run_system_command(
-        "mkfs.ext4",
-        &["-F", "-L", ROOTFS_SLOT_A_LABEL, &primary_device_arg],
-    )
-    .await?;
-    let new_uuid = device_uuid(&primary_device)?;
-    update_layout_after_format(layout, "a", new_uuid);
-
-    run_system_command("mount", &[&primary_device_arg, &primary_mount_arg]).await?;
-
-    let result: Result<()> = async {
-        run_system_command("cp", &["-a", "--one-file-system", "/.", &primary_mount_arg]).await?;
-
-        for transient in [
-            "var/lib/dayshield/update-staging",
-            "var/lib/dayshield/update/rootfs-slot",
-        ] {
-            let target = primary_mount.join(transient);
-            if target.exists() {
-                fs::remove_dir_all(&target)
-                    .with_context(|| format!("failed to remove {}", target.display()))?;
-            }
-        }
-
-        write_rootfs_fstab(&primary_mount, layout, &layout.slot_a)?;
-        fs::create_dir_all(rootfs_target_path(
-            &primary_mount,
-            Path::new("/etc/dayshield"),
-        ))?;
-        fs::write(
-            rootfs_target_path(&primary_mount, Path::new("/etc/dayshield/rootfs-slot")),
-            "a\n",
-        )?;
-
-        // /boot may be read-only; remount RW for slot file and GRUB updates.
-        let boot_was_readonly = boot_is_readonly();
-        if boot_was_readonly {
-            run_system_command("mount", &["-o", "remount,rw", "/boot"])
-                .await
-                .context("failed to remount /boot read-write")?;
-        }
-
-        copy_slot_boot_files_between_slots("b", "a")?;
-        install_grub_ab_entries(layout, &primary_mount).await?;
-        mirror_update_state_to_inactive(state, state_file, &primary_mount)?;
-        run_system_command("sync", &[]).await?;
-
-        if boot_was_readonly {
-            let _ = run_system_command("mount", &["-o", "remount,ro", "/boot"]).await;
-        }
-        Ok(())
-    }
-    .await;
-
-    let _ = run_system_command("umount", &[&primary_mount_arg]).await;
-    result
-}
-
-async fn stage_rootfs_ab_update(
-    _state: &AppState,
-    _artifact_path: &Path,
-    _version: &str,
-    _state_file: &mut UpdateStateFile,
-    _details: &mut Vec<String>,
-) -> Result<()> {
-    anyhow::bail!(
-        "Legacy rootfs slot updates are no longer supported. Root filesystem updates are managed through OSTree deployments via /system/ostree/*."
-    )
-}
-
 async fn build_component_status(
     settings: &UpdateSettings,
     state_file: &UpdateStateFile,
@@ -2566,10 +1847,10 @@ async fn bootstrap_missing_registry_remote_versions(
             }
 
             if let Some(rootfs_state) = find_component_state(state_file, RepoComponent::Rootfs) {
-                let rootfs_update_available = rootfs_state.update_available;
+                let rootfs_available = rootfs_state.update_available;
                 let rootfs_remote_version = rootfs_state.remote_version.clone();
 
-                if rootfs_update_available {
+                if rootfs_available {
                     state_file.pending_appliance_rebuild = true;
                     state_file.appliance_rebuild_reason = Some(format!(
                         "Root filesystem image v{} is available. Root filesystem deployment updates are managed through OSTree (/system/ostree/*).",
@@ -2611,7 +1892,6 @@ pub async fn get_status(state: &AppState) -> UpdatesStatus {
         pending_appliance_rebuild: state_file.pending_appliance_rebuild,
         appliance_rebuild_reason: state_file.appliance_rebuild_reason,
         appliance_rebuild_marked_at: state_file.appliance_rebuild_marked_at,
-        rootfs_update: state_file.rootfs_update,
         components,
         available_update_count: if available_update_count > 0 {
             Some(available_update_count)
@@ -3014,46 +2294,6 @@ async fn apply_updates_registry(
             _ => continue,
         };
 
-        if matches!(comp, RepoComponent::Rootfs) {
-            match stage_rootfs_ab_update(
-                state,
-                artifact_path,
-                version,
-                &mut state_file,
-                &mut details,
-            )
-            .await
-            {
-                Ok(()) => continue,
-                Err(err) => {
-                    details.push(format!("FAILED to stage rootfs: {:#}", err));
-                    append_operation_log(
-                        &mut state_file,
-                        "apply",
-                        "error",
-                        format!("Failed to stage rootfs: {:#}", err),
-                        Some("rootfs"),
-                    );
-                    if let Some(entry) = state_file
-                        .components
-                        .iter_mut()
-                        .find(|c| c.component == "rootfs")
-                    {
-                        entry.last_error = Some(format!("{:#}", err));
-                    }
-                    save_state(state, &state_file)?;
-
-                    return Ok(UpdatesActionResult {
-                        operation: "apply".to_string(),
-                        success: false,
-                        message: format!("failed to stage rootfs update: {:#}", err),
-                        details,
-                        status: get_status(state).await,
-                    });
-                }
-            }
-        }
-
         match extract_and_deploy_artifact(comp, artifact_path, None).await {
             Ok(_) => {
                 let previous_version = {
@@ -3231,20 +2471,6 @@ pub async fn apply_updates(
     apply_updates_registry(state, selected).await
 }
 
-async fn rollback_rootfs_update(state: &AppState) -> Result<UpdatesActionResult> {
-    let mut state_file = load_state(state);
-    let message = "Legacy rootfs slot rollback is no longer supported. Use OSTree deployment rollback workflow instead.";
-    append_operation_log(&mut state_file, "rollback", "error", message, Some("rootfs"));
-    save_state(state, &state_file)?;
-    Ok(UpdatesActionResult {
-        operation: "rollback".to_string(),
-        success: false,
-        message: message.to_string(),
-        details: vec![message.to_string()],
-        status: get_status(state).await,
-    })
-}
-
 pub async fn rollback_updates(
     state: &AppState,
     component: UpdateComponent,
@@ -3255,10 +2481,6 @@ pub async fn rollback_updates(
     let mut state_file = load_state(state);
     let selected = RepoComponent::from_update_component(component);
     ensure_registry_updatable_selection(&selected)?;
-
-    if selected.len() == 1 && matches!(selected[0], RepoComponent::Rootfs) {
-        return rollback_rootfs_update(state).await;
-    }
 
     // Check atomicity constraint before proceeding
     check_atomicity_constraint(state, &selected, force_partial_apply).await?;
@@ -3667,231 +2889,6 @@ fn ensure_repo_writable(repo_path: &str) -> Result<()> {
         .with_context(|| format!("repository is not writable: {}", repo_path))?;
 
     let _ = std::fs::remove_file(&probe);
-    Ok(())
-}
-
-pub fn start_rootfs_boot_finalizer(state: std::sync::Arc<AppState>) {
-    tokio::spawn(async move {
-        if let Err(err) = reconcile_rootfs_boot_state(&state).await {
-            warn!(error = %err, "updates: rootfs boot finalizer failed");
-        }
-    });
-}
-
-fn rootfs_confirm_delay() -> Duration {
-    env::var("DAYSHIELD_ROOTFS_CONFIRM_DELAY_SECS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(ROOTFS_BOOT_CONFIRM_DELAY_SECS))
-}
-
-fn load_rootfs_iso_upgrade_marker(state: &AppState) -> Result<Option<RootfsUpdateState>> {
-    let path = rootfs_iso_upgrade_marker_path(state);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let payload =
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    let update: RootfsUpdateState = serde_json::from_str(&payload)
-        .with_context(|| format!("failed to parse {}", path.display()))?;
-    Ok(Some(update))
-}
-
-fn remove_rootfs_iso_upgrade_marker(state: &AppState) {
-    let path = rootfs_iso_upgrade_marker_path(state);
-    if path.exists() {
-        let _ = fs::remove_file(path);
-    }
-}
-
-async fn reconcile_rootfs_boot_state(state: &AppState) -> Result<()> {
-    let mut state_file = load_state(state);
-    let update = match load_rootfs_iso_upgrade_marker(state)? {
-        Some(update) if update.status == "staged" || update.status == "booted" => {
-            state_file.rootfs_update = Some(update.clone());
-            append_operation_log(
-                &mut state_file,
-                "apply",
-                "info",
-                "Loaded rootfs upgrade state staged by ISO installer",
-                Some("rootfs"),
-            );
-            save_state(state, &state_file)?;
-            update
-        }
-        _ => match state_file.rootfs_update.clone() {
-            Some(update) if update.status == "staged" || update.status == "booted" => update,
-            _ => return Ok(()),
-        },
-    };
-    let target_slot = match update.target_deployment.clone() {
-        Some(slot) => slot,
-        None => return Ok(()),
-    };
-
-    let mut layout = match detect_rootfs_ab_layout() {
-        Ok(layout) => layout,
-        Err(err) => {
-            warn!(error = %err, "updates: cannot reconcile rootfs boot state without Primary/Secondary layout");
-            return Ok(());
-        }
-    };
-
-    if layout.active.name != target_slot {
-        return Ok(());
-    }
-
-    let mut booted_update = update.clone();
-    booted_update.status = "booted".to_string();
-    if booted_update.booted_at.is_none() {
-        booted_update.booted_at = Some(Utc::now().to_rfc3339());
-    }
-    state_file.rootfs_update = Some(booted_update.clone());
-    append_operation_log(
-        &mut state_file,
-        "apply",
-        "info",
-        format!("Booted rootfs slot {target_slot}; waiting for health confirmation"),
-        Some("rootfs"),
-    );
-    save_state(state, &state_file)?;
-
-    tokio::time::sleep(rootfs_confirm_delay()).await;
-
-    let mut state_file = load_state(state);
-    match ensure_critical_services_healthy().await {
-        Ok(()) => {
-            let should_promote_primary = layout.active.name == "b";
-            let target_version = state_file
-                .rootfs_update
-                .as_ref()
-                .and_then(|update| update.target_version.clone());
-            {
-                let rootfs = ensure_component_state(&mut state_file, RepoComponent::Rootfs);
-                if let Some(version) = target_version.clone() {
-                    rootfs.current_version = Some(version.clone());
-                    rootfs.last_applied_version = Some(version);
-                }
-                rootfs.update_available = false;
-                rootfs.last_error = None;
-                if should_promote_primary {
-                    rootfs.rollback_version = None;
-                }
-            }
-
-            if let Some(update) = &mut state_file.rootfs_update {
-                update.status = "confirmed".to_string();
-                update.confirmed_at = Some(Utc::now().to_rfc3339());
-                update.last_error = None;
-            }
-            state_file.pending_reboot = false;
-            state_file.pending_appliance_rebuild = false;
-            state_file.appliance_rebuild_reason = None;
-            state_file.last_applied_at = Some(Utc::now().to_rfc3339());
-
-            let mut promoted_primary = false;
-            if should_promote_primary {
-                append_operation_log(
-                    &mut state_file,
-                    "apply",
-                    "info",
-                    "Promoting confirmed Secondary rootfs back to Primary",
-                    Some("rootfs"),
-                );
-                match promote_secondary_to_primary(state, &mut layout, &state_file).await {
-                    Ok(()) => {
-                        promoted_primary = true;
-                        append_operation_log(
-                            &mut state_file,
-                            "apply",
-                            "success",
-                            "Confirmed Secondary rootfs copied to Primary",
-                            Some("rootfs"),
-                        );
-                    }
-                    Err(err) => {
-                        let message = format!(
-                            "Rootfs slot {target_slot} confirmed healthy, but Primary promotion failed: {err}"
-                        );
-                        if let Some(update) = &mut state_file.rootfs_update {
-                            update.last_error = Some(message.clone());
-                        }
-                        let rootfs =
-                            ensure_component_state(&mut state_file, RepoComponent::Rootfs);
-                        rootfs.last_error = Some(message.clone());
-                        append_operation_log(
-                            &mut state_file,
-                            "apply",
-                            "error",
-                            &message,
-                            Some("rootfs"),
-                        );
-                    }
-                }
-            }
-
-            let entry_id = if promoted_primary {
-                layout.slot_a.grub_entry_id()
-            } else {
-                layout.active.grub_entry_id()
-            };
-            run_system_command("grub-set-default", &[&entry_id]).await?;
-
-            append_operation_log(
-                &mut state_file,
-                "apply",
-                "success",
-                if promoted_primary {
-                    "Rootfs slot b confirmed healthy, promoted to Primary, and Primary set as default"
-                        .to_string()
-                } else {
-                    format!("Rootfs slot {target_slot} confirmed healthy and set as default")
-                },
-                Some("rootfs"),
-            );
-            save_state(state, &state_file)?;
-            remove_rootfs_iso_upgrade_marker(state);
-        }
-        Err(err) => {
-            let previous_slot = state_file
-                .rootfs_update
-                .as_ref()
-                .and_then(|update| update.previous_deployment.clone());
-            let message = format!("Rootfs slot {target_slot} failed health confirmation: {err}");
-            if let Some(update) = &mut state_file.rootfs_update {
-                update.status = "rollbackScheduled".to_string();
-                update.last_error = Some(message.clone());
-            }
-            if let Some(rootfs) = state_file
-                .components
-                .iter_mut()
-                .find(|c| c.component == "rootfs")
-            {
-                rootfs.last_error = Some(message.clone());
-            }
-            append_operation_log(&mut state_file, "apply", "error", &message, Some("rootfs"));
-
-            if let Some(previous_slot) = previous_slot {
-                let entry_id = format!("{ROOTFS_GRUB_ENTRY_PREFIX}{previous_slot}");
-                run_system_command("grub-reboot", &[&entry_id]).await?;
-                append_operation_log(
-                    &mut state_file,
-                    "rollback",
-                    "info",
-                    format!("Scheduled automatic rootfs rollback to slot {previous_slot}"),
-                    Some("rootfs"),
-                );
-                save_state(state, &state_file)?;
-                remove_rootfs_iso_upgrade_marker(state);
-                let _ = run_system_command("systemctl", &["reboot"]).await;
-            } else {
-                save_state(state, &state_file)?;
-                remove_rootfs_iso_upgrade_marker(state);
-            }
-        }
-    }
-
     Ok(())
 }
 

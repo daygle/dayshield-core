@@ -15,8 +15,7 @@ lerna-debug.log*
 venv
 
 # Editor directories and files
-.vscode/*
-!.vscode/tasks.json
+.vscode/
 .idea
 .DS_Store
 *.suo

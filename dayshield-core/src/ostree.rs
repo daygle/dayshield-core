@@ -393,11 +393,12 @@ async fn run_status_command_with(runner: &dyn OstreeRunner) -> Result<String> {
     let output = runner.run(OstreeCommand::Status).await?;
 
     if !output.success {
-        bail!(
-            "`{}` failed: {}",
-            output.label,
-            command_error_detail(&output)
-        );
+        let detail = command_error_detail(&output);
+        if status_error_indicates_uninitialized_sysroot(&detail) {
+            return Ok("No deployments.\n".to_string());
+        }
+
+        bail!("`{}` failed: {}", output.label, detail);
     }
 
     String::from_utf8(output.stdout)
@@ -450,6 +451,10 @@ fn command_error_detail(output: &ProcessOutput) -> String {
     } else {
         stdout
     }
+}
+
+fn status_error_indicates_uninitialized_sysroot(detail: &str) -> bool {
+    detail.contains("fstatat(ostree/deploy)") || detail.contains("opendir(objects)")
 }
 
 fn unsupported_status(err: anyhow::Error) -> OstreeStatus {
@@ -1479,6 +1484,23 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("command unavailable"));
+    }
+
+    #[tokio::test]
+    async fn mocked_uninitialized_sysroot_status_reports_no_deployments() {
+        let runner = MockRunner::new(vec![MockStep::Output(output(
+            false,
+            "",
+            "error: loading sysroot: fstatat(ostree/deploy): No such file or directory",
+        ))]);
+
+        let status = status_with(&runner).await;
+
+        assert!(status.supported);
+        assert!(status.last_error.is_none());
+        assert!(status.current_deployment.is_none());
+        assert!(!status.update_available);
+        assert!(!status.reboot_required);
     }
 
     #[tokio::test]

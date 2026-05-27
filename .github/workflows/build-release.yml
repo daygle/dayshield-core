@@ -70,9 +70,8 @@ jobs:
 
       - name: Package core artifact
         run: |
-          cp scripts/ostree-update.sh release-artifacts/
           cd release-artifacts
-          tar --zstd -cf core-${{ steps.version.outputs.VERSION }}.tar.zst dayshield-core ostree-update.sh
+          tar --zstd -cf core-${{ steps.version.outputs.VERSION }}.tar.zst dayshield-core
           ls -lh core-*.tar.zst
 
       # Generate checksums

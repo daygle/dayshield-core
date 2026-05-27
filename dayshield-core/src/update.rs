@@ -1568,10 +1568,17 @@ async fn extract_and_deploy_artifact(
             let helper = tmp_dir.join("ostree-update.sh");
             if helper.exists() {
                 let helper_dest = Path::new("/usr/local/lib/dayshield/ostree-update.sh");
-                if let Some(parent) = helper_dest.parent() {
-                    let _ = fs::create_dir_all(parent);
+                match install_file_atomic(&helper, helper_dest) {
+                    Ok(()) => info!(
+                        target = %helper_dest.display(),
+                        "updates: installed bundled OSTree helper"
+                    ),
+                    Err(err) => warn!(
+                        error = %err,
+                        target = %helper_dest.display(),
+                        "updates: skipping bundled OSTree helper install"
+                    ),
                 }
-                install_file_atomic(&helper, helper_dest)?;
             }
 
             let _ = fs::remove_dir_all(&tmp_dir);

@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveTime, Timelike, Utc};
-use reqwest::header::{HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
+use reqwest::header::{HeaderName, HeaderValue, ACCEPT, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use tokio::{process::Command, sync::Mutex};
 use tracing::{info, warn};
@@ -1666,7 +1666,7 @@ async fn query_github_releases(
         format!("{}/releases/latest", github_api_url)
     };
 
-    let mut request = client
+    let response = client
         .get(&releases_url)
         .header(
             ACCEPT,
@@ -1676,21 +1676,7 @@ async fn query_github_releases(
         .header(
             HeaderName::from_static("x-github-api-version"),
             HeaderValue::from_static("2022-11-28"),
-        );
-
-    if let Ok(token) = env::var("DAYSHIELD_GITHUB_TOKEN")
-        .or_else(|_| env::var("GITHUB_TOKEN"))
-        .or_else(|_| env::var("GH_TOKEN"))
-    {
-        let token = token.trim();
-        if !token.is_empty() {
-            let value = HeaderValue::from_str(&format!("Bearer {}", token))
-                .context("invalid GitHub token value")?;
-            request = request.header(AUTHORIZATION, value);
-        }
-    }
-
-    let response = request
+        )
         .send()
         .await
         .with_context(|| format!("failed to query GitHub releases from {}", releases_url))?;

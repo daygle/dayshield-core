@@ -1739,10 +1739,19 @@ async fn query_github_releases(
     }
 
     if components.is_empty() {
-        anyhow::bail!(
-            "GitHub release {} has no artifacts matching pattern {{component}}-v*.tar.zst",
-            release.tag_name
-        );
+        let found: Vec<&str> = release.assets.iter().map(|a| a.name.as_str()).collect();
+        if found.is_empty() {
+            anyhow::bail!(
+                "GitHub release {} has no published assets (release may still be building)",
+                release.tag_name
+            );
+        } else {
+            anyhow::bail!(
+                "GitHub release {} has no artifacts matching patterns core-v*.tar.zst / ui-v*.tar.zst / rootfs-v*.tar.zst; found: {}",
+                release.tag_name,
+                found.join(", ")
+            );
+        }
     }
 
     populate_github_release_checksums(client, &release, &mut components).await;

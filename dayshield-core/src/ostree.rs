@@ -467,12 +467,14 @@ fn unsupported_status(err: anyhow::Error) -> OstreeStatus {
 }
 
 fn is_command_not_found(err: &anyhow::Error) -> bool {
+    // Only match on IO-level NotFound errors (spawn failure), not on command output
+    // that happens to contain "No such file or directory" (e.g. broken OSTree repo).
     err.chain().any(|cause| {
         cause
             .downcast_ref::<std::io::Error>()
             .map(|io_err| io_err.kind() == ErrorKind::NotFound)
             .unwrap_or(false)
-    }) || err.to_string().contains("No such file or directory")
+    })
 }
 
 fn operation_lock() -> &'static AsyncMutex<()> {
@@ -507,7 +509,18 @@ fn local_transaction_state() -> Option<OstreeTransactionState> {
 fn parse_status_payload(payload: &str) -> Result<OstreeStatus> {
     let trimmed = payload.trim();
     if trimmed.is_empty() {
-        bail!("empty status output");
+        // Valid repo with no deployments yet (e.g. fresh install before first OSTree deploy).
+        return Ok(OstreeStatus {
+            supported: true,
+            checked_at: Utc::now().to_rfc3339(),
+            current_deployment: None,
+            staged_deployment: None,
+            available_update: None,
+            update_available: false,
+            reboot_required: false,
+            transaction_state: OstreeTransactionState::idle(),
+            last_error: None,
+        });
     }
 
     match serde_json::from_str::<Value>(trimmed) {

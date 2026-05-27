@@ -624,7 +624,17 @@ fn parse_admin_status_payload(payload: &str) -> Result<OstreeStatus> {
     }
 
     if deployments.is_empty() {
-        bail!("no deployments found");
+        return Ok(OstreeStatus {
+            supported: true,
+            checked_at: Utc::now().to_rfc3339(),
+            current_deployment: None,
+            staged_deployment: None,
+            available_update: None,
+            update_available: false,
+            reboot_required: false,
+            transaction_state: OstreeTransactionState::idle(),
+            last_error: None,
+        });
     }
 
     let booted_index = deployments

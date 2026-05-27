@@ -1339,27 +1339,6 @@ fn clear_rootfs_update_required(state_file: &mut UpdateStateFile) {
     rootfs.last_error = None;
 }
 
-fn sanitize_rootfs_update_state(state_file: &mut UpdateStateFile) -> bool {
-    let Some(rootfs) = state_file
-        .components
-        .iter()
-        .find(|c| c.component == RepoComponent::Rootfs.as_str())
-    else {
-        return false;
-    };
-
-    let Some(remote_version) = rootfs.remote_version.as_deref() else {
-        return false;
-    };
-
-    if is_artifact_version(remote_version) {
-        return false;
-    }
-
-    clear_rootfs_update_required(state_file);
-    true
-}
-
 fn acknowledge_rootfs_rebuild(state_file: &mut UpdateStateFile) {
     let rootfs = ensure_component_state(state_file, RepoComponent::Rootfs);
     if let Some(remote_version) = rootfs.remote_version.clone() {
@@ -1878,87 +1857,9 @@ async fn build_component_status(
     }
 }
 
-async fn bootstrap_missing_registry_remote_versions(
-    state: &AppState,
-    settings: &UpdateSettings,
-    state_file: &mut UpdateStateFile,
-) {
-    let has_missing_remote = ALL_REPO_COMPONENTS.iter().any(|component| {
-        find_component_state(state_file, *component)
-            .and_then(|saved| saved.remote_version.as_ref())
-            .is_none()
-    });
-
-    if !has_missing_remote || state_file.last_checked_at.is_some() {
-        return;
-    }
-
-    match query_registry_with_component_fallbacks(settings).await {
-        Ok(manifest) => {
-            for artifact in manifest.components {
-                let component = match artifact.component.as_str() {
-                    "core" => RepoComponent::Core,
-                    "ui" => RepoComponent::Ui,
-                    "rootfs" => RepoComponent::Rootfs,
-                    _ => continue,
-                };
-
-                let comp_state = ensure_component_state(state_file, component);
-                if comp_state.current_version.is_none() {
-                    comp_state.current_version = comp_state
-                        .last_applied_version
-                        .clone()
-                        .or_else(|| Some(built_appliance_version()));
-                }
-
-                let update_available = comp_state
-                    .current_version
-                    .as_ref()
-                    .map(|current| is_remote_version_newer(current, &artifact.version))
-                    .unwrap_or(false);
-
-                comp_state.remote_version = Some(artifact.version.clone());
-                comp_state.update_available = update_available;
-                comp_state.last_error = None;
-            }
-
-            if let Some(rootfs_state) = find_component_state(state_file, RepoComponent::Rootfs) {
-                let rootfs_available = rootfs_state.update_available;
-                let rootfs_remote_version = rootfs_state.remote_version.clone();
-
-                if rootfs_available {
-                    state_file.pending_appliance_rebuild = true;
-                    state_file.appliance_rebuild_reason = Some(format!(
-                        "Root filesystem image v{} is available. Root filesystem deployment updates are managed through OSTree (/system/ostree/*).",
-                        rootfs_remote_version.as_deref().unwrap_or("unknown")
-                    ));
-                    state_file.appliance_rebuild_marked_at = None;
-                } else {
-                    clear_rootfs_update_required(state_file);
-                }
-            }
-
-            if let Err(err) = save_state(state, state_file) {
-                warn!(error = %err, "updates: failed to persist bootstrapped registry remote version state");
-            }
-        }
-        Err(err) => {
-            warn!(error = %err, "updates: failed to bootstrap registry remote versions for status display");
-        }
-    }
-}
-
 pub async fn get_status(state: &AppState) -> UpdatesStatus {
     let settings = load_settings(state);
-    let mut state_file = load_state(state);
-
-    if sanitize_rootfs_update_state(&mut state_file) {
-        if let Err(err) = save_state(state, &state_file) {
-            warn!(error = %err, "updates: failed to persist sanitized rootfs update state");
-        }
-    }
-
-    bootstrap_missing_registry_remote_versions(state, &settings, &mut state_file).await;
+    let state_file = load_state(state);
 
     let core = build_component_status(&settings, &state_file, RepoComponent::Core).await;
     let ui = build_component_status(&settings, &state_file, RepoComponent::Ui).await;
@@ -3124,35 +3025,6 @@ mod tests {
             artifact_version_from_name("rootfs", "rootfs-v1.0.0-ostree-repo.tar.zst"),
             None
         );
-    }
-
-    #[test]
-    fn sanitize_rootfs_update_state_clears_ostree_repo_asset_version() {
-        let mut state = super::UpdateStateFile {
-            pending_appliance_rebuild: true,
-            appliance_rebuild_reason: Some(
-                "Root filesystem image v1.0.0-ostree-repo is available".to_string(),
-            ),
-            components: vec![super::ComponentState {
-                component: "rootfs".to_string(),
-                current_version: Some("1.0.0".to_string()),
-                remote_version: Some("1.0.0-ostree-repo".to_string()),
-                update_available: true,
-                ..super::ComponentState::default()
-            }],
-            ..super::UpdateStateFile::default()
-        };
-
-        assert!(super::sanitize_rootfs_update_state(&mut state));
-        let rootfs = state
-            .components
-            .iter()
-            .find(|component| component.component == "rootfs")
-            .expect("rootfs component");
-        assert_eq!(rootfs.remote_version.as_deref(), Some("1.0.0"));
-        assert!(!rootfs.update_available);
-        assert!(!state.pending_appliance_rebuild);
-        assert!(state.appliance_rebuild_reason.is_none());
     }
 
     #[test]

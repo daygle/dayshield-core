@@ -317,7 +317,7 @@ fn classify_ui_level(level: &str) -> &str {
 
 fn classify_update_level(level: &str) -> &str {
     match level.trim().to_lowercase().as_str() {
-        "success" => "info",
+        "info" | "success" => "info",
         "warning" | "warn" => "warning",
         "error" => "error",
         _ => "info",

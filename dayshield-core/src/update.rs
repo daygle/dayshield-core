@@ -1788,6 +1788,17 @@ async fn extract_and_deploy_artifact(
             }
 
             install_file_atomic(&binary, Path::new("/usr/local/sbin/dayshield-core"))?;
+
+            // Also update the OSTree update helper when bundled in the core artifact
+            let helper = tmp_dir.join("ostree-update.sh");
+            if helper.exists() {
+                let helper_dest = Path::new("/usr/local/lib/dayshield/ostree-update.sh");
+                if let Some(parent) = helper_dest.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                install_file_atomic(&helper, helper_dest)?;
+            }
+
             let _ = fs::remove_dir_all(&tmp_dir);
         }
         RepoComponent::Ui => {

@@ -18,6 +18,7 @@ use crate::backup::{
     model::{BackupType, Subsystem},
     restore::restore_backup,
 };
+use crate::ostree;
 use crate::state::AppState;
 
 const SETTINGS_FILE: &str = "updates_settings.json";
@@ -438,6 +439,8 @@ pub struct UpdatesStatus {
     pub available_update_count: Option<usize>,
     #[serde(default)]
     pub operation_logs: Vec<UpdateLogEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ostree_status: Option<ostree::OstreeStatus>,
 }
 
 // ============================================================================
@@ -1647,6 +1650,7 @@ pub async fn get_status(state: &AppState) -> UpdatesStatus {
     let core = build_component_status(&settings, &state_file, RepoComponent::Core).await;
     let ui = build_component_status(&settings, &state_file, RepoComponent::Ui).await;
     let rootfs = build_component_status(&settings, &state_file, RepoComponent::Rootfs).await;
+    let ostree_status = ostree::status().await;
 
     let components = vec![core, ui, rootfs];
     let available_update_count = components.iter().filter(|c| c.update_available).count();
@@ -1654,7 +1658,7 @@ pub async fn get_status(state: &AppState) -> UpdatesStatus {
         settings,
         last_checked_at: state_file.last_checked_at,
         last_applied_at: state_file.last_applied_at,
-        pending_reboot: state_file.pending_reboot,
+        pending_reboot: state_file.pending_reboot || ostree_status.reboot_required,
         pending_appliance_rebuild: state_file.pending_appliance_rebuild,
         appliance_rebuild_reason: state_file.appliance_rebuild_reason,
         appliance_rebuild_marked_at: state_file.appliance_rebuild_marked_at,
@@ -1665,6 +1669,7 @@ pub async fn get_status(state: &AppState) -> UpdatesStatus {
             None
         },
         operation_logs: state_file.operation_logs,
+        ostree_status: Some(ostree_status),
     }
 }
 

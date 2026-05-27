@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio::{process::Command, sync::Mutex as AsyncMutex};
 
@@ -18,7 +18,7 @@ const DAYSHIELD_OSTREE_HELPER: &str = "/usr/local/lib/dayshield/ostree-update.sh
 const DEFAULT_OSTREE_OS: &str = "dayshield";
 const DEFAULT_OSTREE_REMOTE: &str = "dayshield";
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OstreeDeployment {
     pub id: Option<String>,
@@ -31,7 +31,7 @@ pub struct OstreeDeployment {
     pub pinned: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OstreeTransactionState {
     pub active: bool,
@@ -55,7 +55,7 @@ impl OstreeTransactionState {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OstreeStatus {
     pub supported: bool,

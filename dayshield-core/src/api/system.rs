@@ -1134,6 +1134,10 @@ pub async fn check_ostree_updates() -> impl IntoResponse {
 }
 
 /// Handler: pre-download OSTree payloads for an upcoming apply operation.
+///
+/// Spawns the operation in a background task and returns 202 Accepted
+/// immediately so the download does not block the HTTP connection.
+/// Poll `/system/ostree/status` to observe progress via `transaction_state`.
 pub async fn stage_ostree_update(
     Extension(user): Extension<AuthenticatedUser>,
 ) -> impl IntoResponse {
@@ -1141,19 +1145,37 @@ pub async fn stage_ostree_update(
         return ostree_authorization_error_response("stage", &user, &reason);
     }
 
-    match ostree::stage_update().await {
-        Ok(result) => {
-            audit_sensitive_ostree_result("stage", &user, result.success, &result.message);
-            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+    let user_clone = user.clone();
+    tokio::spawn(async move {
+        match ostree::stage_update().await {
+            Ok(result) => {
+                audit_sensitive_ostree_result("stage", &user_clone, result.success, &result.message);
+            }
+            Err(err) => {
+                audit_sensitive_ostree_error("stage", &user_clone, &err);
+            }
         }
-        Err(err) => {
-            audit_sensitive_ostree_error("stage", &user, &err);
-            ostree_action_error_response("stage", err).await
-        }
-    }
+    });
+
+    let current_status = ostree::status().await;
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "operation": "stage",
+            "success": true,
+            "message": "OSTree stage operation started. Poll /system/ostree/status for progress.",
+            "details": [],
+            "status": current_status
+        })),
+    )
+        .into_response()
 }
 
 /// Handler: apply/stage OSTree update deployment.
+///
+/// Spawns the operation in a background task and returns 202 Accepted
+/// immediately so the download does not block the HTTP connection.
+/// Poll `/system/ostree/status` to observe progress via `transaction_state`.
 pub async fn apply_ostree_update(
     Extension(user): Extension<AuthenticatedUser>,
 ) -> impl IntoResponse {
@@ -1161,16 +1183,30 @@ pub async fn apply_ostree_update(
         return ostree_authorization_error_response("apply", &user, &reason);
     }
 
-    match ostree::apply_update().await {
-        Ok(result) => {
-            audit_sensitive_ostree_result("apply", &user, result.success, &result.message);
-            (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+    let user_clone = user.clone();
+    tokio::spawn(async move {
+        match ostree::apply_update().await {
+            Ok(result) => {
+                audit_sensitive_ostree_result("apply", &user_clone, result.success, &result.message);
+            }
+            Err(err) => {
+                audit_sensitive_ostree_error("apply", &user_clone, &err);
+            }
         }
-        Err(err) => {
-            audit_sensitive_ostree_error("apply", &user, &err);
-            ostree_action_error_response("apply", err).await
-        }
-    }
+    });
+
+    let current_status = ostree::status().await;
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "operation": "apply",
+            "success": true,
+            "message": "OSTree apply operation started. Poll /system/ostree/status for progress.",
+            "details": [],
+            "status": current_status
+        })),
+    )
+        .into_response()
 }
 
 /// Handler: return compact reboot-required state for OSTree update UX.

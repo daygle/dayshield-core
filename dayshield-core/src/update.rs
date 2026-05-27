@@ -1179,14 +1179,14 @@ async fn download_artifact(url: &str, destination: &Path) -> Result<()> {
 }
 
 /// Query artifact registry for latest versions
-async fn query_registry(registry_url: &str) -> Result<RegistryManifest> {
+async fn query_registry(registry_url: &str, fetch_checksums: bool) -> Result<RegistryManifest> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
         .context("failed to build HTTP client")?;
 
     if let Some(github_api_url) = github_repo_api_url(registry_url) {
-        return query_github_releases(&github_api_url, &client).await;
+        return query_github_releases(&github_api_url, &client, fetch_checksums).await;
     }
 
     anyhow::bail!("updates: registry URL must point to a GitHub repository")
@@ -1194,8 +1194,9 @@ async fn query_registry(registry_url: &str) -> Result<RegistryManifest> {
 
 async fn query_registry_with_component_fallbacks(
     settings: &UpdateSettings,
+    fetch_checksums: bool,
 ) -> Result<RegistryManifest> {
-    let mut manifest = query_registry(&settings.registry_url).await?;
+    let mut manifest = query_registry(&settings.registry_url, fetch_checksums).await?;
 
     let mut seen_components = manifest
         .components
@@ -1218,7 +1219,7 @@ async fn query_registry_with_component_fallbacks(
             continue;
         };
 
-        match query_registry(&api_url).await {
+        match query_registry(&api_url, fetch_checksums).await {
             Ok(component_manifest) => {
                 let mut added = 0usize;
                 for artifact in component_manifest
@@ -1424,6 +1425,7 @@ async fn populate_github_release_checksums(
 async fn query_github_releases(
     github_api_url: &str,
     client: &reqwest::Client,
+    fetch_checksums: bool,
 ) -> Result<RegistryManifest> {
     // Construct API URL: https://api.github.com/repos/{owner}/{repo}/releases/latest
     let releases_url = if github_api_url.ends_with('/') {
@@ -1520,7 +1522,9 @@ async fn query_github_releases(
         }
     }
 
-    populate_github_release_checksums(client, &release, &mut components).await;
+    if fetch_checksums {
+        populate_github_release_checksums(client, &release, &mut components).await;
+    }
 
     Ok(RegistryManifest {
         components,
@@ -1755,7 +1759,7 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
     let settings = load_settings(state);
     let mut state_file = load_state(state);
 
-    match query_registry_with_component_fallbacks(&settings).await {
+    match query_registry_with_component_fallbacks(&settings, false).await {
         Ok(manifest) => {
             let mut seen_components = std::collections::HashSet::new();
             // Bootstrap tracked current version once for legacy systems that
@@ -1838,8 +1842,8 @@ async fn apply_updates_registry(
     );
     save_state(state, &state_file)?;
 
-    // Step 1: Query registry for latest versions
-    let manifest = query_registry_with_component_fallbacks(&settings).await?;
+    // Step 1: Query registry for latest versions (with checksums for artifact verification)
+    let manifest = query_registry_with_component_fallbacks(&settings, true).await?;
 
     // Step 2: Download all artifacts to staging area
     let staging_dir = PathBuf::from(ARTIFACT_STAGING_DIR);

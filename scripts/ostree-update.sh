@@ -85,6 +85,10 @@ _ensure_sysroot_layout() {
     if [ ! -f "${OSTREE_REPO}/config" ]; then
         ostree --repo="${OSTREE_REPO}" init --mode=bare
     fi
+
+    if [ ! -d "${OSTREE_DEPLOY}/${OSTREE_OS}" ]; then
+        ostree admin --sysroot="${OSTREE_SYSROOT}" os-init "${OSTREE_OS}"
+    fi
 }
 
 # Perform the initial (no prior deployments) ostree deploy, passing through

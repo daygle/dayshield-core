@@ -181,7 +181,6 @@ async fn prepare_runtime(_server: KeaServer) -> Result<()> {
 
     set_directory_permissions_best_effort(CONFIG_DIR);
     set_directory_permissions_best_effort(DAYSHIELD_CONFIG_DIR);
-    set_directory_permissions_best_effort(DATA_DIR);
 
     Ok(())
 }

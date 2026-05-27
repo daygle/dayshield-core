@@ -15,6 +15,9 @@ set -eu
 
 GITHUB_REPO="${DAYSHIELD_GITHUB_REPO:-daygle/dayshield-rootfs}"
 OSTREE_OS="${DAYSHIELD_OSTREE_OS:-dayshield}"
+OSTREE_SYSROOT="${DAYSHIELD_OSTREE_SYSROOT:-/sysroot}"
+OSTREE_REPO="${OSTREE_SYSROOT}/ostree/repo"
+OSTREE_DEPLOY="${OSTREE_SYSROOT}/ostree/deploy"
 BUILD_MANIFEST="/usr/local/share/dayshield-updates/ostree-build-manifest.json"
 
 # Derive architecture for the default OSTree ref
@@ -52,9 +55,42 @@ _installed_version() {
     fi
 }
 
+# Print a normalized OSTree admin status payload. Fresh or partially
+# bootstrapped installs may not have an ostree/deploy directory yet; treat that
+# as a valid "no deployments yet" state instead of surfacing a sysroot error.
+_status_output() {
+    if [ ! -d "${OSTREE_REPO}" ] || [ ! -d "${OSTREE_DEPLOY}" ]; then
+        printf 'No deployments.\n'
+        return 0
+    fi
+
+    status_out="$(ostree admin --sysroot="${OSTREE_SYSROOT}" status 2>&1)" || {
+        case "${status_out}" in
+            *"fstatat(ostree/deploy)"*|*"opendir(objects)"*)
+                printf 'No deployments.\n'
+                return 0
+                ;;
+        esac
+        printf '%s\n' "${status_out}" >&2
+        return 1
+    }
+
+    printf '%s\n' "${status_out}"
+}
+
+# Ensure the target sysroot has enough OSTree layout for the first deployment.
+_ensure_sysroot_layout() {
+    mkdir -p "${OSTREE_DEPLOY}" "${OSTREE_REPO}"
+
+    if [ ! -f "${OSTREE_REPO}/config" ]; then
+        ostree --repo="${OSTREE_REPO}" init --mode=bare
+    fi
+}
+
 # True if at least one OSTree deployment exists
 _has_deployments() {
-    case "$(ostree admin --sysroot=/sysroot status 2>/dev/null)" in
+    status="$(_status_output 2>/dev/null || true)"
+    case "${status}" in
         "No deployments."*|"") return 1 ;;
         *) return 0 ;;
     esac
@@ -70,7 +106,7 @@ trap _cleanup EXIT INT TERM
 case "${action}" in
 
     status)
-        exec ostree admin --sysroot=/sysroot status
+        _status_output
         ;;
 
     check)
@@ -144,22 +180,24 @@ case "${action}" in
         tar -I 'zstd -d' -xf "${artifact_path}" -C "${extract_dir}"
         printf 'Extraction complete.\n'
 
+        _ensure_sysroot_layout
+
         # Pull the ref into the sysroot OSTree repo (writable; /ostree/repo is
         # part of the immutable deployment checkout and is read-only at runtime).
-        printf 'Pulling %s into /sysroot/ostree/repo ...\n' "${OSTREE_REF}"
-        ostree pull-local --repo=/sysroot/ostree/repo "${extract_dir}" "${OSTREE_REF}"
+        printf 'Pulling %s into %s ...\n' "${OSTREE_REF}" "${OSTREE_REPO}"
+        ostree pull-local --repo="${OSTREE_REPO}" "${extract_dir}" "${OSTREE_REF}"
         printf 'Pull complete.\n'
 
         # Stage the deployment (initial deploy or upgrade)
         if _has_deployments; then
             printf 'Staging upgrade for %s ...\n' "${OSTREE_OS}"
-            ostree admin --sysroot=/sysroot deploy \
+            ostree admin --sysroot="${OSTREE_SYSROOT}" deploy \
                 --os="${OSTREE_OS}" \
                 --retain-rollback \
                 "${OSTREE_REF}"
         else
             printf 'Creating initial deployment for %s ...\n' "${OSTREE_OS}"
-            ostree admin --sysroot=/sysroot deploy \
+            ostree admin --sysroot="${OSTREE_SYSROOT}" deploy \
                 --os="${OSTREE_OS}" \
                 --karg-proc \
                 "${OSTREE_REF}"
@@ -168,7 +206,7 @@ case "${action}" in
         ;;
 
     rollback)
-        exec ostree admin --sysroot=/sysroot rollback --os="${OSTREE_OS}"
+        exec ostree admin --sysroot="${OSTREE_SYSROOT}" rollback --os="${OSTREE_OS}"
         ;;
 
     *)

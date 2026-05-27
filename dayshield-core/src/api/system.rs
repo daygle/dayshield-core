@@ -1146,13 +1146,34 @@ pub async fn stage_ostree_update(
     }
 
     let user_clone = user.clone();
+    crate::live_logs::ui::publish(crate::live_logs::LogEvent::UpdateEvent {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        operation: "stage".to_string(),
+        level: "info".to_string(),
+        message: "OSTree stage operation started".to_string(),
+        component: Some("rootfs".to_string()),
+    });
     tokio::spawn(async move {
         match ostree::stage_update().await {
             Ok(result) => {
                 audit_sensitive_ostree_result("stage", &user_clone, result.success, &result.message);
+                crate::live_logs::ui::publish(crate::live_logs::LogEvent::UpdateEvent {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    operation: "stage".to_string(),
+                    level: if result.success { "info" } else { "warning" }.to_string(),
+                    message: result.message,
+                    component: Some("rootfs".to_string()),
+                });
             }
             Err(err) => {
                 audit_sensitive_ostree_error("stage", &user_clone, &err);
+                crate::live_logs::ui::publish(crate::live_logs::LogEvent::UpdateEvent {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    operation: "stage".to_string(),
+                    level: "error".to_string(),
+                    message: format!("OSTree stage failed: {err}"),
+                    component: Some("rootfs".to_string()),
+                });
             }
         }
     });
@@ -1184,13 +1205,34 @@ pub async fn apply_ostree_update(
     }
 
     let user_clone = user.clone();
+    crate::live_logs::ui::publish(crate::live_logs::LogEvent::UpdateEvent {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        operation: "apply".to_string(),
+        level: "info".to_string(),
+        message: "OSTree apply operation started".to_string(),
+        component: Some("rootfs".to_string()),
+    });
     tokio::spawn(async move {
         match ostree::apply_update().await {
             Ok(result) => {
                 audit_sensitive_ostree_result("apply", &user_clone, result.success, &result.message);
+                crate::live_logs::ui::publish(crate::live_logs::LogEvent::UpdateEvent {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    operation: "apply".to_string(),
+                    level: if result.success { "info" } else { "warning" }.to_string(),
+                    message: result.message,
+                    component: Some("rootfs".to_string()),
+                });
             }
             Err(err) => {
                 audit_sensitive_ostree_error("apply", &user_clone, &err);
+                crate::live_logs::ui::publish(crate::live_logs::LogEvent::UpdateEvent {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    operation: "apply".to_string(),
+                    level: "error".to_string(),
+                    message: format!("OSTree apply failed: {err}"),
+                    component: Some("rootfs".to_string()),
+                });
             }
         }
     });

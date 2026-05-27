@@ -1304,11 +1304,22 @@ fn append_operation_log_with_versions(
     from_version: Option<&str>,
     to_version: Option<&str>,
 ) {
+    let message_str: String = message.into();
+
+    // Publish to live logs so update actions appear in the Logs / Live Logs view.
+    crate::live_logs::ui::publish(crate::live_logs::LogEvent::UpdateEvent {
+        timestamp: Utc::now().to_rfc3339(),
+        operation: operation.to_string(),
+        level: level.to_string(),
+        message: message_str.clone(),
+        component: component.map(|s| s.to_string()),
+    });
+
     state_file.operation_logs.push(UpdateLogEntry {
         timestamp: Utc::now().to_rfc3339(),
         operation: operation.to_string(),
         level: level.to_string(),
-        message: message.into(),
+        message: message_str,
         component: component.map(|v| v.to_string()),
         from_version: from_version.map(|v| v.to_string()),
         to_version: to_version.map(|v| v.to_string()),

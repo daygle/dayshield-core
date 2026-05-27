@@ -104,6 +104,20 @@ pub enum LogEvent {
         /// Additional structured details supplied by the browser.
         details: Option<Value>,
     },
+
+    /// An update operation event emitted directly by the update engine.
+    UpdateEvent {
+        /// ISO-8601 timestamp.
+        timestamp: String,
+        /// Operation name: "check", "apply", "stage", "rollback".
+        operation: String,
+        /// Log level: "info", "success", "warning", "error".
+        level: String,
+        /// Human-readable message.
+        message: String,
+        /// Affected component if known (e.g. "core", "ui", "rootfs").
+        component: Option<String>,
+    },
 }
 
 impl LogEvent {
@@ -267,6 +281,25 @@ impl LogEvent {
                     "meta": details,
                 })
             }
+            LogEvent::UpdateEvent {
+                timestamp,
+                operation,
+                level,
+                message,
+                component,
+            } => {
+                json!({
+                    "type": "update_event",
+                    "timestamp": timestamp,
+                    "source": "updates",
+                    "level": classify_update_level(level),
+                    "message": message,
+                    "meta": {
+                        "operation": operation,
+                        "component": component,
+                    }
+                })
+            }
         }
     }
 }
@@ -278,6 +311,15 @@ fn classify_ui_level(level: &str) -> &str {
         "warning" | "warn" => "warning",
         "error" => "error",
         "critical" => "critical",
+        _ => "info",
+    }
+}
+
+fn classify_update_level(level: &str) -> &str {
+    match level.trim().to_lowercase().as_str() {
+        "success" => "info",
+        "warning" | "warn" => "warning",
+        "error" => "error",
         _ => "info",
     }
 }

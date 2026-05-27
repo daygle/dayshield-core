@@ -131,6 +131,7 @@ fn parse_event_ts(event: &LogEvent) -> Option<DateTime<Utc>> {
         LogEvent::FirewallEvent { timestamp, .. } => timestamp,
         LogEvent::SystemEvent { timestamp, .. } => timestamp,
         LogEvent::UiEvent { timestamp, .. } => timestamp,
+        LogEvent::UpdateEvent { timestamp, .. } => timestamp,
     };
 
     DateTime::parse_from_rfc3339(raw)
@@ -148,6 +149,7 @@ fn event_matches_source(event: &LogEvent, source: &str) -> bool {
         ("firewall", LogEvent::FirewallEvent { .. }) => true,
         ("system", LogEvent::SystemEvent { .. }) => true,
         ("ui", LogEvent::UiEvent { .. }) => true,
+        ("updates", LogEvent::UpdateEvent { .. }) => true,
         _ => false,
     }
 }
@@ -181,6 +183,15 @@ fn event_search_text(event: &LogEvent) -> String {
             route.as_deref().unwrap_or_default(),
             url.as_deref().unwrap_or_default(),
             stack.as_deref().unwrap_or_default()
+        ),
+        LogEvent::UpdateEvent {
+            operation,
+            message,
+            component,
+            ..
+        } => format!(
+            "{operation} {} {message}",
+            component.as_deref().unwrap_or_default()
         ),
     }
 }

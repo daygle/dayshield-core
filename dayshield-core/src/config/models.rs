@@ -2642,6 +2642,9 @@ pub struct SystemSettings {
     /// Globally enable IPv6 support across managed services.
     #[serde(default)]
     pub ipv6_enabled: bool,
+    /// Serve the management UI over HTTPS instead of plain HTTP.
+    #[serde(default)]
+    pub management_https_enabled: bool,
     /// ACME domain whose certificate should be used for the management UI.
     pub management_tls_acme_domain: Option<String>,
 }
@@ -2680,6 +2683,7 @@ impl Default for SystemSettings {
             ssh_listen_interfaces: vec![],
             web_port: default_web_port(),
             ipv6_enabled: false,
+            management_https_enabled: false,
             management_tls_acme_domain: None,
         }
     }

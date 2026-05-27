@@ -800,6 +800,15 @@ pub async fn update_config(
             "system: web port changed; restart required to apply"
         );
     }
+    if previous.management_https_enabled != settings.management_https_enabled
+        || previous.management_tls_acme_domain != settings.management_tls_acme_domain
+    {
+        warn!(
+            https_enabled = settings.management_https_enabled,
+            tls_domain = ?settings.management_tls_acme_domain,
+            "system: management HTTPS setting changed; restart required to apply"
+        );
+    }
 
     info!(
         hostname = %settings.hostname,
@@ -835,6 +844,11 @@ fn validate_system_settings(
     if settings.ssh_port == settings.web_port {
         return Err(SystemApiError::CommandError(
             "ssh_port and web_port must be different".into(),
+        ));
+    }
+    if settings.management_https_enabled && settings.management_tls_acme_domain.is_none() {
+        return Err(SystemApiError::CommandError(
+            "management_tls_acme_domain must be set when management_https_enabled is true".into(),
         ));
     }
 

@@ -87,6 +87,22 @@ _ensure_sysroot_layout() {
     fi
 }
 
+# Perform the initial (no prior deployments) ostree deploy, passing through
+# kernel args from /proc/cmdline.  --karg-proc is not supported on all ostree
+# builds, so we expand /proc/cmdline into individual --karg= flags instead.
+_initial_deploy() {
+    set --
+    while IFS= read -r _karg; do
+        [ -n "${_karg}" ] && set -- "$@" "--karg=${_karg}"
+    done << _KARGS_
+$(tr ' ' '\n' < /proc/cmdline)
+_KARGS_
+    ostree admin --sysroot="${OSTREE_SYSROOT}" deploy \
+        --os="${OSTREE_OS}" \
+        "$@" \
+        "${OSTREE_REF}"
+}
+
 # True if at least one OSTree deployment exists
 _has_deployments() {
     status="$(_status_output 2>/dev/null || true)"
@@ -197,10 +213,7 @@ case "${action}" in
                 "${OSTREE_REF}"
         else
             printf 'Creating initial deployment for %s ...\n' "${OSTREE_OS}"
-            ostree admin --sysroot="${OSTREE_SYSROOT}" deploy \
-                --os="${OSTREE_OS}" \
-                --karg-proc \
-                "${OSTREE_REF}"
+            _initial_deploy
         fi
         printf 'Deployment staged. Reboot to activate the new image.\n'
         ;;

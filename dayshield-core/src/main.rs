@@ -14,7 +14,7 @@ use std::env;
 use std::sync::Arc;
 
 use axum::Router;
-use tokio::net::TcpListener;
+use axum_server::tls_rustls::RustlsConfig;
 use tracing::{info, warn};
 
 mod ai_engine;
@@ -167,15 +167,44 @@ async fn main() -> anyhow::Result<()> {
         .config_store
         .load_system_settings()
         .unwrap_or_default();
-    let addr = resolve_bind_addr(ipv6_enabled, &system_settings);
-    let listener = TcpListener::bind(&addr).await?;
-    info!("Listening on http://{}", addr);
+    let addr: std::net::SocketAddr = resolve_bind_addr(ipv6_enabled, &system_settings).parse()?;
 
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .await?;
+    let make_service = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
+
+    if system_settings.management_https_enabled {
+        match load_tls_config(&app_state.config_store, &system_settings) {
+            Some((cert_path, key_path)) => {
+                match RustlsConfig::from_pem_file(&cert_path, &key_path).await {
+                    Ok(tls_config) => {
+                        info!("Listening on https://{}", addr);
+                        axum_server::bind_rustls(addr, tls_config)
+                            .serve(make_service)
+                            .await?;
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to load TLS certificate for management HTTPS ({}); \
+                             falling back to HTTP: {e:#}",
+                            cert_path.display()
+                        );
+                        info!("Listening on http://{}", addr);
+                        axum_server::bind(addr).serve(make_service).await?;
+                    }
+                }
+            }
+            None => {
+                warn!(
+                    "management_https_enabled is true but no valid ACME domain/config found; \
+                     falling back to HTTP"
+                );
+                info!("Listening on http://{}", addr);
+                axum_server::bind(addr).serve(make_service).await?;
+            }
+        }
+    } else {
+        info!("Listening on http://{}", addr);
+        axum_server::bind(addr).serve(make_service).await?;
+    }
 
     Ok(())
 }
@@ -298,6 +327,18 @@ fn yes_no(value: bool) -> &'static str {
     } else {
         "no"
     }
+}
+
+/// Return the certificate and key paths for the management HTTPS listener, or `None` if
+/// the settings do not specify a valid ACME domain or the ACME config is missing.
+fn load_tls_config(
+    config_store: &config::ConfigStore,
+    settings: &config::models::SystemSettings,
+) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let domain = settings.management_tls_acme_domain.as_deref()?;
+    let acme_config = config_store.load_acme_config().ok()??;
+    let engine = engine::acme::AcmeEngine::new(acme_config);
+    Some((engine.cert_path(domain), engine.key_path(domain)))
 }
 
 fn default_bind_addr(ipv6_enabled: bool) -> &'static str {

@@ -374,11 +374,12 @@ fn classify_system_source(unit: &str, message: &str) -> &'static str {
         || hay.contains("resolver")
         || hay.contains("dns ")
         || hay.contains("dns:")
-        || hay.contains("named")
     {
         "dns"
     } else if hay.contains("kea") || hay.contains("dhcp") || hay.contains("dnsmasq") {
         "dhcp"
+    } else if hay.contains("wireguard") || hay.contains("wg-") || hay.contains("vpn") {
+        "vpn"
     } else if hay.contains("gateway")
         || hay.contains("default route")
         || hay.contains("ip route")
@@ -404,8 +405,6 @@ fn classify_system_source(unit: &str, message: &str) -> &'static str {
         || hay.contains("rollback")
     {
         "updates"
-    } else if hay.contains("wireguard") || hay.contains("wg-") || hay.contains("vpn") {
-        "vpn"
     } else if hay.contains("cloudflared") {
         "cloudflared"
     } else if hay.contains("acme") || hay.contains("cert") || hay.contains("letsencrypt") {
@@ -568,5 +567,29 @@ mod tests {
         assert_eq!(payload["source"], "vpn");
         assert_eq!(payload["level"], "info");
         assert_eq!(payload["message"], "WireGuard handshake established");
+    }
+
+    #[test]
+    fn wireguard_message_containing_interface_classifies_as_vpn_not_interfaces() {
+        let event = LogEvent::SystemEvent {
+            timestamp: "2026-05-23T02:03:04Z".into(),
+            unit: "dayshield_core::api::wireguard".into(),
+            priority: Some(4),
+            message: "wireguard: invalid interface name".into(),
+        };
+        let payload = event.to_client_payload();
+        assert_eq!(payload["source"], "vpn");
+    }
+
+    #[test]
+    fn interface_rename_message_classifies_as_interfaces_not_dns() {
+        let event = LogEvent::SystemEvent {
+            timestamp: "2026-05-23T02:03:04Z".into(),
+            unit: "kernel".into(),
+            priority: Some(6),
+            message: "renamed network interface eth0 to wan0".into(),
+        };
+        let payload = event.to_client_payload();
+        assert_eq!(payload["source"], "interfaces");
     }
 }

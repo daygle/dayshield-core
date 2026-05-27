@@ -831,105 +831,6 @@ fn load_runtime_marker(component: RepoComponent) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-async fn reset_and_optionally_deploy(
-    settings: &UpdateSettings,
-    state_file: &mut UpdateStateFile,
-    component: RepoComponent,
-    target_commit: &str,
-    deploy_runtime: bool,
-    details: &mut Vec<String>,
-) -> Result<()> {
-    let (repo_path, _remote_url, _branch) = component_config(settings, component);
-    run_git(&repo_path, &["reset", "--hard", target_commit]).await?;
-
-    let head = run_git(&repo_path, &["rev-parse", "HEAD"]).await?;
-    if head != target_commit {
-        anyhow::bail!(
-            "{}: reset verification failed (expected {}, got {})",
-            component.as_str(),
-            target_commit,
-            head
-        );
-    }
-
-    let entry = ensure_component_state(state_file, component);
-
-    if deploy_runtime && component_supports_runtime_deploy(component) {
-        deploy_component_runtime(component, &repo_path).await?;
-        save_runtime_marker(component, &head)?;
-        entry.deployed_commit = Some(head.clone());
-        details.push(format!(
-            "{}: runtime artifacts deployed",
-            component.as_str()
-        ));
-    }
-
-    entry.last_applied_commit = Some(head.clone());
-    entry.last_error = None;
-    details.push(format!(
-        "{}: moved to {}",
-        component.as_str(),
-        short_sha(&head)
-    ));
-    Ok(())
-}
-
-async fn run_git(repo_path: &str, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(args)
-        .output()
-        .await
-        .with_context(|| format!("failed to execute git {:?}", args))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        anyhow::bail!(
-            "git {:?} failed: {}{}{}",
-            args,
-            stderr.trim(),
-            if !stderr.trim().is_empty() && !stdout.trim().is_empty() {
-                " | "
-            } else {
-                ""
-            },
-            stdout.trim()
-        );
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-async fn run_command_in(repo_path: &str, program: &str, args: &[&str]) -> Result<String> {
-    let output = Command::new(program)
-        .current_dir(repo_path)
-        .args(args)
-        .output()
-        .await
-        .with_context(|| format!("failed to execute {} {:?}", program, args))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        anyhow::bail!(
-            "{} {:?} failed: {}{}{}",
-            program,
-            args,
-            stderr.trim(),
-            if !stderr.trim().is_empty() && !stdout.trim().is_empty() {
-                " | "
-            } else {
-                ""
-            },
-            stdout.trim()
-        );
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
 async fn ensure_command_available(program: &str) -> Result<()> {
     Command::new(program)
         .arg("--version")
@@ -937,14 +838,6 @@ async fn ensure_command_available(program: &str) -> Result<()> {
         .await
         .with_context(|| format!("required command '{}' is not available", program))?;
     Ok(())
-}
-
-async fn is_command_available(program: &str) -> bool {
-    Command::new(program)
-        .arg("--version")
-        .output()
-        .await
-        .is_ok()
 }
 
 async fn ensure_critical_services_healthy() -> Result<()> {
@@ -969,37 +862,6 @@ async fn ensure_critical_services_healthy() -> Result<()> {
         anyhow::bail!(
             "critical service health check failed after update: {}",
             unhealthy.join(", ")
-        );
-    }
-
-    Ok(())
-}
-
-async fn verify_commit_signature(
-    repo_path: &str,
-    commit: &str,
-    trusted_signers_file: &str,
-) -> Result<()> {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(repo_path);
-    if !trusted_signers_file.trim().is_empty() {
-        cmd.arg("-c").arg(format!(
-            "gpg.ssh.allowedSignersFile={}",
-            trusted_signers_file
-        ));
-    }
-    cmd.arg("verify-commit").arg(commit);
-
-    let output = cmd
-        .output()
-        .await
-        .with_context(|| format!("failed to verify commit signature for {}", commit))?;
-
-    if !output.status.success() {
-        anyhow::bail!(
-            "commit signature verification failed for {}: {}",
-            short_sha(commit),
-            String::from_utf8_lossy(&output.stderr).trim()
         );
     }
 
@@ -1143,113 +1005,6 @@ fn install_dir_atomic(src: &Path, target: &Path) -> Result<()> {
     }
 
     Ok(())
-}
-
-async fn deploy_component_runtime(component: RepoComponent, repo_path: &str) -> Result<()> {
-    match component {
-        RepoComponent::Core => {
-            ensure_command_available("cargo").await?;
-            run_command_in(
-                repo_path,
-                "cargo",
-                &["build", "--release", "-p", "dayshield-core"],
-            )
-            .await?;
-
-            let built_bin = Path::new(repo_path).join("target/release/dayshield-core");
-            if !built_bin.exists() {
-                anyhow::bail!("core binary was not produced at {}", built_bin.display());
-            }
-
-            install_file_atomic(&built_bin, Path::new("/usr/local/sbin/dayshield-core"))?;
-        }
-        RepoComponent::Ui => {
-            let dist_dir = Path::new(repo_path).join("dist");
-            let dist_index = dist_dir.join("index.html");
-
-            if is_command_available("npm").await {
-                run_command_in(repo_path, "npm", &["ci", "--no-audit", "--no-fund"]).await?;
-                run_command_in(repo_path, "npm", &["run", "build"]).await?;
-            } else if !dist_index.exists() {
-                anyhow::bail!(
-                    "npm is unavailable and prebuilt UI assets are missing at {}",
-                    dist_index.display()
-                );
-            }
-
-            if !dist_index.exists() {
-                anyhow::bail!(
-                    "UI build output missing index.html at {}",
-                    dist_dir.display()
-                );
-            }
-
-            install_dir_atomic(&dist_dir, Path::new("/usr/local/share/dayshield-ui"))?;
-        }
-        RepoComponent::Rootfs => {
-            anyhow::bail!("rootfs runtime deployment is not supported in update flow")
-        }
-    }
-
-    Ok(())
-}
-
-async fn ensure_origin(repo_path: &str, remote_url: &str) -> Result<()> {
-    let current = run_git(repo_path, &["remote", "get-url", "origin"]).await;
-    match current {
-        Ok(url) => {
-            if url.trim() != remote_url {
-                run_git(repo_path, &["remote", "set-url", "origin", remote_url]).await?;
-            }
-        }
-        Err(_) => {
-            run_git(repo_path, &["remote", "add", "origin", remote_url]).await?;
-        }
-    }
-    Ok(())
-}
-
-async fn remote_url_for_check(repo_path: &str, configured_url: &str) -> String {
-    match run_git(repo_path, &["remote", "get-url", "origin"]).await {
-        Ok(url) if !url.trim().is_empty() => url,
-        _ => configured_url.to_string(),
-    }
-}
-
-async fn remote_branch_head(repo_path: &str, remote_url: &str, branch: &str) -> Result<String> {
-    let out = run_git(repo_path, &["ls-remote", "--heads", remote_url, branch]).await?;
-    let line = out
-        .lines()
-        .find(|l| !l.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("no remote head found for branch {branch}"))?;
-
-    let sha = line
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("invalid ls-remote output for branch {branch}"))?;
-
-    if sha.is_empty() {
-        anyhow::bail!("invalid remote commit for branch {branch}");
-    }
-
-    Ok(sha.to_string())
-}
-
-async fn inspect_repo(
-    repo_path: &str,
-    remote_url: &str,
-    branch: &str,
-) -> Result<(String, String, bool)> {
-    run_git(repo_path, &["rev-parse", "--is-inside-work-tree"]).await?;
-    let current = run_git(repo_path, &["rev-parse", "HEAD"]).await?;
-    let dirty = !run_git(repo_path, &["status", "--porcelain"])
-        .await?
-        .trim()
-        .is_empty();
-    let effective_remote = remote_url_for_check(repo_path, remote_url).await;
-    let remote = remote_branch_head(repo_path, &effective_remote, branch).await?;
-
-    Ok((current, remote, dirty))
 }
 
 pub fn load_settings(state: &AppState) -> UpdateSettings {
@@ -2865,29 +2620,6 @@ pub async fn validate_updates(
 
 fn short_sha(commit: &str) -> String {
     commit.chars().take(8).collect()
-}
-
-fn ensure_repo_writable(repo_path: &str) -> Result<()> {
-    use std::io::Write;
-
-    let git_dir = Path::new(repo_path).join(".git");
-    if !git_dir.exists() {
-        anyhow::bail!("missing git directory: {}", git_dir.display());
-    }
-
-    let probe = git_dir.join(".dayshield-write-probe");
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&probe)
-        .with_context(|| format!("repository is not writable: {}", repo_path))?;
-
-    file.write_all(b"probe")
-        .with_context(|| format!("repository is not writable: {}", repo_path))?;
-
-    let _ = std::fs::remove_file(&probe);
-    Ok(())
 }
 
 pub async fn start_update_checker(state: std::sync::Arc<AppState>) {

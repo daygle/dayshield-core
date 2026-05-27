@@ -54,7 +54,7 @@ _installed_version() {
 
 # True if at least one OSTree deployment exists
 _has_deployments() {
-    case "$(ostree admin status 2>/dev/null)" in
+    case "$(ostree admin --sysroot=/sysroot status 2>/dev/null)" in
         "No deployments."*|"") return 1 ;;
         *) return 0 ;;
     esac
@@ -70,7 +70,7 @@ trap _cleanup EXIT INT TERM
 case "${action}" in
 
     status)
-        exec ostree admin status
+        exec ostree admin --sysroot=/sysroot status
         ;;
 
     check)
@@ -144,21 +144,22 @@ case "${action}" in
         tar -I 'zstd -d' -xf "${artifact_path}" -C "${extract_dir}"
         printf 'Extraction complete.\n'
 
-        # Pull the ref into the local /ostree/repo (bare)
-        printf 'Pulling %s into /ostree/repo ...\n' "${OSTREE_REF}"
-        ostree pull-local --repo=/ostree/repo "${extract_dir}" "${OSTREE_REF}"
+        # Pull the ref into the sysroot OSTree repo (writable; /ostree/repo is
+        # part of the immutable deployment checkout and is read-only at runtime).
+        printf 'Pulling %s into /sysroot/ostree/repo ...\n' "${OSTREE_REF}"
+        ostree pull-local --repo=/sysroot/ostree/repo "${extract_dir}" "${OSTREE_REF}"
         printf 'Pull complete.\n'
 
         # Stage the deployment (initial deploy or upgrade)
         if _has_deployments; then
             printf 'Staging upgrade for %s ...\n' "${OSTREE_OS}"
-            ostree admin deploy \
+            ostree admin --sysroot=/sysroot deploy \
                 --os="${OSTREE_OS}" \
                 --retain-rollback \
                 "${OSTREE_REF}"
         else
             printf 'Creating initial deployment for %s ...\n' "${OSTREE_OS}"
-            ostree admin deploy \
+            ostree admin --sysroot=/sysroot deploy \
                 --os="${OSTREE_OS}" \
                 --karg-proc \
                 "${OSTREE_REF}"
@@ -167,7 +168,7 @@ case "${action}" in
         ;;
 
     rollback)
-        exec ostree admin rollback --os="${OSTREE_OS}"
+        exec ostree admin --sysroot=/sysroot rollback --os="${OSTREE_OS}"
         ;;
 
     *)

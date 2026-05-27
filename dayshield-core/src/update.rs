@@ -2002,17 +2002,8 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
                     update_available
                 };
 
-                if matches!(comp, RepoComponent::Rootfs) {
-                    if update_available {
-                        state_file.pending_appliance_rebuild = true;
-                        state_file.appliance_rebuild_reason = Some(format!(
-                            "Root filesystem image v{} is available. Root filesystem deployment updates are managed through OSTree (/system/ostree/*).",
-                            artifact.version
-                        ));
-                        state_file.appliance_rebuild_marked_at = None;
-                    } else {
-                        clear_rootfs_update_required(&mut state_file);
-                    }
+                if matches!(comp, RepoComponent::Rootfs) && !update_available {
+                    clear_rootfs_update_required(&mut state_file);
                 }
 
                 info!(

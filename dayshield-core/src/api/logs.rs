@@ -189,10 +189,10 @@ fn event_search_text(event: &LogEvent) -> String {
             message,
             component,
             ..
-        } => format!(
-            "{operation} {} {message}",
-            component.as_deref().unwrap_or_default()
-        ),
+        } => match component.as_deref() {
+            Some(c) => format!("{operation} {c} {message}"),
+            None => format!("{operation} {message}"),
+        },
     }
 }
 
@@ -485,9 +485,12 @@ pub async fn search_logs(
     }
 
     let source = query.source.as_deref().unwrap_or("all").to_lowercase();
-    if !matches!(source.as_str(), "all" | "system" | "firewall" | "suricata") {
+    if !matches!(
+        source.as_str(),
+        "all" | "system" | "firewall" | "suricata" | "ui" | "updates"
+    ) {
         return Err(LogsApiError::Validation(format!(
-            "invalid source: {} (expected all|system|firewall|suricata)",
+            "invalid source: {} (expected all|system|firewall|suricata|ui|updates)",
             source
         )));
     }

@@ -72,6 +72,7 @@ jobs:
         run: |
           cd release-artifacts
           cp ../scripts/ostree-update.sh .
+          chmod 0755 ostree-update.sh
           tar --zstd -cf core-${{ steps.version.outputs.VERSION }}.tar.zst dayshield-core ostree-update.sh
           rm -f ostree-update.sh
           ls -lh core-*.tar.zst

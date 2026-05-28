@@ -163,7 +163,7 @@ struct CommandInvocation {
 }
 
 fn system_ostree_invocation(command: OstreeCommand) -> CommandInvocation {
-    if Path::new(DAYSHIELD_OSTREE_HELPER).is_file() {
+    if is_executable_file(Path::new(DAYSHIELD_OSTREE_HELPER)) {
         return helper_ostree_invocation(command);
     }
 
@@ -177,16 +177,38 @@ fn system_ostree_invocation(command: OstreeCommand) -> CommandInvocation {
 fn known_binary_path(command: &str, candidates: &[&str]) -> Option<String> {
     candidates
         .iter()
-        .find(|candidate| Path::new(candidate).is_file())
+        .find(|candidate| is_executable_file(Path::new(candidate)))
         .map(|candidate| (*candidate).to_string())
         .or_else(|| {
             env::var_os("PATH").and_then(|path| {
                 env::split_paths(&path)
                     .map(|dir| dir.join(command))
-                    .find(|candidate| candidate.is_file())
+                    .find(|candidate| is_executable_file(candidate))
                     .map(|candidate| candidate.to_string_lossy().into_owned())
             })
         })
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+
+    has_execute_permission(path)
+}
+
+#[cfg(unix)]
+fn has_execute_permission(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    path.metadata()
+        .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn has_execute_permission(_path: &Path) -> bool {
+    true
 }
 
 fn helper_ostree_invocation(command: OstreeCommand) -> CommandInvocation {
@@ -1327,6 +1349,21 @@ mod tests {
           "transaction": null
         }
         "#
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_detection_requires_execute_bit() {
+        use std::{fs, os::unix::fs::PermissionsExt};
+
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        fs::set_permissions(file.path(), fs::Permissions::from_mode(0o644))
+            .expect("set non-executable permissions");
+        assert!(!is_executable_file(file.path()));
+
+        fs::set_permissions(file.path(), fs::Permissions::from_mode(0o755))
+            .expect("set executable permissions");
+        assert!(is_executable_file(file.path()));
     }
 
     #[test]

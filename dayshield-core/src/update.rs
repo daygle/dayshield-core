@@ -912,6 +912,14 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 }
 
 fn install_file_atomic(src: &Path, target: &Path) -> Result<()> {
+    install_file_atomic_with_mode(src, target, None)
+}
+
+fn install_executable_file_atomic(src: &Path, target: &Path) -> Result<()> {
+    install_file_atomic_with_mode(src, target, Some(0o755))
+}
+
+fn install_file_atomic_with_mode(src: &Path, target: &Path, mode: Option<u32>) -> Result<()> {
     let parent = target
         .parent()
         .ok_or_else(|| anyhow::anyhow!("invalid target path {}", target.display()))?;
@@ -932,6 +940,9 @@ fn install_file_atomic(src: &Path, target: &Path) -> Result<()> {
 
     fs::copy(src, &staged)
         .with_context(|| format!("failed to stage {} -> {}", src.display(), staged.display()))?;
+    if let Some(mode) = mode {
+        set_file_mode(&staged, mode)?;
+    }
 
     let had_existing = target.exists();
     if had_existing {
@@ -956,6 +967,23 @@ fn install_file_atomic(src: &Path, target: &Path) -> Result<()> {
         let _ = fs::remove_file(&backup);
     }
 
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_file_mode(path: &Path, mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(path)
+        .with_context(|| format!("failed to read permissions for {}", path.display()))?
+        .permissions();
+    permissions.set_mode(mode);
+    fs::set_permissions(path, permissions)
+        .with_context(|| format!("failed to set permissions on {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_file_mode(_path: &Path, _mode: u32) -> Result<()> {
     Ok(())
 }
 
@@ -1569,13 +1597,13 @@ async fn extract_and_deploy_artifact(
                 anyhow::bail!("core binary not found in artifact");
             }
 
-            install_file_atomic(&binary, Path::new("/usr/local/sbin/dayshield-core"))?;
+            install_executable_file_atomic(&binary, Path::new("/usr/local/sbin/dayshield-core"))?;
 
             // Also update the OSTree update helper when bundled in the core artifact
             let helper = tmp_dir.join("ostree-update.sh");
             if helper.exists() {
                 let helper_dest = Path::new("/usr/local/lib/dayshield/ostree-update.sh");
-                match install_file_atomic(&helper, helper_dest) {
+                match install_executable_file_atomic(&helper, helper_dest) {
                     Ok(()) => info!(
                         target = %helper_dest.display(),
                         "updates: installed bundled OSTree helper"
@@ -2727,6 +2755,8 @@ pub async fn start_update_checker(state: std::sync::Arc<AppState>) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::install_executable_file_atomic;
     use super::{
         artifact_version_from_name, checksum_from_text, github_repo_api_url, github_repo_slug,
         ArtifactMetadata, RegistryManifest,
@@ -2813,6 +2843,27 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_executable_file_atomic_sets_executable_mode() {
+        use std::{fs, os::unix::fs::PermissionsExt};
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let src = dir.path().join("helper.sh");
+        let target = dir.path().join("installed-helper.sh");
+        fs::write(&src, b"#!/bin/sh\n").expect("write helper");
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o644))
+            .expect("set source permissions");
+
+        install_executable_file_atomic(&src, &target).expect("install executable");
+
+        let mode = fs::metadata(&target)
+            .expect("target metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o755);
     }
 
     #[test]

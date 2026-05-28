@@ -82,8 +82,24 @@ _status_output() {
 _ensure_sysroot_layout() {
     mkdir -p "${OSTREE_DEPLOY}" "${OSTREE_REPO}"
 
-    if [ ! -f "${OSTREE_REPO}/config" ]; then
-        ostree --repo="${OSTREE_REPO}" init --mode=bare
+    # The live rootfs image embeds an archive-z2 repo. bare mode is required so
+    # 'ostree admin deploy' can use hardlink checkout instead of copy checkout;
+    # copy checkout requires CAP_CHOWN to restore ownership on files like gshadow.
+    _repo_mode="$(sed -n 's/^mode=//p' "${OSTREE_REPO}/config" 2>/dev/null || true)"
+    if [ "${_repo_mode}" != "bare" ]; then
+        if [ "${_repo_mode}" = "archive-z2" ] || [ "${_repo_mode}" = "archive" ]; then
+            # Convert: pull all existing refs into a fresh bare repo, then swap.
+            _bare_tmp="${OSTREE_REPO}.bare-tmp"
+            rm -rf "${_bare_tmp}"
+            ostree --repo="${_bare_tmp}" init --mode=bare
+            for _ref in $(ostree --repo="${OSTREE_REPO}" refs 2>/dev/null || true); do
+                ostree pull-local --repo="${_bare_tmp}" "${OSTREE_REPO}" "${_ref}"
+            done
+            rm -rf "${OSTREE_REPO}"
+            mv "${_bare_tmp}" "${OSTREE_REPO}"
+        else
+            ostree --repo="${OSTREE_REPO}" init --mode=bare
+        fi
     fi
 
     if [ ! -d "${OSTREE_DEPLOY}/${OSTREE_OS}" ]; then

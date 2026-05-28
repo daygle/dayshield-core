@@ -119,10 +119,18 @@ _ensure_sysroot_layout() {
 # Perform the initial (no prior deployments) ostree deploy, passing through
 # kernel args from /proc/cmdline.  --karg-proc is not supported on all ostree
 # builds, so we expand /proc/cmdline into individual --karg= flags instead.
+# Filter args that must not be forwarded:
+#   BOOT_IMAGE= — GRUB bookkeeping variable, not a real kernel parameter
+#   ostree=     — set by 'ostree admin deploy' itself; forwarding the old
+#                 deployment path would create a duplicate / stale entry
+#   initrd=     — bootloader-set path, meaningless as a kernel parameter
 _initial_deploy() {
     set --
     while IFS= read -r _karg; do
-        [ -n "${_karg}" ] && set -- "$@" "--karg=${_karg}"
+        case "${_karg}" in
+            BOOT_IMAGE=*|ostree=*|initrd=*) ;;
+            *) [ -n "${_karg}" ] && set -- "$@" "--karg=${_karg}" ;;
+        esac
     done << _KARGS_
 $(tr ' ' '\n' < /proc/cmdline)
 _KARGS_
@@ -258,6 +266,23 @@ case "${action}" in
             printf 'Creating initial deployment for %s ...\n' "${OSTREE_OS}"
             _initial_deploy
         fi
+
+        # Regenerate the GRUB config so the bootloader picks up the new BLS
+        # entry written by ostree admin deploy.  On systems where GRUB reads
+        # BLS entries natively this is a no-op; on others it is required.
+        # Best-effort: a failure here is non-fatal — the BLS entry is still
+        # present and will be read by any GRUB build with BLS support.
+        if command -v update-grub >/dev/null 2>&1; then
+            printf 'Regenerating GRUB config ...\n'
+            update-grub 2>/dev/null || true
+        elif command -v grub-mkconfig >/dev/null 2>&1; then
+            printf 'Regenerating GRUB config ...\n'
+            grub-mkconfig -o /boot/grub/grub.cfg 2>/dev/null || true
+        elif command -v grub2-mkconfig >/dev/null 2>&1; then
+            printf 'Regenerating GRUB config ...\n'
+            grub2-mkconfig -o /boot/grub2/grub.cfg 2>/dev/null || true
+        fi
+
         printf 'Deployment staged. Reboot to activate the new image.\n'
         ;;
 

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     env, fs,
     path::{Path, PathBuf},
     sync::OnceLock,
@@ -385,6 +385,11 @@ pub struct UpdateStateFile {
     pub components: Vec<ComponentState>,
     #[serde(default)]
     pub operation_logs: Vec<UpdateLogEntry>,
+    /// ETag cache for GitHub Releases API responses.
+    /// Key: API URL, value: (ETag header value, cached response body).
+    /// 304 Not Modified responses don't count against GitHub's rate limit.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub release_etag_cache: HashMap<String, (String, String)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1227,8 +1232,15 @@ fn verify_checksum(file_path: &Path, expected: &str) -> Result<()> {
 }
 
 /// Download artifact from registry
+fn build_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .context("failed to build HTTP client")
+}
+
 async fn download_artifact(url: &str, destination: &Path) -> Result<()> {
-    let client = reqwest::Client::new();
+    let client = build_http_client()?;
     let response = client
         .get(url)
         .send()
@@ -1255,14 +1267,16 @@ async fn download_artifact(url: &str, destination: &Path) -> Result<()> {
 }
 
 /// Query artifact registry for latest versions
-async fn query_registry(registry_url: &str, fetch_checksums: bool) -> Result<RegistryManifest> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .context("failed to build HTTP client")?;
+async fn query_registry(
+    registry_url: &str,
+    fetch_checksums: bool,
+    etag_cache: &mut HashMap<String, (String, String)>,
+) -> Result<RegistryManifest> {
+    let client = build_http_client()?;
 
     if let Some(github_api_url) = github_repo_api_url(registry_url) {
-        return query_github_releases(&github_api_url, &client, fetch_checksums).await;
+        return query_github_releases(&github_api_url, &client, fetch_checksums, etag_cache)
+            .await;
     }
 
     anyhow::bail!("updates: registry URL must point to a GitHub repository")
@@ -1271,8 +1285,9 @@ async fn query_registry(registry_url: &str, fetch_checksums: bool) -> Result<Reg
 async fn query_registry_with_component_fallbacks(
     settings: &UpdateSettings,
     fetch_checksums: bool,
+    etag_cache: &mut HashMap<String, (String, String)>,
 ) -> Result<RegistryManifest> {
-    let mut manifest = query_registry(&settings.registry_url, fetch_checksums).await?;
+    let mut manifest = query_registry(&settings.registry_url, fetch_checksums, etag_cache).await?;
 
     let mut seen_components = manifest
         .components
@@ -1295,7 +1310,7 @@ async fn query_registry_with_component_fallbacks(
             continue;
         };
 
-        match query_registry(&api_url, fetch_checksums).await {
+        match query_registry(&api_url, fetch_checksums, etag_cache).await {
             Ok(component_manifest) => {
                 let mut added = 0usize;
                 for artifact in component_manifest
@@ -1505,11 +1520,18 @@ async fn populate_github_release_checksums(
 }
 
 /// Query GitHub Releases API for latest release artifacts.
+///
+/// Uses ETag-based conditional requests: if the cached ETag matches the
+/// server's current ETag, GitHub returns 304 Not Modified which does NOT
+/// count against the unauthenticated rate limit (60 req/hr/IP).
 async fn query_github_releases(
     github_api_url: &str,
     client: &reqwest::Client,
     fetch_checksums: bool,
+    etag_cache: &mut HashMap<String, (String, String)>,
 ) -> Result<RegistryManifest> {
+    use reqwest::header::IF_NONE_MATCH;
+
     // Construct API URL: https://api.github.com/repos/{owner}/{repo}/releases/latest
     let releases_url = if github_api_url.ends_with('/') {
         format!("{}releases/latest", github_api_url)
@@ -1517,23 +1539,43 @@ async fn query_github_releases(
         format!("{}/releases/latest", github_api_url)
     };
 
-    let response = client
+    let mut request = client
         .get(&releases_url)
-        .header(
-            ACCEPT,
-            HeaderValue::from_static("application/vnd.github+json"),
-        )
+        .header(ACCEPT, HeaderValue::from_static("application/vnd.github+json"))
         .header(USER_AGENT, HeaderValue::from_static(UPDATE_HTTP_USER_AGENT))
         .header(
             HeaderName::from_static("x-github-api-version"),
             HeaderValue::from_static("2022-11-28"),
-        )
+        );
+
+    // Attach cached ETag so GitHub can return 304 (free, no rate-limit cost)
+    if let Some((cached_etag, _)) = etag_cache.get(&releases_url) {
+        if let Ok(val) = HeaderValue::from_str(cached_etag) {
+            request = request.header(IF_NONE_MATCH, val);
+        }
+    }
+
+    let response = request
         .send()
         .await
         .with_context(|| format!("failed to query GitHub releases from {}", releases_url))?;
 
-    if !response.status().is_success() {
-        let status = response.status();
+    let status = response.status();
+
+    // 304 Not Modified — use cached body (free, doesn't count against rate limit)
+    if status == reqwest::StatusCode::NOT_MODIFIED {
+        if let Some((_, cached_body)) = etag_cache.get(&releases_url) {
+            let release: GitHubRelease = serde_json::from_str(cached_body)
+                .with_context(|| "failed to parse cached GitHub release")?;
+            return build_manifest_from_release(release, client, fetch_checksums, github_api_url)
+                .await;
+        }
+            // Cache miss despite 304 — remove stale entry and bail; next attempt re-fetches
+        etag_cache.remove(&releases_url);
+        anyhow::bail!("GitHub returned 304 but ETag cache is empty for {}", releases_url);
+    }
+
+    if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         anyhow::bail!(
             "GitHub releases query failed: HTTP {} from {}{}",
@@ -1547,12 +1589,36 @@ async fn query_github_releases(
         );
     }
 
-    let release: GitHubRelease = response
-        .json()
+    // 200 — store new ETag and body for future conditional requests
+    let new_etag = response
+        .headers()
+        .get("ETag")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let body = response
+        .text()
         .await
+        .with_context(|| format!("failed to read GitHub release response from {}", releases_url))?;
+
+    if let Some(etag) = new_etag {
+        etag_cache.insert(releases_url.clone(), (etag, body.clone()));
+    }
+
+    let release: GitHubRelease = serde_json::from_str(&body)
         .with_context(|| format!("failed to parse GitHub release from {}", releases_url))?;
 
-    // Parse assets into ArtifactMetadata
+    build_manifest_from_release(release, client, fetch_checksums, github_api_url).await
+}
+
+/// Convert a parsed `GitHubRelease` into a `RegistryManifest`.
+/// Shared by the fresh-fetch (200) and cached (304) paths.
+async fn build_manifest_from_release(
+    release: GitHubRelease,
+    client: &reqwest::Client,
+    fetch_checksums: bool,
+    github_api_url: &str,
+) -> Result<RegistryManifest> {
     let mut components = Vec::new();
     let component_names = ["core", "ui", "rootfs"];
     let source_repo = github_repo_slug(github_api_url);
@@ -1582,7 +1648,6 @@ async fn query_github_releases(
         };
 
         if let Some(asset) = asset_opt {
-            // Extract version from filename: core-v1.2.3.tar.zst -> 1.2.3
             let version_str = artifact_version_from_name(comp_name, &asset.name)
                 .unwrap_or_else(|| release.tag_name.trim_start_matches('v').to_string());
 
@@ -1590,7 +1655,7 @@ async fn query_github_releases(
                 component: comp_name.to_string(),
                 version: version_str.clone(),
                 download_url: asset.browser_download_url.clone(),
-                checksum_sha256: String::new(), // Will be populated from checksums.txt if available
+                checksum_sha256: String::new(),
                 signature_url: None,
                 source_repo: source_repo.clone(),
                 source_tag: Some(release.tag_name.clone()),
@@ -1615,7 +1680,7 @@ async fn query_github_releases(
             );
         } else {
             anyhow::bail!(
-                "GitHub release {} has no artifacts matching patterns core-v*.tar.zst / ui-v*.tar.zst / rootfs-v*.tar.zst; found: {}",
+                "GitHub release {} has no artifacts matching patterns core-v*.tar.zst / ui-v*.tar.zst / rootfs-v*.squashfs; found: {}",
                 release.tag_name,
                 found.join(", ")
             );
@@ -1629,8 +1694,6 @@ async fn query_github_releases(
     Ok(RegistryManifest {
         components,
         generated_at: release.created_at.clone(),
-        // GitHub releases for a single repo only cover that repo's component(s).
-        // Absence of other components is expected, not an error.
         partial: true,
     })
 }
@@ -1962,7 +2025,7 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
     let settings = load_settings(state);
     let mut state_file = load_state(state);
 
-    match query_registry_with_component_fallbacks(&settings, false).await {
+    match query_registry_with_component_fallbacks(&settings, false, &mut state_file.release_etag_cache).await {
         Ok(manifest) => {
             let mut seen_components = std::collections::HashSet::new();
             // Bootstrap tracked current version once for legacy systems that
@@ -2046,7 +2109,7 @@ async fn apply_updates_registry(
     save_state(state, &state_file)?;
 
     // Step 1: Query registry for latest versions (with checksums for artifact verification)
-    let manifest = query_registry_with_component_fallbacks(&settings, true).await?;
+    let manifest = query_registry_with_component_fallbacks(&settings, true, &mut state_file.release_etag_cache).await?;
 
     // Step 2: Download all artifacts to staging area
     let staging_dir = PathBuf::from(ARTIFACT_STAGING_DIR);

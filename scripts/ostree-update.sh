@@ -82,32 +82,30 @@ _status_output() {
 _ensure_sysroot_layout() {
     mkdir -p "${OSTREE_DEPLOY}" "${OSTREE_REPO}"
 
-    # bare-user-only stores permissions as xattrs but does NOT store or restore
-    # security xattrs (security.capability, security.selinux).  This means
-    # pull-local needs no CAP_FOWNER and ostree admin deploy needs no CAP_SETFCAP,
-    # making both operations work within the dayshield service capability set.
-    # For a root-running appliance this has no practical effect on functionality.
+    # bare-user stores ownership/permissions/xattrs as user.* xattrs on content
+    # objects rather than as real filesystem metadata.  This means pull-local
+    # never calls fchmod on repo objects (no CAP_FOWNER needed) and correctly
+    # preserves SUID/SGID bits and security.capability xattrs.  ostree admin
+    # deploy restores security.capability during checkout, which requires
+    # CAP_SETFCAP — that capability is granted in the dayshield.service unit.
+    # bare-user-only was tried first but it rejects any file with SUID/SGID
+    # bits, which the Debian rootfs contains (e.g. wall, unix_chkpwd).
     _repo_mode="$(sed -n 's/^mode=//p' "${OSTREE_REPO}/config" 2>/dev/null || true)"
     case "${_repo_mode}" in
-        bare-user-only)
+        bare-user)
             # Already in the target mode; nothing to convert.
             ;;
-        bare|bare-user|archive-z2|archive)
-            # Migrate to bare-user-only: pull all existing refs into a tmp repo, then
-            # swap.  Writing to bare-user-only needs no fchmod or setxattr for
-            # security.capability, so this succeeds without CAP_FOWNER/CAP_SETFCAP.
-            _buo_tmp="${OSTREE_REPO}.bare-user-only-tmp"
-            rm -rf "${_buo_tmp}"
-            ostree --repo="${_buo_tmp}" init --mode=bare-user-only
-            for _ref in $(ostree --repo="${OSTREE_REPO}" refs 2>/dev/null || true); do
-                ostree pull-local --repo="${_buo_tmp}" "${OSTREE_REPO}" "${_ref}"
-            done
-            rm -rf "${OSTREE_REPO}"
-            mv "${_buo_tmp}" "${OSTREE_REPO}"
-            ;;
         *)
-            # No existing config (fresh sysroot) or unrecognised mode — init fresh.
-            ostree --repo="${OSTREE_REPO}" init --mode=bare-user-only
+            # Any other mode (bare, bare-user-only, archive-z2, archive, or
+            # unset on a fresh sysroot): delete and re-init as bare-user.
+            # Migrating via pull-local is not safe for bare-user-only because
+            # security xattrs were stripped and cannot be recovered from the
+            # existing objects; the subsequent pull-local from the release
+            # artifact will re-populate the repo with correct metadata.
+            # Existing deployment hardlinks remain intact — their inodes stay
+            # alive until the deployment directory itself is removed.
+            rm -rf "${OSTREE_REPO}"
+            ostree --repo="${OSTREE_REPO}" init --mode=bare-user
             ;;
     esac
 

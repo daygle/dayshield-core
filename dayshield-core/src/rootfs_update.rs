@@ -35,7 +35,7 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::{Mutex as StdMutex, OnceLock},
+    sync::OnceLock,
 };
 
 use anyhow::{Context, Result};
@@ -188,10 +188,10 @@ pub struct RootfsRebootState {
 
 /// Global mutex that serialises rootfs update operations so that only one
 /// stage/apply/rollback can run at a time.
-static OPERATION_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+static OPERATION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
-fn operation_lock() -> &'static StdMutex<()> {
-    OPERATION_LOCK.get_or_init(|| StdMutex::new(()))
+fn operation_lock() -> &'static tokio::sync::Mutex<()> {
+    OPERATION_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 // ---------------------------------------------------------------------------
@@ -366,9 +366,7 @@ pub fn reboot_state_sync() -> bool {
 /// image.  Does **not** activate the image — that requires a reboot after
 /// [`apply_update`].
 pub async fn stage_update() -> Result<RootfsActionResult> {
-    let _guard = operation_lock()
-        .lock()
-        .map_err(|_| anyhow::anyhow!("rootfs operation lock poisoned"))?;
+    let _guard = operation_lock().lock().await;
 
     let mut details = Vec::new();
 
@@ -437,9 +435,7 @@ async fn run_helper_stage(details: &mut Vec<String>) -> (bool, String) {
 /// (detected by the boot counter / watchdog), the initramfs reverts to the
 /// previous version automatically.
 pub async fn apply_update() -> Result<RootfsActionResult> {
-    let _guard = operation_lock()
-        .lock()
-        .map_err(|_| anyhow::anyhow!("rootfs operation lock poisoned"))?;
+    let _guard = operation_lock().lock().await;
 
     let mut details = Vec::new();
 
@@ -528,9 +524,7 @@ async fn run_helper_apply(details: &mut Vec<String>) -> (bool, String) {
 /// Writes a rollback marker that the initramfs reads on the next boot to
 /// select the previous version.
 pub async fn rollback() -> Result<RootfsActionResult> {
-    let _guard = operation_lock()
-        .lock()
-        .map_err(|_| anyhow::anyhow!("rootfs operation lock poisoned"))?;
+    let _guard = operation_lock().lock().await;
 
     let mut details = Vec::new();
 

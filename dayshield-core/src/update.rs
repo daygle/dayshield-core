@@ -1068,12 +1068,24 @@ fn compute_file_sha256(path: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
     let mut f = std::fs::File::open(path)
         .with_context(|| format!("failed to open {} for hashing", path.display()))?;
-    std::io::copy(&mut f, &mut hasher)?;
+    let mut buffer = [0u8; 65536];
+    loop {
+        use std::io::Read;
+        let n = f.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
     let digest = hasher.finalize();
     Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 
+
+pub fn load_settings(state: &AppState) -> UpdateSettings {
+    load_json_or_default(&settings_path(state))
+}
 
 pub fn save_settings(state: &AppState, settings: &UpdateSettings) -> Result<()> {
     let mut value = settings.clone();

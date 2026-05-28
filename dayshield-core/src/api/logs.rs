@@ -636,12 +636,12 @@ mod tests {
     }
 
     #[test]
-    fn update_source_includes_ostree_system_events() {
+    fn update_source_includes_rootfs_system_events() {
         let event = LogEvent::SystemEvent {
             timestamp: "2026-05-23T02:03:04Z".to_string(),
             unit: "dayshield-core.service".to_string(),
             priority: Some(6),
-            message: "Pulling dayshield/amd64 into /sysroot/ostree/repo ...".to_string(),
+            message: "rootfs-v1.2.3 image staged successfully.".to_string(),
         };
 
         assert!(event_matches_source(&event, "updates"));

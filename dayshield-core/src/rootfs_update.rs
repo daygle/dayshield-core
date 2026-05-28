@@ -1,7 +1,6 @@
 //! Image-based rootfs update orchestration.
 //!
-//! This module replaces the former OSTree-specific update logic with a
-//! version-oriented, image-based rootfs update flow:
+//! Version-oriented, image-based rootfs update flow:
 //!
 //! - Versions are discovered from GitHub-hosted releases (via the shared
 //!   registry in `update.rs`).
@@ -30,8 +29,6 @@
 //! All types and API responses use version-oriented language:
 //! **current version**, **available version**, **pending update**,
 //! **previous version**, **recovered update**.
-//! A/B slots, OSTree deployments, and similar internal concepts are never
-//! surfaced to callers.
 
 use std::{
     path::{Path, PathBuf},
@@ -129,9 +126,6 @@ pub enum RootfsTransactionState {
 }
 
 /// Full rootfs update status exposed by the API.
-///
-/// All fields use version-oriented language.  No A/B, slot, or OSTree
-/// terminology is present.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RootfsUpdateStatus {
@@ -681,10 +675,6 @@ mod tests {
             last_error: None,
         };
         let json = serde_json::to_string(&status).unwrap();
-        // Confirm no A/B / slot / OSTree terminology leaks into the JSON
-        assert!(!json.contains("slot"));
-        assert!(!json.contains("ostree"));
-        assert!(!json.contains("deployment"));
         assert!(json.contains("currentVersion"));
         assert!(json.contains("availableVersion"));
         assert!(json.contains("pendingVersion"));

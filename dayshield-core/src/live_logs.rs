@@ -618,12 +618,12 @@ mod tests {
     }
 
     #[test]
-    fn ostree_rootfs_system_logs_classify_as_updates() {
+    fn rootfs_update_system_logs_classify_as_updates() {
         let event = LogEvent::SystemEvent {
             timestamp: "2026-05-23T02:03:04Z".into(),
             unit: "dayshield-core.service".into(),
             priority: Some(6),
-            message: "Downloading rootfs-v1.2.3-ostree-repo.tar.zst ...".into(),
+            message: "Downloading rootfs-v1.2.3.squashfs ...".into(),
         };
         let payload = event.to_client_payload();
         assert_eq!(payload["source"], "updates");

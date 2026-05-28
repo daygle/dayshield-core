@@ -64,24 +64,21 @@ cargo test -p dayshield-core
 - The UI frontend and appliance root filesystem are maintained in separate repositories.
 - Developers should validate changes with workspace build/test commands and ensure runtime integration compatibility.
 
-## OSTree update workflow endpoints
+## Rootfs update workflow endpoints
 
-`dayshield-core` now exposes a practical OSTree-focused backend slice:
+`dayshield-core` exposes an image-based rootfs update slice under `/system/rootfs/`:
 
-- `GET  /system/ostree/status` - full OSTree workflow status for UI cards/views
-- `POST /system/ostree/check` - query the configured DayShield OSTree remote
-- `POST /system/ostree/stage` - stage the next OSTree deployment
-- `POST /system/ostree/apply` - stage/apply the next OSTree deployment for reboot
-- `GET  /system/ostree/reboot-required` - compact reboot-required payload for UX banners
+- `GET  /system/rootfs/status` - full rootfs update status for UI cards/views
+- `POST /system/rootfs/check` - query the GitHub release registry for a newer rootfs version
+- `POST /system/rootfs/stage` - download and stage the rootfs squashfs artifact
+- `POST /system/rootfs/apply` - mark the staged image for activation on next boot
+- `GET  /system/rootfs/reboot-required` - compact reboot-required payload for UX banners
+- `POST /system/rootfs/rollback` - schedule a revert to the previous known-good version
 
-### Assumptions
+### How it works
 
-- The appliance image provides `ostree` and the DayShield helper at `/usr/local/lib/dayshield/ostree-update.sh`.
-- `dayshield-core` uses the helper when present, falls back to native `ostree admin` commands, and keeps `rpm-ostree` only as a compatibility fallback.
-
-### Production hardening in place
-
+- Version metadata is tracked in `/var/lib/dayshield/rootfs-update/` as `current.json`, `pending.json`, and `previous.json`.
 - `stage` and `apply` require the authenticated admin identity and emit audit-targeted tracing events.
-- `check`, `stage`, and `apply` operations are serialized behind an in-process OSTree operation queue to avoid concurrent OSTree transactions.
-- Status responses include explicit `transactionState` data and tolerate common OSTree text output plus rpm-ostree JSON variants.
-- Mocked OSTree tests cover success, no-update, failure, command-missing, and transaction-serialization paths.
+- All three operations are serialized behind an in-process lock to prevent concurrent transactions.
+- The initramfs reads the `activate` or `rollback` marker on boot and switches to the correct squashfs image.
+- After a successful boot the `dayshield-boot-success` systemd unit promotes `pending` → `current`.

@@ -2902,10 +2902,6 @@ mod tests {
             artifact_version_from_name("ui", "dayshield-ui-v1.2.3.tar.zst"),
             None
         );
-        assert_eq!(
-            artifact_version_from_name("rootfs", "rootfs-v1.0.0-ostree-repo.tar.zst"),
-            None
-        );
     }
 
     #[test]

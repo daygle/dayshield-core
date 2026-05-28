@@ -1141,10 +1141,11 @@ pub async fn get_rootfs_status() -> impl IntoResponse {
 }
 
 /// Handler: trigger an immediate check for a new rootfs image artifact.
-pub async fn check_rootfs_updates() -> impl IntoResponse {
-    match rootfs_update::status().await {
-        status => (StatusCode::OK, Json(serde_json::json!(status))).into_response(),
-    }
+pub async fn check_rootfs_updates(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let _ = update::check_for_updates(&state).await;
+    Json(rootfs_update::status().await)
 }
 
 /// Handler: pre-download and stage the latest rootfs image artifact.

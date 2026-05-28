@@ -65,6 +65,12 @@ async fn main() -> anyhow::Result<()> {
         );
         return Ok(());
     }
+    if args.get(1).map(String::as_str) == Some("signal-boot-success") {
+        rootfs_update::signal_boot_success()
+            .map_err(|e| anyhow::anyhow!("signal-boot-success failed: {e:#}"))?;
+        println!("Boot success signalled.");
+        return Ok(());
+    }
     if matches!(
         args.get(1).map(String::as_str),
         Some(

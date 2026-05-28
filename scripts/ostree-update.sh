@@ -231,6 +231,20 @@ case "${action}" in
         ostree pull-local --repo="${OSTREE_REPO}" "${extract_dir}" "${OSTREE_REF}"
         printf 'Pull complete.\n'
 
+        # Migrate nft-ifaces.conf from /etc (OSTree-managed) to /var (persistent)
+        # for systems upgrading from a rootfs build that predates the /var move.
+        # The new commit carries a symlink at /etc/dayshield/config/nft-ifaces.conf
+        # pointing here, so the file must exist in /var before the next boot.
+        _etc_ifaces="/etc/dayshield/config/nft-ifaces.conf"
+        _var_ifaces="/var/lib/dayshield/config/nft-ifaces.conf"
+        if [ -f "${_etc_ifaces}" ] && [ ! -L "${_etc_ifaces}" ]; then
+            mkdir -p /var/lib/dayshield/config
+            if [ ! -f "${_var_ifaces}" ]; then
+                cp "${_etc_ifaces}" "${_var_ifaces}"
+                printf 'Migrated %s -> %s\n' "${_etc_ifaces}" "${_var_ifaces}"
+            fi
+        fi
+
         # Stage the deployment (initial deploy or upgrade)
         if _has_deployments; then
             printf 'Staging upgrade for %s ...\n' "${OSTREE_OS}"

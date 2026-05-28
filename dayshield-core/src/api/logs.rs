@@ -17,6 +17,7 @@ use tokio::process::Command;
 use tracing::{info, warn};
 
 use crate::live_logs::{
+    classify_system_source,
     firewall::{parse_dmesg_firewall_line, parse_journald_firewall_line},
     suricata::parse_eve_line,
     system::{parse_journald_system_line, parse_system_text_line},
@@ -147,9 +148,14 @@ fn event_matches_source(event: &LogEvent, source: &str) -> bool {
         ("all", _) => true,
         ("suricata", LogEvent::SuricataAlert { .. }) => true,
         ("firewall", LogEvent::FirewallEvent { .. }) => true,
-        ("system", LogEvent::SystemEvent { .. }) => true,
+        ("system", LogEvent::SystemEvent { unit, message, .. }) => {
+            classify_system_source(unit, message) != "updates"
+        }
         ("ui", LogEvent::UiEvent { .. }) => true,
         ("updates", LogEvent::UpdateEvent { .. }) => true,
+        ("updates", LogEvent::SystemEvent { unit, message, .. }) => {
+            classify_system_source(unit, message) == "updates"
+        }
         _ => false,
     }
 }
@@ -471,7 +477,7 @@ pub async fn ws_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
 /// Query params:
 /// - `from` (optional, RFC3339 or Unix timestamp; defaults to 24 hours before `to`)
 /// - `to` (optional, RFC3339 or Unix timestamp; defaults to now)
-/// - `source` (optional: all|system|firewall|suricata, default all)
+/// - `source` (optional: all|system|firewall|suricata|ui|updates, default all)
 /// - `q`, `query`, or `search` (optional case-insensitive contains search)
 /// - `limit` (optional max items, default 5000, hard cap 20000)
 pub async fn search_logs(
@@ -502,7 +508,7 @@ pub async fn search_logs(
     let from_s = from.format("%Y-%m-%d %H:%M:%S UTC").to_string();
     let to_s = to.format("%Y-%m-%d %H:%M:%S UTC").to_string();
 
-    if matches!(source.as_str(), "all" | "system") {
+    if matches!(source.as_str(), "all" | "system" | "updates") {
         let journal_events = query_journal_system(&from_s, &to_s).await?;
         if journal_events.is_empty() {
             events.extend(query_core_log_range(from, to).await?);
@@ -627,5 +633,18 @@ mod tests {
         assert!(text.contains("error-boundary"));
         assert!(text.contains("Something went wrong"));
         assert!(text.contains("/dashboard"));
+    }
+
+    #[test]
+    fn update_source_includes_ostree_system_events() {
+        let event = LogEvent::SystemEvent {
+            timestamp: "2026-05-23T02:03:04Z".to_string(),
+            unit: "dayshield-core.service".to_string(),
+            priority: Some(6),
+            message: "Pulling dayshield/amd64 into /sysroot/ostree/repo ...".to_string(),
+        };
+
+        assert!(event_matches_source(&event, "updates"));
+        assert!(!event_matches_source(&event, "system"));
     }
 }

@@ -11,7 +11,11 @@ use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use tokio::{process::Command, sync::Mutex as AsyncMutex};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    process::Command,
+    sync::Mutex as AsyncMutex,
+};
 
 const MAX_COMMAND_OUTPUT_LINES: usize = 20;
 const DAYSHIELD_OSTREE_HELPER: &str = "/usr/local/lib/dayshield/ostree-update.sh";
@@ -110,6 +114,17 @@ enum OstreeCommand {
     Apply,
 }
 
+impl OstreeCommand {
+    fn operation_name(self) -> Option<&'static str> {
+        match self {
+            OstreeCommand::Status => None,
+            OstreeCommand::Check => Some("check"),
+            OstreeCommand::Stage => Some("stage"),
+            OstreeCommand::Apply => Some("apply"),
+        }
+    }
+}
+
 trait OstreeRunner: Send + Sync {
     fn run(&self, command: OstreeCommand) -> CommandFuture<'_>;
 }
@@ -120,18 +135,23 @@ impl OstreeRunner for SystemOstreeRunner {
     fn run(&self, command: OstreeCommand) -> CommandFuture<'_> {
         Box::pin(async move {
             let invocation = system_ostree_invocation(command);
-            let output = Command::new(&invocation.program)
-                .args(&invocation.args)
-                .output()
-                .await
-                .with_context(|| format!("failed to execute `{}`", invocation.label))?;
+            match command.operation_name() {
+                Some(operation) => run_command_with_live_update_logs(invocation, operation).await,
+                None => {
+                    let output = Command::new(&invocation.program)
+                        .args(&invocation.args)
+                        .output()
+                        .await
+                        .with_context(|| format!("failed to execute `{}`", invocation.label))?;
 
-            Ok(ProcessOutput {
-                label: invocation.label,
-                success: output.status.success(),
-                stdout: output.stdout,
-                stderr: output.stderr,
-            })
+                    Ok(ProcessOutput {
+                        label: invocation.label,
+                        success: output.status.success(),
+                        stdout: output.stdout,
+                        stderr: output.stderr,
+                    })
+                }
+            }
         })
     }
 }
@@ -233,6 +253,112 @@ fn command_label(program: &str, args: &[String]) -> String {
         program.to_string()
     } else {
         format!("{} {}", program, args.join(" "))
+    }
+}
+
+async fn run_command_with_live_update_logs(
+    invocation: CommandInvocation,
+    operation: &'static str,
+) -> Result<ProcessOutput> {
+    let mut child = Command::new(&invocation.program)
+        .args(&invocation.args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to execute `{}`", invocation.label))?;
+
+    let stdout_task = child.stdout.take().map(|stdout| {
+        tokio::spawn(async move { collect_and_publish_update_output(stdout, operation).await })
+    });
+    let stderr_task = child.stderr.take().map(|stderr| {
+        tokio::spawn(async move { collect_and_publish_update_output(stderr, operation).await })
+    });
+
+    let status = child
+        .wait()
+        .await
+        .with_context(|| format!("failed to wait for `{}`", invocation.label))?;
+    let stdout = join_output(stdout_task).await;
+    let stderr = join_output(stderr_task).await;
+
+    Ok(ProcessOutput {
+        label: invocation.label,
+        success: status.success(),
+        stdout,
+        stderr,
+    })
+}
+
+async fn join_output(task: Option<tokio::task::JoinHandle<Vec<u8>>>) -> Vec<u8> {
+    match task {
+        Some(task) => task.await.unwrap_or_default(),
+        None => Vec::new(),
+    }
+}
+
+async fn collect_and_publish_update_output<R>(mut reader: R, operation: &'static str) -> Vec<u8>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut collected = Vec::new();
+    let mut pending_line = Vec::new();
+    let mut buf = [0_u8; 4096];
+    let mut last_published: Option<String> = None;
+
+    loop {
+        let read = reader.read(&mut buf).await.unwrap_or(0);
+        if read == 0 {
+            break;
+        }
+
+        collected.extend_from_slice(&buf[..read]);
+        for byte in &buf[..read] {
+            match *byte {
+                b'\n' | b'\r' => {
+                    publish_update_output_line(operation, &mut pending_line, &mut last_published);
+                }
+                _ => pending_line.push(*byte),
+            }
+        }
+    }
+
+    publish_update_output_line(operation, &mut pending_line, &mut last_published);
+    collected
+}
+
+fn publish_update_output_line(
+    operation: &'static str,
+    pending_line: &mut Vec<u8>,
+    last_published: &mut Option<String>,
+) {
+    let line = String::from_utf8_lossy(pending_line).trim().to_string();
+    pending_line.clear();
+    if line.is_empty() || last_published.as_deref() == Some(line.as_str()) {
+        return;
+    }
+
+    *last_published = Some(line.clone());
+    crate::live_logs::ui::publish(crate::live_logs::LogEvent::UpdateEvent {
+        timestamp: Utc::now().to_rfc3339(),
+        operation: operation.to_string(),
+        level: classify_command_output_level(&line).to_string(),
+        message: line,
+        component: Some("rootfs".to_string()),
+    });
+}
+
+fn classify_command_output_level(line: &str) -> &'static str {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("error")
+        || lower.contains("failed")
+        || lower.contains("failure")
+        || lower.contains("mismatch")
+    {
+        "error"
+    } else if lower.contains("warning") || lower.contains("warn") {
+        "warning"
+    } else {
+        "info"
     }
 }
 

@@ -336,7 +336,7 @@ fn format_socket(ip: &str, port: u16) -> Option<String> {
     }
 }
 
-fn classify_system_source(unit: &str, message: &str) -> &'static str {
+pub(crate) fn classify_system_source(unit: &str, message: &str) -> &'static str {
     let hay = format!("{unit} {message}").to_lowercase();
     if hay.contains("suricata") {
         "suricata"
@@ -397,6 +397,8 @@ fn classify_system_source(unit: &str, message: &str) -> &'static str {
         "honeypot"
     } else if hay.contains("captive-portal") || hay.contains("captive_portal") {
         "captive_portal"
+    } else if looks_like_update_system_log(&hay) {
+        "updates"
     } else if hay.contains("backup") || hay.contains("restore") || hay.contains("snapshot") {
         "backup_restore"
     } else if hay.contains("update")
@@ -412,6 +414,34 @@ fn classify_system_source(unit: &str, message: &str) -> &'static str {
     } else {
         "system"
     }
+}
+
+fn looks_like_update_system_log(hay: &str) -> bool {
+    [
+        "ostree",
+        "rpm-ostree",
+        "rootfs",
+        "root filesystem",
+        "system image",
+        "system-image",
+        "dayshield-updates",
+        "dayshield_core::update",
+        "updates:",
+        "/system/ostree",
+        "ostree admin",
+        "ostree repo",
+        "ostree-update",
+        "pull-local",
+        "receiving objects",
+        "resolving deltas",
+        "staging upgrade",
+        "staged deployment",
+        "deployment staged",
+        "reboot to activate the new image",
+        "system image update",
+    ]
+    .iter()
+    .any(|needle| hay.contains(needle))
 }
 
 fn classify_system_level(message: &str, priority: Option<u8>) -> &'static str {
@@ -591,5 +621,29 @@ mod tests {
         };
         let payload = event.to_client_payload();
         assert_eq!(payload["source"], "interfaces");
+    }
+
+    #[test]
+    fn ostree_rootfs_system_logs_classify_as_updates() {
+        let event = LogEvent::SystemEvent {
+            timestamp: "2026-05-23T02:03:04Z".into(),
+            unit: "dayshield-core.service".into(),
+            priority: Some(6),
+            message: "Downloading rootfs-v1.2.3-ostree-repo.tar.zst ...".into(),
+        };
+        let payload = event.to_client_payload();
+        assert_eq!(payload["source"], "updates");
+    }
+
+    #[test]
+    fn update_engine_backup_messages_classify_as_updates() {
+        let event = LogEvent::SystemEvent {
+            timestamp: "2026-05-23T02:03:04Z".into(),
+            unit: "dayshield_core::update".into(),
+            priority: Some(6),
+            message: "created backup snapshots".into(),
+        };
+        let payload = event.to_client_payload();
+        assert_eq!(payload["source"], "updates");
     }
 }

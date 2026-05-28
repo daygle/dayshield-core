@@ -82,30 +82,32 @@ _status_output() {
 _ensure_sysroot_layout() {
     mkdir -p "${OSTREE_DEPLOY}" "${OSTREE_REPO}"
 
-    # bare-user stores permissions as xattrs rather than calling fchmod/chown on
-    # content objects, so pull-local works without CAP_FOWNER. ostree admin deploy
-    # still uses hardlink checkout from a bare-user repo, avoiding CAP_CHOWN.
+    # bare-user-only stores permissions as xattrs but does NOT store or restore
+    # security xattrs (security.capability, security.selinux).  This means
+    # pull-local needs no CAP_FOWNER and ostree admin deploy needs no CAP_SETFCAP,
+    # making both operations work within the dayshield service capability set.
+    # For a root-running appliance this has no practical effect on functionality.
     _repo_mode="$(sed -n 's/^mode=//p' "${OSTREE_REPO}/config" 2>/dev/null || true)"
     case "${_repo_mode}" in
-        bare-user|bare-user-only)
-            # Already in a privilege-free mode; nothing to convert.
+        bare-user-only)
+            # Already in the target mode; nothing to convert.
             ;;
-        bare|archive-z2|archive)
-            # Migrate to bare-user: pull all existing refs into a tmp repo, then swap.
-            # Reading from a bare/archive repo needs no special caps; writing to
-            # bare-user needs no fchmod, so this succeeds without CAP_FOWNER.
-            _bu_tmp="${OSTREE_REPO}.bare-user-tmp"
-            rm -rf "${_bu_tmp}"
-            ostree --repo="${_bu_tmp}" init --mode=bare-user
+        bare|bare-user|archive-z2|archive)
+            # Migrate to bare-user-only: pull all existing refs into a tmp repo, then
+            # swap.  Writing to bare-user-only needs no fchmod or setxattr for
+            # security.capability, so this succeeds without CAP_FOWNER/CAP_SETFCAP.
+            _buo_tmp="${OSTREE_REPO}.bare-user-only-tmp"
+            rm -rf "${_buo_tmp}"
+            ostree --repo="${_buo_tmp}" init --mode=bare-user-only
             for _ref in $(ostree --repo="${OSTREE_REPO}" refs 2>/dev/null || true); do
-                ostree pull-local --repo="${_bu_tmp}" "${OSTREE_REPO}" "${_ref}"
+                ostree pull-local --repo="${_buo_tmp}" "${OSTREE_REPO}" "${_ref}"
             done
             rm -rf "${OSTREE_REPO}"
-            mv "${_bu_tmp}" "${OSTREE_REPO}"
+            mv "${_buo_tmp}" "${OSTREE_REPO}"
             ;;
         *)
             # No existing config (fresh sysroot) or unrecognised mode — init fresh.
-            ostree --repo="${OSTREE_REPO}" init --mode=bare-user
+            ostree --repo="${OSTREE_REPO}" init --mode=bare-user-only
             ;;
     esac
 

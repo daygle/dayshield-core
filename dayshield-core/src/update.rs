@@ -18,11 +18,14 @@ use crate::backup::{
     model::{BackupType, Subsystem},
     restore::restore_backup,
 };
-use crate::ostree;
 use crate::state::AppState;
 
 const SETTINGS_FILE: &str = "updates_settings.json";
 const STATE_FILE: &str = "updates_state.json";
+/// Default absolute path of the persisted update state file.
+/// This constant is published so that `rootfs_update` can read the file
+/// without requiring access to AppState.
+pub const UPDATE_STATE_FILE_PATH: &str = "/etc/dayshield/config/updates_state.json";
 const DEFAULT_CORE_URL: &str = "https://github.com/daygle/dayshield-core";
 const DEFAULT_UI_URL: &str = "https://github.com/daygle/dayshield-ui";
 const DEFAULT_ROOTFS_URL: &str = "https://github.com/daygle/dayshield-rootfs";
@@ -330,19 +333,15 @@ impl RepoComponent {
             UpdateComponent::Core => vec![Self::Core],
             UpdateComponent::Ui => vec![Self::Ui],
             UpdateComponent::Rootfs => vec![Self::Rootfs],
-            UpdateComponent::Both => vec![Self::Core, Self::Ui],
+            UpdateComponent::Both => vec![Self::Core, Self::Ui, Self::Rootfs],
         }
     }
 }
 
-fn ensure_registry_updatable_selection(selected_components: &[RepoComponent]) -> Result<()> {
-    if selected_components
-        .iter()
-        .any(|c| matches!(c, RepoComponent::Rootfs))
-    {
-        anyhow::bail!("rootfs deployment updates are managed through OSTree (/system/ostree/*)");
-    }
-
+fn ensure_registry_updatable_selection(_selected_components: &[RepoComponent]) -> Result<()> {
+    // All components — including rootfs — are handled through the artifact
+    // registry.  Rootfs artifacts are staged to disk for initramfs-driven
+    // activation on the next boot rather than applied in-place.
     Ok(())
 }
 
@@ -439,8 +438,6 @@ pub struct UpdatesStatus {
     pub available_update_count: Option<usize>,
     #[serde(default)]
     pub operation_logs: Vec<UpdateLogEntry>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ostree_status: Option<ostree::OstreeStatus>,
 }
 
 // ============================================================================
@@ -1038,9 +1035,45 @@ fn install_dir_atomic(src: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn load_settings(state: &AppState) -> UpdateSettings {
-    load_json_or_default(&settings_path(state))
+/// Find the rootfs image file inside an extracted artifact directory.
+/// Looks for common rootfs image extensions.
+fn find_rootfs_image(dir: &Path) -> Result<PathBuf> {
+    let candidates = ["rootfs.squashfs", "rootfs.erofs", "rootfs.img", "rootfs.ext4"];
+    for name in &candidates {
+        let path = dir.join(name);
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+    // Fallback: find any file with a known image extension
+    for entry in fs::read_dir(dir)
+        .with_context(|| format!("failed to read staging dir {}", dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if matches!(ext, "squashfs" | "erofs" | "img" | "ext4") {
+                return Ok(path);
+            }
+        }
+    }
+    anyhow::bail!(
+        "no rootfs image found in artifact (expected rootfs.squashfs, rootfs.erofs, or rootfs.img)"
+    )
 }
+
+/// Compute a hex-encoded SHA-256 digest of a file.
+fn compute_file_sha256(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let mut f = std::fs::File::open(path)
+        .with_context(|| format!("failed to open {} for hashing", path.display()))?;
+    std::io::copy(&mut f, &mut hasher)?;
+    let digest = hasher.finalize();
+    Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+
 
 pub fn save_settings(state: &AppState, settings: &UpdateSettings) -> Result<()> {
     let mut value = settings.clone();
@@ -1328,7 +1361,7 @@ fn artifact_version_segments(version: &str) -> Option<Vec<u64>> {
         .collect()
 }
 
-fn is_remote_version_newer(current: &str, remote: &str) -> bool {
+pub fn is_remote_version_newer(current: &str, remote: &str) -> bool {
     let (Some(current_segments), Some(remote_segments)) = (
         artifact_version_segments(current),
         artifact_version_segments(remote),
@@ -1599,19 +1632,20 @@ async fn extract_and_deploy_artifact(
 
             install_executable_file_atomic(&binary, Path::new("/usr/local/sbin/dayshield-core"))?;
 
-            // Also update the OSTree update helper when bundled in the core artifact
-            let helper = tmp_dir.join("ostree-update.sh");
+            // Also update the rootfs-update helper when bundled in the core artifact
+            let helper = tmp_dir.join("rootfs-update.sh");
             if helper.exists() {
-                let helper_dest = Path::new("/usr/local/lib/dayshield/ostree-update.sh");
+                let helper_dest =
+                    Path::new(crate::rootfs_update::ROOTFS_UPDATE_HELPER);
                 match install_executable_file_atomic(&helper, helper_dest) {
                     Ok(()) => info!(
                         target = %helper_dest.display(),
-                        "updates: installed bundled OSTree helper"
+                        "updates: installed bundled rootfs-update helper"
                     ),
                     Err(err) => warn!(
                         error = %err,
                         target = %helper_dest.display(),
-                        "updates: skipping bundled OSTree helper install"
+                        "updates: skipping bundled rootfs-update helper install"
                     ),
                 }
             }
@@ -1635,9 +1669,56 @@ async fn extract_and_deploy_artifact(
             let _ = fs::remove_dir_all(&tmp_dir);
         }
         RepoComponent::Rootfs => {
-            anyhow::bail!(
-                "rootfs deployment updates are managed through OSTree (/system/ostree/*)"
-            );
+            // Stage the rootfs image artifact for initramfs-driven activation
+            // on the next boot.  The artifact is a .tar.zst containing a
+            // rootfs image file (e.g. rootfs.squashfs).
+            let staging_dir = PathBuf::from(crate::rootfs_update::ROOTFS_UPDATE_STAGING_DIR);
+            fs::create_dir_all(&staging_dir)?;
+
+            // Extract to a temp location first
+            let tmp_dir = PathBuf::from("/tmp/dayshield-rootfs-stage");
+            fs::create_dir_all(&tmp_dir)?;
+            archive
+                .unpack(&tmp_dir)
+                .with_context(|| "failed to extract rootfs artifact")?;
+
+            // Find the rootfs image file inside the extracted archive
+            let image_path = find_rootfs_image(&tmp_dir)?;
+            let image_filename = image_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("rootfs.img")
+                .to_string();
+
+            let dest = staging_dir.join(&image_filename);
+            install_executable_file_atomic(&image_path, &dest)?;
+            let _ = fs::remove_dir_all(&tmp_dir);
+
+            // Compute SHA-256 of the staged image for integrity verification
+            let sha256 = compute_file_sha256(&dest)?;
+
+            // Extract version from artifact filename, e.g. rootfs-v1.2.3.tar.zst
+            let version = artifact_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| artifact_version_from_name("rootfs", n))
+                .unwrap_or_else(|| "unknown".to_string());
+
+            // Write the pending-version marker for rootfs_update and the
+            // initramfs to pick up on the next boot.
+            if let Err(err) = crate::rootfs_update::mark_pending(&version, &dest, &sha256) {
+                warn!(
+                    error = %err,
+                    version,
+                    "updates: failed to write rootfs pending marker; artifact staged but not marked"
+                );
+            } else {
+                info!(
+                    version,
+                    artifact = %dest.display(),
+                    "updates: rootfs artifact staged and pending marker written"
+                );
+            }
         }
     }
 
@@ -1678,15 +1759,18 @@ pub async fn get_status(state: &AppState) -> UpdatesStatus {
     let core = build_component_status(&settings, &state_file, RepoComponent::Core).await;
     let ui = build_component_status(&settings, &state_file, RepoComponent::Ui).await;
     let rootfs = build_component_status(&settings, &state_file, RepoComponent::Rootfs).await;
-    let ostree_status = ostree::status().await;
 
     let components = vec![core, ui, rootfs];
     let available_update_count = components.iter().filter(|c| c.update_available).count();
+
+    // Include reboot_required from the rootfs pending-update marker if present.
+    let rootfs_reboot_required = crate::rootfs_update::reboot_state_sync();
+
     UpdatesStatus {
         settings,
         last_checked_at: state_file.last_checked_at,
         last_applied_at: state_file.last_applied_at,
-        pending_reboot: state_file.pending_reboot || ostree_status.reboot_required,
+        pending_reboot: state_file.pending_reboot || rootfs_reboot_required,
         pending_appliance_rebuild: state_file.pending_appliance_rebuild,
         appliance_rebuild_reason: state_file.appliance_rebuild_reason,
         appliance_rebuild_marked_at: state_file.appliance_rebuild_marked_at,
@@ -1697,7 +1781,6 @@ pub async fn get_status(state: &AppState) -> UpdatesStatus {
             None
         },
         operation_logs: state_file.operation_logs,
-        ostree_status: Some(ostree_status),
     }
 }
 

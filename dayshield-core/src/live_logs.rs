@@ -418,8 +418,6 @@ pub(crate) fn classify_system_source(unit: &str, message: &str) -> &'static str 
 
 fn looks_like_update_system_log(hay: &str) -> bool {
     [
-        "ostree",
-        "rpm-ostree",
         "rootfs",
         "root filesystem",
         "system image",
@@ -427,16 +425,12 @@ fn looks_like_update_system_log(hay: &str) -> bool {
         "dayshield-updates",
         "dayshield_core::update",
         "updates:",
-        "/system/ostree",
-        "ostree admin",
-        "ostree repo",
-        "ostree-update",
-        "pull-local",
-        "receiving objects",
-        "resolving deltas",
+        "/system/rootfs",
+        "rootfs-update",
+        "rootfs update",
+        "image activation",
         "staging upgrade",
-        "staged deployment",
-        "deployment staged",
+        "boot-success",
         "reboot to activate the new image",
         "system image update",
     ]

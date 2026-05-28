@@ -1649,7 +1649,8 @@ fn stage_rootfs_squashfs_direct(artifact_path: &Path) -> Result<()> {
         .to_string();
 
     let dest = staging_dir.join(&image_filename);
-    install_executable_file_atomic(artifact_path, &dest)?;
+    // Use plain file mode (0o644) — squashfs is a data image, not an executable.
+    install_file_atomic_with_mode(artifact_path, &dest, Some(0o644))?;
 
     let sha256 = compute_file_sha256(&dest)?;
 

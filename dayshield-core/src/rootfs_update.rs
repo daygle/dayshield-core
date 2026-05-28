@@ -49,6 +49,9 @@ pub const ROOTFS_UPDATE_STATE_DIR: &str = "/var/lib/dayshield/rootfs-update";
 pub const ROOTFS_UPDATE_STAGING_DIR: &str = "/var/lib/dayshield/rootfs-update/staging";
 pub const ROOTFS_UPDATE_HELPER: &str = "/usr/local/lib/dayshield/rootfs-update.sh";
 
+/// Path to the version string stamped into the rootfs image at build time.
+const ROOTFS_VERSION_FILE: &str = "/etc/dayshield/version";
+
 fn state_dir() -> PathBuf {
     PathBuf::from(ROOTFS_UPDATE_STATE_DIR)
 }
@@ -258,6 +261,21 @@ pub fn signal_boot_success() -> Result<()> {
 // Status
 // ---------------------------------------------------------------------------
 
+/// Read the version stamped into the rootfs image at build time.
+///
+/// Returns `None` when the file is absent, empty, or contains a placeholder
+/// string that does not represent a real release version.
+fn read_build_version() -> Option<String> {
+    std::fs::read_to_string(ROOTFS_VERSION_FILE)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty() && v != "unknown" && v != "initial")
+}
+
+fn is_placeholder_version(v: &str) -> bool {
+    v.is_empty() || v == "unknown" || v == "initial"
+}
+
 /// Return the current rootfs update status.
 pub async fn status() -> RootfsUpdateStatus {
     let now = Utc::now().to_rfc3339();
@@ -266,7 +284,25 @@ pub async fn status() -> RootfsUpdateStatus {
     let pending = read_meta(&pending_path());
     let previous = read_meta(&previous_path());
 
-    let current_version = current.as_ref().map(|m| m.version.clone());
+    // Resolve current version: prefer current.json, fall back to the version
+    // stamped into /etc/dayshield/version at build time so that a fresh install
+    // (or a current.json written with a placeholder like "initial") still
+    // displays the correct version.
+    let current_version = current
+        .as_ref()
+        .map(|m| m.version.as_str())
+        .filter(|v| !is_placeholder_version(v))
+        .map(|v| v.to_string())
+        .or_else(read_build_version);
+
+    // Auto-bootstrap current.json from the build-time version on first run so
+    // that signal_boot_success and rollback tracking work correctly going forward.
+    if current.is_none() {
+        if let Some(ref v) = current_version {
+            let _ = mark_current(v);
+        }
+    }
+
     let pending_version = pending.as_ref().map(|m| m.version.clone());
     let previous_version = previous.as_ref().map(|m| m.version.clone());
 

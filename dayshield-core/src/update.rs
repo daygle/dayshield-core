@@ -2096,18 +2096,26 @@ async fn apply_updates_registry(
                 continue;
             }
 
-            let dest = transaction_staging.join(format!(
-                "{}-{}.tar.zst",
-                &artifact.component, &artifact.version
-            ));
+            // Use the actual filename from the download URL so the file
+            // extension is preserved (.squashfs for rootfs, .tar.zst for others).
+            // extract_and_deploy_artifact dispatches on the extension.
+            let dest_filename = artifact
+                .download_url
+                .rsplit('/')
+                .next()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    format!("{}-{}.tar.zst", &artifact.component, &artifact.version)
+                });
+            let dest = transaction_staging.join(&dest_filename);
 
             download_artifact(&artifact.download_url, &dest).await?;
             if artifact.checksum_sha256.is_empty() {
                 if settings.verify_artifact_signatures {
                     anyhow::bail!(
-                        "no checksum available for {}-{}.tar.zst; cannot verify artifact integrity",
-                        artifact.component,
-                        artifact.version
+                        "no checksum available for {}; cannot verify artifact integrity",
+                        dest_filename
                     );
                 } else {
                     warn!(

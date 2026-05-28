@@ -1342,11 +1342,18 @@ async fn query_registry_with_component_fallbacks(
 }
 
 fn artifact_version_from_name(component: &str, asset_name: &str) -> Option<String> {
-    let version = asset_name
-        .strip_prefix(&format!("{component}-v"))
-        .and_then(|s| s.strip_suffix(".tar.zst"))
-        .filter(|version| is_artifact_version(version))?;
-
+    let prefix = format!("{component}-v");
+    let stripped = asset_name.strip_prefix(&prefix)?;
+    let version = stripped
+        .strip_suffix(".tar.zst")
+        .or_else(|| {
+            if component == "rootfs" {
+                stripped.strip_suffix(".squashfs")
+            } else {
+                None
+            }
+        })
+        .filter(|v| is_artifact_version(v))?;
     Some(version.to_string())
 }
 
@@ -1551,11 +1558,28 @@ async fn query_github_releases(
     let source_repo = github_repo_slug(github_api_url);
 
     for comp_name in &component_names {
-        // Find asset matching pattern: {component}-v*.tar.zst
-        let asset_opt = release
-            .assets
-            .iter()
-            .find(|a| artifact_version_from_name(comp_name, &a.name).is_some());
+        // For rootfs prefer the standalone squashfs image artifact over the full
+        // rootfs archive — the squashfs is what the initramfs update hook uses.
+        let asset_opt = if *comp_name == "rootfs" {
+            release
+                .assets
+                .iter()
+                .find(|a| {
+                    a.name.ends_with(".squashfs")
+                        && artifact_version_from_name("rootfs", &a.name).is_some()
+                })
+                .or_else(|| {
+                    release
+                        .assets
+                        .iter()
+                        .find(|a| artifact_version_from_name(comp_name, &a.name).is_some())
+                })
+        } else {
+            release
+                .assets
+                .iter()
+                .find(|a| artifact_version_from_name(comp_name, &a.name).is_some())
+        };
 
         if let Some(asset) = asset_opt {
             // Extract version from filename: core-v1.2.3.tar.zst -> 1.2.3
@@ -1612,11 +1636,61 @@ async fn query_github_releases(
 }
 
 /// Extract artifact and deploy to target location
+/// Stage a standalone rootfs squashfs image directly to the update staging dir.
+/// Bypasses the tar/zstd path entirely — the squashfs is not archive-wrapped.
+fn stage_rootfs_squashfs_direct(artifact_path: &Path) -> Result<()> {
+    let staging_dir = PathBuf::from(crate::rootfs_update::ROOTFS_UPDATE_STAGING_DIR);
+    fs::create_dir_all(&staging_dir)?;
+
+    let image_filename = artifact_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("rootfs.squashfs")
+        .to_string();
+
+    let dest = staging_dir.join(&image_filename);
+    install_executable_file_atomic(artifact_path, &dest)?;
+
+    let sha256 = compute_file_sha256(&dest)?;
+
+    let version = artifact_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| artifact_version_from_name("rootfs", n))
+        .unwrap_or_else(|| "unknown".to_string());
+
+    if let Err(err) = crate::rootfs_update::mark_pending(&version, &dest, &sha256) {
+        warn!(
+            error = %err,
+            version,
+            "updates: failed to write rootfs pending marker; artifact staged but not marked"
+        );
+    } else {
+        info!(
+            version,
+            artifact = %dest.display(),
+            "updates: rootfs squashfs staged and pending marker written"
+        );
+    }
+
+    Ok(())
+}
+
 async fn extract_and_deploy_artifact(
     component: RepoComponent,
     artifact_path: &Path,
     target_dir: Option<&Path>,
 ) -> Result<()> {
+    // Rootfs squashfs images are not tar-wrapped — handle them directly.
+    if matches!(component, RepoComponent::Rootfs)
+        && artifact_path
+            .extension()
+            .and_then(|e| e.to_str())
+            == Some("squashfs")
+    {
+        return stage_rootfs_squashfs_direct(artifact_path);
+    }
+
     let artifact_file = std::fs::File::open(artifact_path)
         .with_context(|| format!("failed to open artifact {}", artifact_path.display()))?;
 
@@ -2897,6 +2971,20 @@ mod tests {
         assert_eq!(
             artifact_version_from_name("rootfs", "rootfs-v2026.05.21.tar.zst"),
             Some("2026.05.21".to_string())
+        );
+        // Rootfs also accepts the standalone squashfs image artifact
+        assert_eq!(
+            artifact_version_from_name("rootfs", "rootfs-v1.2.3.squashfs"),
+            Some("1.2.3".to_string())
+        );
+        assert_eq!(
+            artifact_version_from_name("rootfs", "rootfs-v2026.05.21.squashfs"),
+            Some("2026.05.21".to_string())
+        );
+        // squashfs suffix is rootfs-only; other components must use .tar.zst
+        assert_eq!(
+            artifact_version_from_name("core", "core-v1.2.3.squashfs"),
+            None
         );
         assert_eq!(
             artifact_version_from_name("ui", "dayshield-ui-v1.2.3.tar.zst"),

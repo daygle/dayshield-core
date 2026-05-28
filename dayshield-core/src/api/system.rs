@@ -8,12 +8,13 @@
 //! - `PUT  /system/config`   - update host-level settings
 //! - `POST /system/reboot`   - schedule an immediate systemctl reboot
 //! - `POST /system/shutdown` - schedule an immediate systemctl poweroff
-//! - `GET  /system/ostree/status` - OSTree deployment/update status for appliance UI
-//! - `POST /system/ostree/check`  - check for OSTree updates
-//! - `POST /system/ostree/stage`  - pre-download OSTree update payload
-//! - `POST /system/ostree/apply`  - stage OSTree update deployment
-//! - `GET  /system/ostree/reboot-required` - report reboot-required state for OSTree updates
-//! - `GET  /system/updates/status`   - get artifact update status for core/ui
+//! - `GET  /system/rootfs/status`         - image-based rootfs update status for appliance UI
+//! - `POST /system/rootfs/check`          - check for rootfs image updates
+//! - `POST /system/rootfs/stage`          - pre-download and stage rootfs image artifact
+//! - `POST /system/rootfs/apply`          - activate staged rootfs image (marks for initramfs)
+//! - `GET  /system/rootfs/reboot-required`- report reboot-required state for rootfs updates
+//! - `POST /system/rootfs/rollback`       - roll back to previous rootfs version
+//! - `GET  /system/updates/status`   - get artifact update status for core/ui/rootfs
 //! - `GET  /system/updates/settings` - get update settings
 //! - `PUT  /system/updates/settings` - update settings (interval/reboot policy/registry)
 //! - `POST /system/updates/check`    - force immediate update check
@@ -42,7 +43,7 @@ use crate::{
         dns::apply_config_with_ipv6 as apply_dns_config, interfaces::refresh_router_advertisements,
         ipv6::apply_ipv6_setting, kea,
     },
-    ostree,
+    rootfs_update,
     state::{
         AppState, SVC_CLOUDFLARED, SVC_CROWDSEC, SVC_DHCP, SVC_DNS, SVC_NFTABLES, SVC_SURICATA,
         SVC_VPN,
@@ -1131,32 +1132,31 @@ pub async fn shutdown(
 }
 
 // ---------------------------------------------------------------------------
-// OSTree updates
+// Rootfs image-based updates
 // ---------------------------------------------------------------------------
 
-/// Handler: return OSTree deployment/update status for UI workflow rendering.
-pub async fn get_ostree_status() -> impl IntoResponse {
-    Json(ostree::status().await)
+/// Handler: return image-based rootfs update status for UI.
+pub async fn get_rootfs_status() -> impl IntoResponse {
+    Json(rootfs_update::status().await)
 }
 
-/// Handler: trigger an immediate OSTree update check.
-pub async fn check_ostree_updates() -> impl IntoResponse {
-    match ostree::check_for_updates().await {
-        Ok(result) => (StatusCode::OK, Json(serde_json::json!(result))).into_response(),
-        Err(err) => ostree_action_error_response("check", err).await,
+/// Handler: trigger an immediate check for a new rootfs image artifact.
+pub async fn check_rootfs_updates() -> impl IntoResponse {
+    match rootfs_update::status().await {
+        status => (StatusCode::OK, Json(serde_json::json!(status))).into_response(),
     }
 }
 
-/// Handler: pre-download OSTree payloads for an upcoming apply operation.
+/// Handler: pre-download and stage the latest rootfs image artifact.
 ///
 /// Spawns the operation in a background task and returns 202 Accepted
 /// immediately so the download does not block the HTTP connection.
-/// Poll `/system/ostree/status` to observe progress via `transaction_state`.
-pub async fn stage_ostree_update(
+/// Poll `/system/rootfs/status` to observe progress via `transaction_state`.
+pub async fn stage_rootfs_update(
     Extension(user): Extension<AuthenticatedUser>,
 ) -> impl IntoResponse {
-    if let Err(reason) = authorize_sensitive_ostree_operation("stage", &user) {
-        return ostree_authorization_error_response("stage", &user, &reason);
+    if let Err(reason) = authorize_sensitive_rootfs_operation("stage", &user) {
+        return rootfs_authorization_error_response("stage", &user, &reason);
     }
 
     let user_clone = user.clone();
@@ -1164,13 +1164,13 @@ pub async fn stage_ostree_update(
         timestamp: chrono::Utc::now().to_rfc3339(),
         operation: "stage".to_string(),
         level: "info".to_string(),
-        message: "OSTree stage operation started".to_string(),
+        message: "Rootfs stage operation started".to_string(),
         component: Some("rootfs".to_string()),
     });
     tokio::spawn(async move {
-        match ostree::stage_update().await {
+        match rootfs_update::stage_update().await {
             Ok(result) => {
-                audit_sensitive_ostree_result("stage", &user_clone, result.success, &result.message);
+                audit_sensitive_rootfs_result("stage", &user_clone, result.success, &result.message);
                 crate::live_logs::ui::publish(crate::live_logs::LogEvent::UpdateEvent {
                     timestamp: chrono::Utc::now().to_rfc3339(),
                     operation: "stage".to_string(),
@@ -1180,25 +1180,25 @@ pub async fn stage_ostree_update(
                 });
             }
             Err(err) => {
-                audit_sensitive_ostree_error("stage", &user_clone, &err);
+                audit_sensitive_rootfs_error("stage", &user_clone, &err);
                 crate::live_logs::ui::publish(crate::live_logs::LogEvent::UpdateEvent {
                     timestamp: chrono::Utc::now().to_rfc3339(),
                     operation: "stage".to_string(),
                     level: "error".to_string(),
-                    message: format!("OSTree stage failed: {err}"),
+                    message: format!("Rootfs stage failed: {err}"),
                     component: Some("rootfs".to_string()),
                 });
             }
         }
     });
 
-    let current_status = ostree::status().await;
+    let current_status = rootfs_update::status().await;
     (
         StatusCode::ACCEPTED,
         Json(serde_json::json!({
             "operation": "stage",
             "success": true,
-            "message": "OSTree stage operation started. Poll /system/ostree/status for progress.",
+            "message": "Rootfs stage operation started. Poll /system/rootfs/status for progress.",
             "details": [],
             "status": current_status
         })),
@@ -1206,16 +1206,15 @@ pub async fn stage_ostree_update(
         .into_response()
 }
 
-/// Handler: apply/stage OSTree update deployment.
+/// Handler: activate the staged rootfs image for boot.
 ///
-/// Spawns the operation in a background task and returns 202 Accepted
-/// immediately so the download does not block the HTTP connection.
-/// Poll `/system/ostree/status` to observe progress via `transaction_state`.
-pub async fn apply_ostree_update(
+/// Marks the staged image as ready for initramfs activation on the next boot.
+/// Poll `/system/rootfs/status` to observe progress via `transaction_state`.
+pub async fn apply_rootfs_update(
     Extension(user): Extension<AuthenticatedUser>,
 ) -> impl IntoResponse {
-    if let Err(reason) = authorize_sensitive_ostree_operation("apply", &user) {
-        return ostree_authorization_error_response("apply", &user, &reason);
+    if let Err(reason) = authorize_sensitive_rootfs_operation("apply", &user) {
+        return rootfs_authorization_error_response("apply", &user, &reason);
     }
 
     let user_clone = user.clone();
@@ -1223,13 +1222,13 @@ pub async fn apply_ostree_update(
         timestamp: chrono::Utc::now().to_rfc3339(),
         operation: "apply".to_string(),
         level: "info".to_string(),
-        message: "OSTree apply operation started".to_string(),
+        message: "Rootfs apply operation started".to_string(),
         component: Some("rootfs".to_string()),
     });
     tokio::spawn(async move {
-        match ostree::apply_update().await {
+        match rootfs_update::apply_update().await {
             Ok(result) => {
-                audit_sensitive_ostree_result("apply", &user_clone, result.success, &result.message);
+                audit_sensitive_rootfs_result("apply", &user_clone, result.success, &result.message);
                 crate::live_logs::ui::publish(crate::live_logs::LogEvent::UpdateEvent {
                     timestamp: chrono::Utc::now().to_rfc3339(),
                     operation: "apply".to_string(),
@@ -1239,25 +1238,25 @@ pub async fn apply_ostree_update(
                 });
             }
             Err(err) => {
-                audit_sensitive_ostree_error("apply", &user_clone, &err);
+                audit_sensitive_rootfs_error("apply", &user_clone, &err);
                 crate::live_logs::ui::publish(crate::live_logs::LogEvent::UpdateEvent {
                     timestamp: chrono::Utc::now().to_rfc3339(),
                     operation: "apply".to_string(),
                     level: "error".to_string(),
-                    message: format!("OSTree apply failed: {err}"),
+                    message: format!("Rootfs apply failed: {err}"),
                     component: Some("rootfs".to_string()),
                 });
             }
         }
     });
 
-    let current_status = ostree::status().await;
+    let current_status = rootfs_update::status().await;
     (
         StatusCode::ACCEPTED,
         Json(serde_json::json!({
             "operation": "apply",
             "success": true,
-            "message": "OSTree apply operation started. Poll /system/ostree/status for progress.",
+            "message": "Rootfs apply operation started. Poll /system/rootfs/status for progress.",
             "details": [],
             "status": current_status
         })),
@@ -1265,16 +1264,76 @@ pub async fn apply_ostree_update(
         .into_response()
 }
 
-/// Handler: return compact reboot-required state for OSTree update UX.
-pub async fn get_ostree_reboot_required() -> impl IntoResponse {
-    Json(ostree::reboot_state().await)
+/// Handler: return compact reboot-required state for rootfs update UX.
+pub async fn get_rootfs_reboot_required() -> impl IntoResponse {
+    Json(rootfs_update::reboot_state().await)
 }
 
-async fn ostree_action_error_response(
+/// Handler: roll back the rootfs to the previous version.
+pub async fn rollback_rootfs_update(
+    Extension(user): Extension<AuthenticatedUser>,
+) -> impl IntoResponse {
+    if let Err(reason) = authorize_sensitive_rootfs_operation("rollback", &user) {
+        return rootfs_authorization_error_response("rollback", &user, &reason);
+    }
+
+    let user_clone = user.clone();
+    crate::live_logs::ui::publish(crate::live_logs::LogEvent::UpdateEvent {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        operation: "rollback".to_string(),
+        level: "info".to_string(),
+        message: "Rootfs rollback operation started".to_string(),
+        component: Some("rootfs".to_string()),
+    });
+    tokio::spawn(async move {
+        match rootfs_update::rollback().await {
+            Ok(result) => {
+                audit_sensitive_rootfs_result(
+                    "rollback",
+                    &user_clone,
+                    result.success,
+                    &result.message,
+                );
+                crate::live_logs::ui::publish(crate::live_logs::LogEvent::UpdateEvent {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    operation: "rollback".to_string(),
+                    level: if result.success { "info" } else { "warning" }.to_string(),
+                    message: result.message,
+                    component: Some("rootfs".to_string()),
+                });
+            }
+            Err(err) => {
+                audit_sensitive_rootfs_error("rollback", &user_clone, &err);
+                crate::live_logs::ui::publish(crate::live_logs::LogEvent::UpdateEvent {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    operation: "rollback".to_string(),
+                    level: "error".to_string(),
+                    message: format!("Rootfs rollback failed: {err}"),
+                    component: Some("rootfs".to_string()),
+                });
+            }
+        }
+    });
+
+    let current_status = rootfs_update::status().await;
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "operation": "rollback",
+            "success": true,
+            "message": "Rootfs rollback operation started. Poll /system/rootfs/status for progress.",
+            "details": [],
+            "status": current_status
+        })),
+    )
+        .into_response()
+}
+
+async fn rootfs_action_error_response(
     operation: &str,
     err: anyhow::Error,
 ) -> axum::response::Response {
-    let status = ostree::status().await;
+    let status = rootfs_update::status().await;
     let code = if status.supported {
         StatusCode::INTERNAL_SERVER_ERROR
     } else {
@@ -1285,7 +1344,7 @@ async fn ostree_action_error_response(
         Json(serde_json::json!({
             "operation": operation,
             "success": false,
-            "message": format!("failed to {operation} OSTree updates: {err:#}"),
+            "message": format!("failed to {operation} rootfs update: {err:#}"),
             "details": [],
             "status": status
         })),
@@ -1293,8 +1352,8 @@ async fn ostree_action_error_response(
         .into_response()
 }
 
-/// Policy hook for OSTree operations that can mutate the boot deployment.
-fn authorize_sensitive_ostree_operation(
+/// Policy hook for rootfs operations that can mutate the boot image.
+fn authorize_sensitive_rootfs_operation(
     operation: &str,
     user: &AuthenticatedUser,
 ) -> Result<(), String> {
@@ -1303,13 +1362,13 @@ fn authorize_sensitive_ostree_operation(
             target: "audit",
             username = %user.username,
             operation,
-            "ostree: sensitive operation authorized"
+            "rootfs: sensitive operation authorized"
         );
         return Ok(());
     }
 
     let reason = format!(
-        "user '{}' is not allowed to run OSTree {operation}; admin identity required",
+        "user '{}' is not allowed to run rootfs {operation}; admin identity required",
         user.username
     );
     warn!(
@@ -1317,12 +1376,12 @@ fn authorize_sensitive_ostree_operation(
         username = %user.username,
         operation,
         reason = %reason,
-        "ostree: sensitive operation denied"
+        "rootfs: sensitive operation denied"
     );
     Err(reason)
 }
 
-fn ostree_authorization_error_response(
+fn rootfs_authorization_error_response(
     operation: &str,
     user: &AuthenticatedUser,
     reason: &str,
@@ -1332,7 +1391,7 @@ fn ostree_authorization_error_response(
         Json(serde_json::json!({
             "operation": operation,
             "success": false,
-            "message": format!("not authorized to {operation} OSTree updates"),
+            "message": format!("not authorized to {operation} rootfs update"),
             "details": [reason],
             "user": user.username
         })),
@@ -1340,7 +1399,7 @@ fn ostree_authorization_error_response(
         .into_response()
 }
 
-fn audit_sensitive_ostree_result(
+fn audit_sensitive_rootfs_result(
     operation: &str,
     user: &AuthenticatedUser,
     success: bool,
@@ -1352,7 +1411,7 @@ fn audit_sensitive_ostree_result(
             username = %user.username,
             operation,
             message,
-            "ostree: sensitive operation completed"
+            "rootfs: sensitive operation completed"
         );
     } else {
         warn!(
@@ -1360,20 +1419,21 @@ fn audit_sensitive_ostree_result(
             username = %user.username,
             operation,
             message,
-            "ostree: sensitive operation completed unsuccessfully"
+            "rootfs: sensitive operation completed unsuccessfully"
         );
     }
 }
 
-fn audit_sensitive_ostree_error(operation: &str, user: &AuthenticatedUser, err: &anyhow::Error) {
+fn audit_sensitive_rootfs_error(operation: &str, user: &AuthenticatedUser, err: &anyhow::Error) {
     warn!(
         target: "audit",
         username = %user.username,
         operation,
         error = %err,
-        "ostree: sensitive operation failed"
+        "rootfs: sensitive operation failed"
     );
 }
+
 
 // ---------------------------------------------------------------------------
 // Software updates
@@ -1435,19 +1495,6 @@ pub async fn apply_updates(
     Json(req): Json<UpdateActionRequest>,
 ) -> Result<impl IntoResponse, SystemApiError> {
     let component = req.component;
-    if matches!(component, UpdateComponent::Rootfs) {
-        let status = update::get_status(&state).await;
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "operation": "apply",
-                "success": false,
-                "message": "Root filesystem updates are managed through OSTree deployments; use /system/ostree/* endpoints.",
-                "details": [],
-                "status": status
-            })),
-        ));
-    }
     let force_partial = req.force_partial_apply;
     let state_clone = Arc::clone(&state);
 
@@ -1492,12 +1539,13 @@ pub async fn rollback_updates(
 ) -> Result<impl IntoResponse, SystemApiError> {
     let component = req.component;
     if matches!(component, UpdateComponent::Rootfs) {
+        // Rootfs rollback is handled by the dedicated /system/rootfs/rollback endpoint.
         return Ok((
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "operation": "rollback",
                 "success": false,
-                "message": "Root filesystem rollbacks are managed through OSTree deployment rollback workflow.",
+                "message": "Root filesystem rollbacks are managed through /system/rootfs/rollback.",
                 "details": [],
                 "status": update::get_status(&state).await
             })),
@@ -1548,7 +1596,7 @@ pub async fn validate_updates(
             Json(serde_json::json!({
                 "operation": "validate",
                 "success": false,
-                "message": "Root filesystem deployment validation is available via /system/ostree/status.",
+                "message": "Root filesystem deployment validation is available via /system/rootfs/status.",
                 "details": [],
                 "status": update::get_status(&state).await
             })),
@@ -1656,7 +1704,7 @@ mod tests {
     }
 
     #[test]
-    fn ostree_sensitive_operation_policy_requires_admin_identity() {
+    fn rootfs_sensitive_operation_policy_requires_admin_identity() {
         let admin = AuthenticatedUser {
             username: "admin".to_string(),
         };
@@ -1664,7 +1712,7 @@ mod tests {
             username: "viewer".to_string(),
         };
 
-        assert!(authorize_sensitive_ostree_operation("apply", &admin).is_ok());
-        assert!(authorize_sensitive_ostree_operation("apply", &viewer).is_err());
+        assert!(authorize_sensitive_rootfs_operation("apply", &admin).is_ok());
+        assert!(authorize_sensitive_rootfs_operation("apply", &viewer).is_err());
     }
 }

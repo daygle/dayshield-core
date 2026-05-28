@@ -61,12 +61,13 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `PUT  /system/config`                                 - update host-level settings
 /// - `POST /system/reboot`                                 - trigger immediate system reboot
 /// - `POST /system/shutdown`                               - trigger immediate system shutdown
-/// - `GET  /system/ostree/status`                          - OSTree deployment/update status for appliance updates
-/// - `POST /system/ostree/check`                           - force OSTree update check
-/// - `POST /system/ostree/stage`                           - pre-download OSTree update payload
-/// - `POST /system/ostree/apply`                           - stage/apply OSTree update deployment
-/// - `GET  /system/ostree/reboot-required`                 - compact OSTree reboot-required state
-/// - `GET  /system/updates/status`                         - get core/ui update status
+/// - `GET  /system/rootfs/status`                          - image-based rootfs update status for appliance updates
+/// - `POST /system/rootfs/check`                           - force rootfs update check
+/// - `POST /system/rootfs/stage`                           - pre-download and stage rootfs image artifact
+/// - `POST /system/rootfs/apply`                           - activate staged rootfs image for next boot
+/// - `GET  /system/rootfs/reboot-required`                 - compact rootfs reboot-required state
+/// - `POST /system/rootfs/rollback`                        - roll back to previous rootfs version
+/// - `GET  /system/updates/status`                         - get core/ui/rootfs update status
 /// - `GET  /system/updates/settings`                       - get update settings
 /// - `PUT  /system/updates/settings`                       - update check interval / reboot policy / repo config
 /// - `POST /system/updates/check`                          - force update check against GitHub
@@ -197,14 +198,15 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/system/config", put(system::update_config))
         .route("/system/reboot", post(system::reboot))
         .route("/system/shutdown", post(system::shutdown))
-        .route("/system/ostree/status", get(system::get_ostree_status))
-        .route("/system/ostree/check", post(system::check_ostree_updates))
-        .route("/system/ostree/stage", post(system::stage_ostree_update))
-        .route("/system/ostree/apply", post(system::apply_ostree_update))
+        .route("/system/rootfs/status", get(system::get_rootfs_status))
+        .route("/system/rootfs/check", post(system::check_rootfs_updates))
+        .route("/system/rootfs/stage", post(system::stage_rootfs_update))
+        .route("/system/rootfs/apply", post(system::apply_rootfs_update))
         .route(
-            "/system/ostree/reboot-required",
-            get(system::get_ostree_reboot_required),
+            "/system/rootfs/reboot-required",
+            get(system::get_rootfs_reboot_required),
         )
+        .route("/system/rootfs/rollback", post(system::rollback_rootfs_update))
         .route("/system/updates/status", get(system::get_updates_status))
         .route("/system/updates/settings", get(system::get_update_settings))
         .route(

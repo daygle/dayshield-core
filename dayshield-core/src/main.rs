@@ -33,7 +33,7 @@ mod metrics;
 mod nat;
 mod notify;
 mod ntp;
-mod ostree;
+mod rootfs_update;
 mod rules;
 mod schedules;
 mod state;

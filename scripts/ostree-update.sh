@@ -82,25 +82,32 @@ _status_output() {
 _ensure_sysroot_layout() {
     mkdir -p "${OSTREE_DEPLOY}" "${OSTREE_REPO}"
 
-    # The live rootfs image embeds an archive-z2 repo. bare mode is required so
-    # 'ostree admin deploy' can use hardlink checkout instead of copy checkout;
-    # copy checkout requires CAP_CHOWN to restore ownership on files like gshadow.
+    # bare-user stores permissions as xattrs rather than calling fchmod/chown on
+    # content objects, so pull-local works without CAP_FOWNER. ostree admin deploy
+    # still uses hardlink checkout from a bare-user repo, avoiding CAP_CHOWN.
     _repo_mode="$(sed -n 's/^mode=//p' "${OSTREE_REPO}/config" 2>/dev/null || true)"
-    if [ "${_repo_mode}" != "bare" ]; then
-        if [ "${_repo_mode}" = "archive-z2" ] || [ "${_repo_mode}" = "archive" ]; then
-            # Convert: pull all existing refs into a fresh bare repo, then swap.
-            _bare_tmp="${OSTREE_REPO}.bare-tmp"
-            rm -rf "${_bare_tmp}"
-            ostree --repo="${_bare_tmp}" init --mode=bare
+    case "${_repo_mode}" in
+        bare-user|bare-user-only)
+            # Already in a privilege-free mode; nothing to convert.
+            ;;
+        bare|archive-z2|archive)
+            # Migrate to bare-user: pull all existing refs into a tmp repo, then swap.
+            # Reading from a bare/archive repo needs no special caps; writing to
+            # bare-user needs no fchmod, so this succeeds without CAP_FOWNER.
+            _bu_tmp="${OSTREE_REPO}.bare-user-tmp"
+            rm -rf "${_bu_tmp}"
+            ostree --repo="${_bu_tmp}" init --mode=bare-user
             for _ref in $(ostree --repo="${OSTREE_REPO}" refs 2>/dev/null || true); do
-                ostree pull-local --repo="${_bare_tmp}" "${OSTREE_REPO}" "${_ref}"
+                ostree pull-local --repo="${_bu_tmp}" "${OSTREE_REPO}" "${_ref}"
             done
             rm -rf "${OSTREE_REPO}"
-            mv "${_bare_tmp}" "${OSTREE_REPO}"
-        else
-            ostree --repo="${OSTREE_REPO}" init --mode=bare
-        fi
-    fi
+            mv "${_bu_tmp}" "${OSTREE_REPO}"
+            ;;
+        *)
+            # No existing config (fresh sysroot) or unrecognised mode — init fresh.
+            ostree --repo="${OSTREE_REPO}" init --mode=bare-user
+            ;;
+    esac
 
     if [ ! -d "${OSTREE_DEPLOY}/${OSTREE_OS}" ]; then
         ostree admin --sysroot="${OSTREE_SYSROOT}" os-init "${OSTREE_OS}"

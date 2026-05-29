@@ -1257,8 +1257,18 @@ fn build_http_client() -> Result<reqwest::Client> {
 }
 
 pub(crate) async fn download_artifact(url: &str, destination: &Path) -> Result<()> {
-    let client = build_http_client()?;
-    let response = client
+    use tokio::io::AsyncWriteExt;
+
+    // Large artifacts (rootfs squashfs is hundreds of MB) can exceed the
+    // 120s overall request timeout used for API calls.  Use a dedicated
+    // client with only a connect timeout, and stream chunks directly to
+    // disk so memory usage stays bounded regardless of artifact size.
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .build()
+        .context("failed to build HTTP client for download")?;
+
+    let mut response = client
         .get(url)
         .send()
         .await
@@ -1272,14 +1282,32 @@ pub(crate) async fn download_artifact(url: &str, destination: &Path) -> Result<(
         );
     }
 
-    let bytes = response
-        .bytes()
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!("failed to create download directory {}", parent.display())
+        })?;
+    }
+
+    let mut file = tokio::fs::File::create(destination)
         .await
-        .with_context(|| format!("failed to read artifact response from {}", url))?;
+        .with_context(|| format!("failed to create artifact file {}", destination.display()))?;
 
-    fs::write(destination, bytes)
-        .with_context(|| format!("failed to write artifact to {}", destination.display()))?;
+    let mut total: u64 = 0;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .with_context(|| format!("failed to read artifact chunk from {}", url))?
+    {
+        file.write_all(&chunk)
+            .await
+            .with_context(|| format!("failed to write artifact chunk to {}", destination.display()))?;
+        total += chunk.len() as u64;
+    }
+    file.flush()
+        .await
+        .with_context(|| format!("failed to flush artifact file {}", destination.display()))?;
 
+    info!(url, bytes = total, "updates: artifact download complete");
     Ok(())
 }
 

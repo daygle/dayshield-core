@@ -55,6 +55,15 @@ const ROOTFS_IMAGE_STORE: &str = "/boot/dayshield/images";
 const DEFAULT_ROOTFS_REPO_URL: &str = "https://github.com/daygle/dayshield-rootfs";
 const UPDATE_SETTINGS_FILE_PATH: &str = "/etc/dayshield/config/updates_settings.json";
 
+/// Boot partition path written by `rootfs-update.sh apply/rollback` and
+/// reset by `signal_boot_success`.  Read by the initramfs hook to decide
+/// whether to auto-revert to the previous version.
+const BOOT_ATTEMPTS_FILE: &str = "/boot/dayshield/boot-attempts";
+
+/// Marker written by the initramfs hook on auto-revert.  Picked up here
+/// during `signal_boot_success` and copied to [`recovered_marker`].
+const BOOT_RECOVERED_MARKER: &str = "/boot/dayshield/recovered";
+
 fn state_dir() -> PathBuf {
     PathBuf::from(ROOTFS_UPDATE_STATE_DIR)
 }
@@ -234,21 +243,69 @@ fn marker_exists(path: &Path) -> bool {
 
 /// Called by the `dayshield-boot-success` systemd unit after a healthy boot.
 ///
-/// Promotes `pending` → `current`, rotates `current` → `previous`, removes
-/// the `recovered` marker, and writes the `boot-success` marker.
+/// Handles three cases the initramfs hook can leave behind:
+///
+/// 1. **Auto-revert occurred** — `/boot/dayshield/recovered` exists.  The
+///    pending version failed to boot and the previous version was forcibly
+///    re-applied.  Move the marker to the state dir for the UI to surface,
+///    delete `pending.json` (we are not running it), and do **not** promote.
+///
+/// 2. **Normal apply** — `pending.json` exists and no recovered marker.  The
+///    new image booted successfully.  Promote `pending` → `current` and
+///    rotate the previous pointer.
+///
+/// 3. **Nothing to do** — neither marker is present.  Just reset the boot
+///    counter so future failed boots are counted fresh.
+///
+/// In all three cases the boot-attempts counter on the BOOT partition is
+/// reset to 0 so the next failed boot starts from scratch.
 pub fn signal_boot_success() -> Result<()> {
     let _ = std::fs::create_dir_all(state_dir());
 
-    let pending = read_meta(&pending_path());
-    let current = read_meta(&current_path());
+    // Always reset the boot counter — userspace has reached the point where
+    // this unit runs, which is our definition of "healthy enough".
+    let _ = std::fs::write(BOOT_ATTEMPTS_FILE, "0\n");
 
-    if let Some(pending_meta) = pending {
+    // Case 1: auto-revert ack — clean up pending and surface the recovery
+    let boot_recovered = Path::new(BOOT_RECOVERED_MARKER);
+    if boot_recovered.exists() {
+        let contents = std::fs::read_to_string(boot_recovered).unwrap_or_default();
+        info!("rootfs: auto-revert detected; clearing pending and writing recovered marker");
+
+        let _ = std::fs::write(
+            recovered_marker(),
+            if contents.is_empty() {
+                Utc::now().to_rfc3339()
+            } else {
+                contents
+            },
+        );
+
+        // The pending.json says we are running the new version, but the
+        // initramfs forced us back to the previous one.  Discard pending.
+        let _ = std::fs::remove_file(pending_path());
+
+        // Refresh current from the build-stamped version file so the UI
+        // reflects what is actually running after the revert.
+        let _ = repair_current_from_build_version(read_meta(&current_path()).as_ref());
+
+        // Clean up the BOOT marker — we have acknowledged it
+        let _ = std::fs::remove_file(boot_recovered);
+
+        let _ = std::fs::write(boot_success_marker(), Utc::now().to_rfc3339());
+        return Ok(());
+    }
+
+    // Case 2: normal promotion — pending exists
+    if let Some(pending_meta) = read_meta(&pending_path()) {
+        let current = read_meta(&current_path());
         info!(
             version = %pending_meta.version,
             "rootfs: boot success – promoting pending version to current"
         );
 
-        // Rotate current → previous
+        // Rotate current → previous (skip if we have no current or it is
+        // the same version as pending, which can happen for re-applies).
         if let Some(previous_version) = meta_version(current.as_ref()).or_else(|| {
             read_previous_version_from_update_state(Some(pending_meta.version.as_str()))
         }) {
@@ -257,19 +314,15 @@ pub fn signal_boot_success() -> Result<()> {
             }
         }
 
-        // Promote pending → current
         write_meta(&current_path(), &pending_meta)?;
-
-        // Remove pending marker
         let _ = std::fs::remove_file(pending_path());
     }
 
-    // Write boot-success marker
+    // Clear any stale recovered marker (state-dir one) on a clean boot
+    let _ = std::fs::remove_file(recovered_marker());
+
     std::fs::write(boot_success_marker(), Utc::now().to_rfc3339())
         .with_context(|| "failed to write boot-success marker")?;
-
-    // Clear recovered marker
-    let _ = std::fs::remove_file(recovered_marker());
 
     Ok(())
 }
@@ -455,7 +508,11 @@ pub async fn status() -> RootfsUpdateStatus {
 
     let reboot_required = pending_version.is_some();
     let rollback_available = previous_version.is_some();
-    let recovery_active = marker_exists(&recovered_marker());
+    // The initramfs writes BOOT_RECOVERED_MARKER on auto-revert.  We mirror it
+    // into the state-dir marker on the next signal_boot_success run, but
+    // surface it immediately even before that has happened.
+    let recovery_active =
+        marker_exists(&recovered_marker()) || Path::new(BOOT_RECOVERED_MARKER).exists();
 
     // available_version: check the update state file via the helper
     let available_version = read_available_version_from_state();

@@ -76,6 +76,14 @@ fn default_auto_check_enabled() -> bool {
     true
 }
 
+fn default_auto_apply_updates() -> bool {
+    false
+}
+
+fn default_auto_reboot_after_apply() -> bool {
+    false
+}
+
 fn default_check_interval_minutes() -> u64 {
     1440
 }
@@ -234,6 +242,10 @@ pub struct UpdateSettings {
     pub auto_check_weekday: UpdateWeekday,
     #[serde(default = "default_auto_check_month_days")]
     pub auto_check_month_days: Vec<u8>,
+    #[serde(default = "default_auto_apply_updates")]
+    pub auto_apply_updates: bool,
+    #[serde(default = "default_auto_reboot_after_apply")]
+    pub auto_reboot_after_apply: bool,
     #[serde(default = "default_reboot_required_after_apply")]
     pub reboot_required_after_apply: bool,
     #[serde(default = "default_deploy_runtime_after_apply")]
@@ -281,6 +293,8 @@ impl Default for UpdateSettings {
             auto_check_time: default_auto_check_time(),
             auto_check_weekday: default_auto_check_weekday(),
             auto_check_month_days: default_auto_check_month_days(),
+            auto_apply_updates: default_auto_apply_updates(),
+            auto_reboot_after_apply: default_auto_reboot_after_apply(),
             reboot_required_after_apply: default_reboot_required_after_apply(),
             deploy_runtime_after_apply: default_deploy_runtime_after_apply(),
             require_signed_commits: default_require_signed_commits(),
@@ -1043,7 +1057,12 @@ fn install_dir_atomic(src: &Path, target: &Path) -> Result<()> {
 /// Find the rootfs image file inside an extracted artifact directory.
 /// Looks for common rootfs image extensions.
 fn find_rootfs_image(dir: &Path) -> Result<PathBuf> {
-    let candidates = ["rootfs.squashfs", "rootfs.erofs", "rootfs.img", "rootfs.ext4"];
+    let candidates = [
+        "rootfs.squashfs",
+        "rootfs.erofs",
+        "rootfs.img",
+        "rootfs.ext4",
+    ];
     for name in &candidates {
         let path = dir.join(name);
         if path.exists() {
@@ -1085,8 +1104,6 @@ fn compute_file_sha256(path: &Path) -> Result<String> {
     let digest = hasher.finalize();
     Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
 }
-
-
 
 pub fn load_settings(state: &AppState) -> UpdateSettings {
     load_json_or_default(&settings_path(state))
@@ -1275,8 +1292,7 @@ async fn query_registry(
     let client = build_http_client()?;
 
     if let Some(github_api_url) = github_repo_api_url(registry_url) {
-        return query_github_releases(&github_api_url, &client, fetch_checksums, etag_cache)
-            .await;
+        return query_github_releases(&github_api_url, &client, fetch_checksums, etag_cache).await;
     }
 
     anyhow::bail!("updates: registry URL must point to a GitHub repository")
@@ -1541,7 +1557,10 @@ async fn query_github_releases(
 
     let mut request = client
         .get(&releases_url)
-        .header(ACCEPT, HeaderValue::from_static("application/vnd.github+json"))
+        .header(
+            ACCEPT,
+            HeaderValue::from_static("application/vnd.github+json"),
+        )
         .header(USER_AGENT, HeaderValue::from_static(UPDATE_HTTP_USER_AGENT))
         .header(
             HeaderName::from_static("x-github-api-version"),
@@ -1570,9 +1589,12 @@ async fn query_github_releases(
             return build_manifest_from_release(release, client, fetch_checksums, github_api_url)
                 .await;
         }
-            // Cache miss despite 304 — remove stale entry and bail; next attempt re-fetches
+        // Cache miss despite 304 — remove stale entry and bail; next attempt re-fetches
         etag_cache.remove(&releases_url);
-        anyhow::bail!("GitHub returned 304 but ETag cache is empty for {}", releases_url);
+        anyhow::bail!(
+            "GitHub returned 304 but ETag cache is empty for {}",
+            releases_url
+        );
     }
 
     if !status.is_success() {
@@ -1596,10 +1618,12 @@ async fn query_github_releases(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    let body = response
-        .text()
-        .await
-        .with_context(|| format!("failed to read GitHub release response from {}", releases_url))?;
+    let body = response.text().await.with_context(|| {
+        format!(
+            "failed to read GitHub release response from {}",
+            releases_url
+        )
+    })?;
 
     if let Some(etag) = new_etag {
         etag_cache.insert(releases_url.clone(), (etag, body.clone()));
@@ -1747,10 +1771,7 @@ async fn extract_and_deploy_artifact(
 ) -> Result<()> {
     // Rootfs squashfs images are not tar-wrapped — handle them directly.
     if matches!(component, RepoComponent::Rootfs)
-        && artifact_path
-            .extension()
-            .and_then(|e| e.to_str())
-            == Some("squashfs")
+        && artifact_path.extension().and_then(|e| e.to_str()) == Some("squashfs")
     {
         return stage_rootfs_squashfs_direct(artifact_path);
     }
@@ -1785,8 +1806,7 @@ async fn extract_and_deploy_artifact(
             // Also update the rootfs-update helper when bundled in the core artifact
             let helper = tmp_dir.join("rootfs-update.sh");
             if helper.exists() {
-                let helper_dest =
-                    Path::new(crate::rootfs_update::ROOTFS_UPDATE_HELPER);
+                let helper_dest = Path::new(crate::rootfs_update::ROOTFS_UPDATE_HELPER);
                 match install_executable_file_atomic(&helper, helper_dest) {
                     Ok(()) => info!(
                         target = %helper_dest.display(),
@@ -2025,7 +2045,13 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
     let settings = load_settings(state);
     let mut state_file = load_state(state);
 
-    match query_registry_with_component_fallbacks(&settings, false, &mut state_file.release_etag_cache).await {
+    match query_registry_with_component_fallbacks(
+        &settings,
+        false,
+        &mut state_file.release_etag_cache,
+    )
+    .await
+    {
         Ok(manifest) => {
             let mut seen_components = std::collections::HashSet::new();
             // Bootstrap tracked current version once for legacy systems that
@@ -2109,7 +2135,12 @@ async fn apply_updates_registry(
     save_state(state, &state_file)?;
 
     // Step 1: Query registry for latest versions (with checksums for artifact verification)
-    let manifest = query_registry_with_component_fallbacks(&settings, true, &mut state_file.release_etag_cache).await?;
+    let manifest = query_registry_with_component_fallbacks(
+        &settings,
+        true,
+        &mut state_file.release_etag_cache,
+    )
+    .await?;
 
     // Step 2: Download all artifacts to staging area
     let staging_dir = PathBuf::from(ARTIFACT_STAGING_DIR);
@@ -2494,9 +2525,17 @@ pub async fn apply_updates(
     component: UpdateComponent,
     force_partial_apply: bool,
 ) -> Result<UpdatesActionResult> {
+    let selected = RepoComponent::from_update_component(component);
+    apply_repo_component_selection(state, selected, force_partial_apply).await
+}
+
+async fn apply_repo_component_selection(
+    state: &AppState,
+    selected: Vec<RepoComponent>,
+    force_partial_apply: bool,
+) -> Result<UpdatesActionResult> {
     let _guard = op_lock().lock().await;
 
-    let selected = RepoComponent::from_update_component(component);
     ensure_registry_updatable_selection(&selected)?;
 
     // Check atomicity constraint before proceeding
@@ -2907,6 +2946,193 @@ fn short_sha(commit: &str) -> String {
     commit.chars().take(8).collect()
 }
 
+fn component_update_available(status: &UpdatesStatus, component: &str) -> bool {
+    status
+        .components
+        .iter()
+        .any(|entry| entry.component == component && entry.update_available)
+}
+
+fn runtime_update_selection(status: &UpdatesStatus) -> Vec<RepoComponent> {
+    let mut selected = Vec::new();
+    if component_update_available(status, RepoComponent::Core.as_str()) {
+        selected.push(RepoComponent::Core);
+    }
+    if component_update_available(status, RepoComponent::Ui.as_str()) {
+        selected.push(RepoComponent::Ui);
+    }
+    selected
+}
+
+fn component_selection_label(components: &[RepoComponent]) -> String {
+    components
+        .iter()
+        .map(|component| component.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn append_scheduled_log(
+    state: &AppState,
+    operation: &str,
+    level: &str,
+    message: impl Into<String>,
+    component: Option<&str>,
+) -> Result<()> {
+    let mut state_file = load_state(state);
+    append_operation_log(&mut state_file, operation, level, message, component);
+    save_state(state, &state_file)
+}
+
+async fn request_scheduled_reboot(state: &AppState, reason: &str) -> Result<()> {
+    append_scheduled_log(state, "reboot", "info", reason, Some("rootfs"))?;
+    info!(reason = %reason, "updates: scheduled reboot requested");
+
+    Command::new("systemctl")
+        .arg("--no-block")
+        .arg("reboot")
+        .spawn()
+        .with_context(|| "failed to spawn systemctl reboot for scheduled update")?
+        .wait()
+        .await
+        .with_context(|| "systemctl reboot failed for scheduled update")?;
+
+    Ok(())
+}
+
+async fn activate_scheduled_rootfs_update(
+    state: &AppState,
+    settings: &UpdateSettings,
+) -> Result<()> {
+    append_scheduled_log(
+        state,
+        "apply",
+        "info",
+        "Scheduled system image activation started",
+        Some("rootfs"),
+    )?;
+
+    let result = crate::rootfs_update::apply_update().await?;
+    append_scheduled_log(
+        state,
+        "apply",
+        if result.success { "success" } else { "error" },
+        result.message.clone(),
+        Some("rootfs"),
+    )?;
+
+    if !result.success {
+        anyhow::bail!(result.message);
+    }
+
+    if settings.auto_reboot_after_apply {
+        request_scheduled_reboot(
+            state,
+            "Scheduled system image update activated; rebooting automatically",
+        )
+        .await?;
+    } else {
+        append_scheduled_log(
+            state,
+            "apply",
+            "info",
+            "Scheduled system image update activated; reboot required",
+            Some("rootfs"),
+        )?;
+    }
+
+    Ok(())
+}
+
+async fn run_scheduled_update_actions(
+    state: &AppState,
+    status: &UpdatesStatus,
+    settings: &UpdateSettings,
+) -> Result<()> {
+    if !settings.auto_apply_updates {
+        return Ok(());
+    }
+
+    let rootfs_status = crate::rootfs_update::status().await;
+    if rootfs_status.reboot_required {
+        if settings.auto_reboot_after_apply {
+            request_scheduled_reboot(
+                state,
+                "Scheduled system image update is pending; rebooting automatically",
+            )
+            .await?;
+        } else {
+            append_scheduled_log(
+                state,
+                "apply",
+                "info",
+                "Scheduled app updates deferred until the pending system image update has booted",
+                Some("rootfs"),
+            )?;
+        }
+        return Ok(());
+    }
+
+    if component_update_available(status, RepoComponent::Rootfs.as_str()) {
+        append_scheduled_log(
+            state,
+            "apply",
+            "info",
+            "Scheduled update applying system image before app updates",
+            Some("rootfs"),
+        )?;
+
+        let result =
+            apply_repo_component_selection(state, vec![RepoComponent::Rootfs], false).await?;
+        if !result.success {
+            anyhow::bail!(result.message);
+        }
+
+        activate_scheduled_rootfs_update(state, settings).await?;
+        return Ok(());
+    }
+
+    if !settings.deploy_runtime_after_apply {
+        append_scheduled_log(
+            state,
+            "apply",
+            "info",
+            "Scheduled app update deployment skipped by update settings",
+            None,
+        )?;
+        return Ok(());
+    }
+
+    let runtime_components = runtime_update_selection(status);
+    if runtime_components.is_empty() {
+        return Ok(());
+    }
+
+    let runtime_label = component_selection_label(&runtime_components);
+    append_scheduled_log(
+        state,
+        "apply",
+        "info",
+        format!("Scheduled app update deployment started for {runtime_label}"),
+        None,
+    )?;
+
+    let result = apply_repo_component_selection(state, runtime_components, false).await?;
+    if !result.success {
+        anyhow::bail!(result.message);
+    }
+
+    append_scheduled_log(
+        state,
+        "apply",
+        "success",
+        "Scheduled app update deployment completed",
+        None,
+    )?;
+
+    Ok(())
+}
+
 pub async fn start_update_checker(state: std::sync::Arc<AppState>) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(60));
@@ -2985,6 +3211,11 @@ pub async fn start_update_checker(state: std::sync::Arc<AppState>) {
                         .filter(|c| c.update_available)
                         .count();
                     info!(available, "updates: periodic check completed");
+                    if let Err(err) =
+                        run_scheduled_update_actions(&state, &status, &settings).await
+                    {
+                        warn!(error = %err, "updates: scheduled update action failed");
+                    }
                 }
                 Err(err) => {
                     warn!(error = %err, "updates: periodic check failed");

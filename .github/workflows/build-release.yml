@@ -83,6 +83,7 @@ jobs:
       # Create or update GitHub Release with artifacts
       - name: Create or update Release
         env:
+          GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ steps.version.outputs.VERSION }}
         run: |
           set -euo pipefail

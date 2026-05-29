@@ -40,7 +40,6 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 1
           ref: ${{ github.event.inputs.tag || github.ref }}
 
@@ -84,7 +83,6 @@ jobs:
       # Create or update GitHub Release with artifacts
       - name: Create or update Release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ steps.version.outputs.VERSION }}
         run: |
           set -euo pipefail

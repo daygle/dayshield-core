@@ -15,6 +15,7 @@
 //! config/firewall.json
 //! config/interfaces.json
 //! config/captive_portal.json
+//! config/qos.json
 //! config/suricata.json
 //! config/wireguard.json
 //! ```
@@ -236,6 +237,7 @@ fn serialise_subsystem(
         Subsystem::Suricata => serde_json::to_vec_pretty(&cfg.suricata),
         Subsystem::CrowdSec => serde_json::to_vec_pretty(&cfg.crowdsec),
         Subsystem::Honeypots => serde_json::to_vec_pretty(&cfg.honeypots),
+        Subsystem::Qos => serde_json::to_vec_pretty(&cfg.qos),
         Subsystem::Acme => serde_json::to_vec_pretty(&cfg.acme),
         Subsystem::CaptivePortal => serde_json::to_vec_pretty(&cfg.captive_portal),
     }

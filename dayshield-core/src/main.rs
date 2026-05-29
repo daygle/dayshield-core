@@ -33,6 +33,7 @@ mod metrics;
 mod nat;
 mod notify;
 mod ntp;
+mod qos;
 mod rootfs_update;
 mod rules;
 mod schedules;
@@ -137,6 +138,15 @@ async fn main() -> anyhow::Result<()> {
 
     if let Err(err) = captive_portal::apply_current_ruleset_nft(&app_state.config_store).await {
         warn!("failed to reconcile nftables runtime config: {err:#}");
+    }
+
+    match app_state.config_store.load_qos_config() {
+        Ok(qos_cfg) => {
+            if let Err(err) = engine::qos::apply_config(&qos_cfg).await {
+                warn!("failed to reconcile QoS runtime config: {err:#}");
+            }
+        }
+        Err(err) => warn!("failed to load QoS config for startup reconcile: {err:#}"),
     }
 
     // Start the background metrics collector.

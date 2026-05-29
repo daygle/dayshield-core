@@ -32,8 +32,8 @@ use super::models::{
     AcmeConfig, AdminSecuritySettings, AiEngineConfig, CaptivePortalConfig, CloudflaredConfig,
     CrowdSecConfig, Dhcp6Config, DhcpConfig, DnsConfig, DnsDomainOverride, DnsHostOverride,
     DotConfig, DynamicDnsConfig, FirewallAlias, FirewallRule, FirewallSettings, Gateway,
-    HoneypotConfig, Interface, NatConfig, NotifyConfig, NtpConfig, SuricataConfig, SystemConfig,
-    WireGuardInterface,
+    HoneypotConfig, Interface, NatConfig, NotifyConfig, NtpConfig, QosConfig, SuricataConfig,
+    SystemConfig, WireGuardInterface,
 };
 
 /// Default path to the configuration directory.
@@ -311,7 +311,8 @@ impl ConfigStore {
             is_valid_cidr_or_addr, is_valid_domain, is_valid_interface_name, is_valid_ip,
             is_valid_ipv4_addr, is_valid_ipv4_range, is_valid_mac, is_valid_mss, is_valid_mtu,
             is_valid_port, is_valid_vlan_id, normalize_ipv4_cidr, normalize_ipv6_cidr,
-            validate_firewall_rule, validate_firewall_settings, Ipv6Mode, WanMode,
+            validate_firewall_rule, validate_firewall_settings, validate_qos_config, Ipv6Mode,
+            WanMode,
         };
 
         let interface_names: std::collections::HashSet<&str> =
@@ -1249,6 +1250,13 @@ impl ConfigStore {
             }
         }
 
+        // QoS config validation.
+        if let Some(qos) = &config.qos {
+            if let Err(msg) = validate_qos_config(qos) {
+                anyhow::bail!("QoS config is invalid: {msg}");
+            }
+        }
+
         // Cloudflared config validation.
         if let Some(cloudflared) = &config.cloudflared {
             use crate::config::models::validate_cloudflared_config;
@@ -1661,6 +1669,20 @@ impl ConfigStore {
         self.save_with_rollback(&config)
     }
 
+    /// Return the QoS configuration from persisted config.
+    ///
+    /// Returns defaults when no QoS configuration has been saved yet.
+    pub fn load_qos_config(&self) -> Result<QosConfig> {
+        Ok(self.load()?.qos.unwrap_or_default())
+    }
+
+    /// Atomically replace the QoS configuration in persisted config.
+    pub fn save_qos_config(&self, qos: QosConfig) -> Result<()> {
+        let mut config = self.load()?;
+        config.qos = Some(qos);
+        self.save_with_rollback(&config)
+    }
+
     /// Return the system settings from the persisted config.
     ///
     /// Returns defaults when no settings have been saved yet.
@@ -1868,7 +1890,8 @@ fn merge_json(dst: &mut serde_json::Value, src: serde_json::Value) {
 mod tests {
     use super::*;
     use crate::config::models::{
-        is_valid_cidr, is_valid_interface_name, is_valid_mtu, Gateway, Interface, WanMode,
+        is_valid_cidr, is_valid_interface_name, is_valid_mtu, Gateway, Interface, QosConfig,
+        QosDiffservMode, QosInterface, QosQueueDiscipline, WanMode,
     };
 
     fn temp_dir() -> PathBuf {
@@ -2011,6 +2034,96 @@ mod tests {
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].name, "eth0");
         assert_eq!(loaded[1].name, "eth1");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_and_load_qos_config_roundtrip() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let qos = QosConfig {
+            enabled: true,
+            interfaces: vec![QosInterface {
+                name: "wan0".into(),
+                enabled: true,
+                bandwidth_kbps: Some(100_000),
+                qdisc: QosQueueDiscipline::Cake,
+                diffserv: QosDiffservMode::Diffserv4,
+                nat_aware: true,
+                wash: false,
+            }],
+        };
+
+        store.save_qos_config(qos.clone()).unwrap();
+        let loaded = store.load_qos_config().unwrap();
+
+        assert!(loaded.enabled);
+        assert_eq!(loaded.interfaces.len(), 1);
+        assert_eq!(loaded.interfaces[0].name, "wan0");
+        assert_eq!(loaded.interfaces[0].bandwidth_kbps, Some(100_000));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_qos_interface() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        cfg.qos = Some(QosConfig {
+            enabled: true,
+            interfaces: vec![
+                QosInterface {
+                    name: "wan0".into(),
+                    enabled: true,
+                    bandwidth_kbps: Some(100_000),
+                    qdisc: QosQueueDiscipline::Cake,
+                    diffserv: QosDiffservMode::Diffserv4,
+                    nat_aware: true,
+                    wash: false,
+                },
+                QosInterface {
+                    name: "wan0".into(),
+                    enabled: true,
+                    bandwidth_kbps: Some(50_000),
+                    qdisc: QosQueueDiscipline::FqCodel,
+                    diffserv: QosDiffservMode::Besteffort,
+                    nat_aware: false,
+                    wash: false,
+                },
+            ],
+        });
+
+        let error = store.validate(&cfg).unwrap_err().to_string();
+        assert!(error.contains("duplicate QoS interface"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_zero_qos_bandwidth() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        cfg.qos = Some(QosConfig {
+            enabled: true,
+            interfaces: vec![QosInterface {
+                name: "wan0".into(),
+                enabled: true,
+                bandwidth_kbps: Some(0),
+                qdisc: QosQueueDiscipline::Cake,
+                diffserv: QosDiffservMode::Diffserv4,
+                nat_aware: true,
+                wash: false,
+            }],
+        });
+
+        let error = store.validate(&cfg).unwrap_err().to_string();
+        assert!(error.contains("bandwidth_kbps must be between"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

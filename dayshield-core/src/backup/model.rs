@@ -33,6 +33,8 @@ pub enum Subsystem {
     CrowdSec,
     /// Honeypot listener configuration.
     Honeypots,
+    /// QoS / Smart Queue Management configuration.
+    Qos,
     /// ACME / TLS certificate configuration.
     Acme,
     /// Captive portal configuration.
@@ -76,6 +78,7 @@ impl Subsystem {
             Subsystem::Suricata,
             Subsystem::CrowdSec,
             Subsystem::Honeypots,
+            Subsystem::Qos,
             Subsystem::Acme,
             Subsystem::CaptivePortal,
         ]
@@ -92,6 +95,7 @@ impl Subsystem {
             Subsystem::Suricata => "config/suricata.json",
             Subsystem::CrowdSec => "config/crowdsec.json",
             Subsystem::Honeypots => "config/honeypots.json",
+            Subsystem::Qos => "config/qos.json",
             Subsystem::Acme => "config/acme.json",
             Subsystem::CaptivePortal => "config/captive_portal.json",
         }

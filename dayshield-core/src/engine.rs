@@ -25,6 +25,7 @@ pub mod ipv6;
 pub mod kea;
 pub mod nftables;
 pub mod prefix_delegation;
+pub mod qos;
 pub mod radvd;
 pub mod suricata;
 pub mod vpn;

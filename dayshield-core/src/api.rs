@@ -23,6 +23,7 @@ mod metrics;
 mod nat;
 mod notify;
 mod ntp;
+mod qos;
 pub(crate) mod rulesets;
 mod schedules;
 mod suricata;
@@ -171,6 +172,10 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `POST /nat/rules`                                     - create a NAT rule
 /// - `PUT  /nat/rules/{id}`                                - update a NAT rule
 /// - `DELETE /nat/rules/{id}`                              - delete a NAT rule
+/// - `GET  /qos/config`                                    - get QoS / Smart Queue Management config
+/// - `PUT  /qos/config`                                    - update and apply QoS config
+/// - `GET  /qos/status`                                    - get live `tc` queueing status
+/// - `POST /qos/apply`                                     - re-apply persisted QoS config
 /// - `GET  /admin/security`                                - get admin security settings
 /// - `PUT  /admin/security`                                - update admin security settings
 /// - `GET  /dashboard/cards`                               - canonical dashboard card set
@@ -206,7 +211,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/system/rootfs/reboot-required",
             get(system::get_rootfs_reboot_required),
         )
-        .route("/system/rootfs/rollback", post(system::rollback_rootfs_update))
+        .route(
+            "/system/rootfs/rollback",
+            post(system::rollback_rootfs_update),
+        )
         .route("/system/updates/status", get(system::get_updates_status))
         .route("/system/updates/settings", get(system::get_update_settings))
         .route(
@@ -553,6 +561,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/nat/rules", post(nat::create_rule))
         .route("/nat/rules/{id}", put(nat::update_rule))
         .route("/nat/rules/{id}", delete(nat::delete_rule))
+        // QoS / Smart Queue Management
+        .route("/qos/config", get(qos::get_config))
+        .route("/qos/config", put(qos::put_config))
+        .route("/qos/status", get(qos::get_status))
+        .route("/qos/apply", post(qos::apply))
         // Admin security settings
         .route("/admin/security", get(admin::get_security))
         .route("/admin/security", put(admin::update_security))

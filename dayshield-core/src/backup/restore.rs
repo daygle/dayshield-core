@@ -265,6 +265,15 @@ fn restore_subsystem(store: &ConfigStore, sub: &Subsystem, bytes: &[u8]) -> Resu
                     .context("failed to save honeypot config")?;
             }
         }
+        Subsystem::Qos => {
+            let qos: Option<crate::config::models::QosConfig> =
+                serde_json::from_slice(bytes).context("failed to parse qos.json")?;
+            if let Some(cfg) = qos {
+                store
+                    .save_qos_config(cfg)
+                    .context("failed to save QoS config")?;
+            }
+        }
         Subsystem::Acme => {
             let acme: Option<crate::config::models::AcmeConfig> =
                 serde_json::from_slice(bytes).context("failed to parse acme.json")?;

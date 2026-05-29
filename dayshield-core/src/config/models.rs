@@ -1497,6 +1497,122 @@ pub fn validate_nat_config_with_ipv6(config: &NatConfig, ipv6_enabled: bool) -> 
 }
 
 // ---------------------------------------------------------------------------
+// QoS / Smart Queue Management
+// ---------------------------------------------------------------------------
+
+/// Queue discipline used for an interface-level QoS policy.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum QosQueueDiscipline {
+    /// CAKE provides bandwidth shaping, diffserv-aware prioritisation, and
+    /// optional NAT host fairness.
+    #[default]
+    Cake,
+    /// fq_codel provides fair queueing and bufferbloat control without an
+    /// explicit bandwidth shaper.
+    FqCodel,
+}
+
+impl QosQueueDiscipline {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            QosQueueDiscipline::Cake => "cake",
+            QosQueueDiscipline::FqCodel => "fq_codel",
+        }
+    }
+}
+
+/// CAKE diffserv mode used when `qdisc = cake`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum QosDiffservMode {
+    /// Do not split traffic into priority tins.
+    Besteffort,
+    /// Three tins: bulk, best-effort, voice.
+    Diffserv3,
+    /// Four tins: bulk, best-effort, video, voice.
+    #[default]
+    Diffserv4,
+    /// Eight tins for deployments that intentionally mark a broader DSCP set.
+    Diffserv8,
+}
+
+impl QosDiffservMode {
+    pub fn as_tc_arg(self) -> &'static str {
+        match self {
+            QosDiffservMode::Besteffort => "besteffort",
+            QosDiffservMode::Diffserv3 => "diffserv3",
+            QosDiffservMode::Diffserv4 => "diffserv4",
+            QosDiffservMode::Diffserv8 => "diffserv8",
+        }
+    }
+}
+
+/// Interface-level QoS policy applied through Linux `tc`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QosInterface {
+    /// OS-level interface name, e.g. `wan0` or `pppoe0`.
+    pub name: String,
+    /// Whether DayShield should manage QoS on this interface.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Optional egress shaper rate in kilobits per second.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bandwidth_kbps: Option<u64>,
+    /// Queue discipline to install on the interface root qdisc.
+    #[serde(default)]
+    pub qdisc: QosQueueDiscipline,
+    /// CAKE diffserv mode. Ignored for `fq_codel`.
+    #[serde(default)]
+    pub diffserv: QosDiffservMode,
+    /// Enable CAKE NAT awareness so host fairness sees internal addresses.
+    #[serde(default)]
+    pub nat_aware: bool,
+    /// Clear DSCP values after classification when CAKE is used.
+    #[serde(default)]
+    pub wash: bool,
+}
+
+/// Top-level QoS configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct QosConfig {
+    /// Master enable for all configured QoS interfaces.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Per-interface queueing policies.
+    #[serde(default)]
+    pub interfaces: Vec<QosInterface>,
+}
+
+const QOS_MAX_BANDWIDTH_KBPS: u64 = 100_000_000;
+
+pub fn validate_qos_config(config: &QosConfig) -> Result<(), String> {
+    let mut seen_interfaces = BTreeSet::new();
+
+    for iface in &config.interfaces {
+        if !is_valid_interface_name(&iface.name) {
+            return Err(format!(
+                "QoS interface {:?} is not a valid interface name",
+                iface.name
+            ));
+        }
+        if !seen_interfaces.insert(iface.name.as_str()) {
+            return Err(format!("duplicate QoS interface {:?}", iface.name));
+        }
+        if let Some(kbps) = iface.bandwidth_kbps {
+            if kbps == 0 || kbps > QOS_MAX_BANDWIDTH_KBPS {
+                return Err(format!(
+                    "QoS interface {:?} bandwidth_kbps must be between 1 and {}",
+                    iface.name, QOS_MAX_BANDWIDTH_KBPS
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // DNS (Unbound)
 // ---------------------------------------------------------------------------
 
@@ -3651,6 +3767,9 @@ pub struct SystemConfig {
     /// NAT configuration (outbound mode, WAN interfaces, and user rules).
     #[serde(default)]
     pub nat: Option<NatConfig>,
+    /// QoS / Smart Queue Management configuration.
+    #[serde(default)]
+    pub qos: Option<QosConfig>,
     pub dns: Option<DnsConfig>,
     pub dhcp: Option<DhcpConfig>,
     #[serde(default)]

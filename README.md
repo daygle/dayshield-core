@@ -10,6 +10,7 @@ This repository implements the core service that:
 - handles authentication and session state
 - manages backup and restore workflows
 - integrates with firewall, DNS, NTP, and notification subsystems
+- manages QoS / Smart Queue Management with Linux traffic control
 - collects and serves logs, metrics, and status information
 - delivers the management UI assets in deployed environments
 
@@ -63,6 +64,18 @@ cargo test -p dayshield-core
 - This repo focuses on core service behavior and API/runtime integration.
 - The UI frontend and appliance root filesystem are maintained in separate repositories.
 - Developers should validate changes with workspace build/test commands and ensure runtime integration compatibility.
+
+## QoS / Smart Queue Management endpoints
+
+`dayshield-core` exposes interface-level QoS controls under `/qos/`:
+
+- `GET  /qos/config` - current QoS configuration
+- `PUT  /qos/config` - update persisted config and apply Linux `tc` qdiscs
+- `GET  /qos/status` - live `tc -s qdisc` status for configured interfaces
+- `POST /qos/apply` - re-apply the persisted config
+
+The runtime engine supports CAKE (default, with optional bandwidth shaping,
+diffserv mode, NAT awareness, and DSCP wash) and fq_codel.
 
 ## Rootfs update workflow endpoints
 

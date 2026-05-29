@@ -399,6 +399,8 @@ pub struct UpdateStateFile {
     pub components: Vec<ComponentState>,
     #[serde(default)]
     pub operation_logs: Vec<UpdateLogEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<UpdateOperationProgress>,
     /// ETag cache for GitHub Releases API responses.
     /// Key: API URL, value: (ETag header value, cached response body).
     /// 304 Not Modified responses don't count against GitHub's rate limit.
@@ -419,6 +421,27 @@ pub struct UpdateLogEntry {
     pub from_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateOperationProgress {
+    pub operation: String,
+    pub phase: String,
+    pub status: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_downloaded: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_total: Option<u64>,
+    pub started_at: String,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -457,6 +480,8 @@ pub struct UpdatesStatus {
     pub available_update_count: Option<usize>,
     #[serde(default)]
     pub operation_logs: Vec<UpdateLogEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<UpdateOperationProgress>,
 }
 
 // ============================================================================
@@ -1185,6 +1210,61 @@ fn append_operation_log_with_versions(
     }
 }
 
+fn set_operation_progress(
+    state_file: &mut UpdateStateFile,
+    operation: &str,
+    phase: &str,
+    status: &str,
+    message: impl Into<String>,
+    component: Option<&str>,
+    percent: Option<u8>,
+    bytes: Option<(u64, Option<u64>)>,
+) {
+    let now = Utc::now().to_rfc3339();
+    let started_at = state_file
+        .progress
+        .as_ref()
+        .filter(|progress| progress.operation == operation && progress.status == "running")
+        .map(|progress| progress.started_at.clone())
+        .unwrap_or_else(|| now.clone());
+    let (bytes_downloaded, bytes_total) = bytes
+        .map(|(downloaded, total)| (Some(downloaded), total))
+        .unwrap_or((None, None));
+
+    state_file.progress = Some(UpdateOperationProgress {
+        operation: operation.to_string(),
+        phase: phase.to_string(),
+        status: status.to_string(),
+        message: message.into(),
+        component: component.map(|value| value.to_string()),
+        percent: percent.map(|value| value.min(100)),
+        bytes_downloaded,
+        bytes_total,
+        started_at,
+        updated_at: now.clone(),
+        completed_at: if status == "running" { None } else { Some(now) },
+    });
+}
+
+fn mark_operation_progress_failed(state: &AppState, operation: &str, message: impl Into<String>) {
+    let message = message.into();
+    let mut state_file = load_state(state);
+    append_operation_log(&mut state_file, operation, "error", &message, None);
+    set_operation_progress(
+        &mut state_file,
+        operation,
+        "failed",
+        "failed",
+        message,
+        None,
+        Some(100),
+        None,
+    );
+    if let Err(err) = save_state(state, &state_file) {
+        warn!(error = %err, "updates: failed to persist failed update progress");
+    }
+}
+
 fn clear_appliance_rebuild_required(state_file: &mut UpdateStateFile) {
     state_file.pending_appliance_rebuild = false;
     state_file.appliance_rebuild_reason = None;
@@ -1257,6 +1337,17 @@ fn build_http_client() -> Result<reqwest::Client> {
 }
 
 pub(crate) async fn download_artifact(url: &str, destination: &Path) -> Result<()> {
+    download_artifact_with_progress(url, destination, |_, _| Ok(())).await
+}
+
+async fn download_artifact_with_progress<F>(
+    url: &str,
+    destination: &Path,
+    mut on_progress: F,
+) -> Result<()>
+where
+    F: FnMut(u64, Option<u64>) -> Result<()>,
+{
     use tokio::io::AsyncWriteExt;
 
     // Large artifacts (rootfs squashfs is hundreds of MB) can exceed the
@@ -1281,11 +1372,11 @@ pub(crate) async fn download_artifact(url: &str, destination: &Path) -> Result<(
             url
         );
     }
+    let expected_size = response.content_length();
 
     if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).with_context(|| {
-            format!("failed to create download directory {}", parent.display())
-        })?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create download directory {}", parent.display()))?;
     }
 
     let mut file = tokio::fs::File::create(destination)
@@ -1293,20 +1384,26 @@ pub(crate) async fn download_artifact(url: &str, destination: &Path) -> Result<(
         .with_context(|| format!("failed to create artifact file {}", destination.display()))?;
 
     let mut total: u64 = 0;
+    on_progress(total, expected_size)?;
     while let Some(chunk) = response
         .chunk()
         .await
         .with_context(|| format!("failed to read artifact chunk from {}", url))?
     {
-        file.write_all(&chunk)
-            .await
-            .with_context(|| format!("failed to write artifact chunk to {}", destination.display()))?;
+        file.write_all(&chunk).await.with_context(|| {
+            format!(
+                "failed to write artifact chunk to {}",
+                destination.display()
+            )
+        })?;
         total += chunk.len() as u64;
+        on_progress(total, expected_size)?;
     }
     file.flush()
         .await
         .with_context(|| format!("failed to flush artifact file {}", destination.display()))?;
 
+    on_progress(total, expected_size)?;
     info!(url, bytes = total, "updates: artifact download complete");
     Ok(())
 }
@@ -1979,6 +2076,7 @@ pub async fn get_status(state: &AppState) -> UpdatesStatus {
             None
         },
         operation_logs: state_file.operation_logs,
+        progress: state_file.progress,
     }
 }
 
@@ -2160,6 +2258,16 @@ async fn apply_updates_registry(
         "Artifact update apply started",
         None,
     );
+    set_operation_progress(
+        &mut state_file,
+        "apply",
+        "starting",
+        "running",
+        "Update started",
+        None,
+        Some(2),
+        None,
+    );
     save_state(state, &state_file)?;
 
     // Step 1: Query registry for latest versions (with checksums for artifact verification)
@@ -2169,6 +2277,17 @@ async fn apply_updates_registry(
         &mut state_file.release_etag_cache,
     )
     .await?;
+    set_operation_progress(
+        &mut state_file,
+        "apply",
+        "resolved",
+        "running",
+        "Resolved update artifacts",
+        None,
+        Some(8),
+        None,
+    );
+    save_state(state, &state_file)?;
 
     // Step 2: Download all artifacts to staging area
     let staging_dir = PathBuf::from(ARTIFACT_STAGING_DIR);
@@ -2180,8 +2299,9 @@ async fn apply_updates_registry(
 
     let mut downloads = Vec::new();
     let mut skipped_up_to_date: Vec<String> = Vec::new();
+    let selected_count = components_to_update.len().max(1);
 
-    for comp in &components_to_update {
+    for (idx, comp) in components_to_update.iter().enumerate() {
         let artifact_opt = manifest.components.iter().find(|a| match comp {
             RepoComponent::Core => a.component == "core",
             RepoComponent::Ui => a.component == "ui",
@@ -2216,6 +2336,7 @@ async fn apply_updates_registry(
                     ),
                     Some(&artifact.component),
                 );
+                save_state(state, &state_file)?;
                 continue;
             }
 
@@ -2233,7 +2354,57 @@ async fn apply_updates_registry(
                 });
             let dest = transaction_staging.join(&dest_filename);
 
-            download_artifact(&artifact.download_url, &dest).await?;
+            let download_start = 10.0 + (idx as f64 * 48.0 / selected_count as f64);
+            let download_span = 48.0 / selected_count as f64;
+            set_operation_progress(
+                &mut state_file,
+                "apply",
+                "downloading",
+                "running",
+                format!("Downloading {}", artifact.component),
+                Some(&artifact.component),
+                Some(download_start.round() as u8),
+                Some((0, None)),
+            );
+            save_state(state, &state_file)?;
+
+            let mut last_reported_percent: Option<u8> = None;
+            let mut last_reported_bytes: u64 = 0;
+            let mut on_download_progress = |downloaded: u64, total: Option<u64>| -> Result<()> {
+                let percent = total
+                    .filter(|value| *value > 0)
+                    .map(|value| {
+                        (download_start + (downloaded as f64 / value as f64 * download_span))
+                            .round()
+                            .min(58.0) as u8
+                    })
+                    .or_else(|| Some(download_start.round() as u8));
+                let enough_unknown_bytes = total.is_none()
+                    && downloaded.saturating_sub(last_reported_bytes) >= 8 * 1024 * 1024;
+                if percent != last_reported_percent || enough_unknown_bytes {
+                    set_operation_progress(
+                        &mut state_file,
+                        "apply",
+                        "downloading",
+                        "running",
+                        format!("Downloading {}", artifact.component),
+                        Some(&artifact.component),
+                        percent,
+                        Some((downloaded, total)),
+                    );
+                    save_state(state, &state_file)?;
+                    last_reported_percent = percent;
+                    last_reported_bytes = downloaded;
+                }
+                Ok(())
+            };
+
+            download_artifact_with_progress(
+                &artifact.download_url,
+                &dest,
+                &mut on_download_progress,
+            )
+            .await?;
             if artifact.checksum_sha256.is_empty() {
                 if settings.verify_artifact_signatures {
                     anyhow::bail!(
@@ -2248,6 +2419,17 @@ async fn apply_updates_registry(
                     );
                 }
             } else {
+                set_operation_progress(
+                    &mut state_file,
+                    "apply",
+                    "verifying",
+                    "running",
+                    format!("Verifying {}", artifact.component),
+                    Some(&artifact.component),
+                    Some((58 + idx * 8 / selected_count).min(66) as u8),
+                    None,
+                );
+                save_state(state, &state_file)?;
                 verify_checksum(&dest, &artifact.checksum_sha256)?;
             }
 
@@ -2266,6 +2448,17 @@ async fn apply_updates_registry(
                 ),
                 Some(&artifact.component),
             );
+            set_operation_progress(
+                &mut state_file,
+                "apply",
+                "downloaded",
+                "running",
+                format!("Downloaded and verified {}", artifact.component),
+                Some(&artifact.component),
+                Some((60 + ((idx + 1) * 8 / selected_count)).min(68) as u8),
+                None,
+            );
+            save_state(state, &state_file)?;
         } else {
             append_operation_log(
                 &mut state_file,
@@ -2277,6 +2470,7 @@ async fn apply_updates_registry(
                 ),
                 Some(comp.as_str()),
             );
+            save_state(state, &state_file)?;
         }
     }
 
@@ -2299,6 +2493,16 @@ async fn apply_updates_registry(
             ));
         }
         append_operation_log(&mut state_file, "apply", "info", &message, None);
+        set_operation_progress(
+            &mut state_file,
+            "apply",
+            "completed",
+            "succeeded",
+            &message,
+            None,
+            Some(100),
+            None,
+        );
         save_state(state, &state_file)?;
         let _ = fs::remove_dir_all(&transaction_staging);
         return Ok(UpdatesActionResult {
@@ -2316,6 +2520,16 @@ async fn apply_updates_registry(
             Err(err) => {
                 let msg = format!("failed to create config backup snapshot: {err}");
                 append_operation_log(&mut state_file, "apply", "error", &msg, None);
+                set_operation_progress(
+                    &mut state_file,
+                    "apply",
+                    "failed",
+                    "failed",
+                    &msg,
+                    None,
+                    Some(100),
+                    None,
+                );
                 save_state(state, &state_file)?;
                 return Ok(UpdatesActionResult {
                     operation: "apply".to_string(),
@@ -2328,6 +2542,16 @@ async fn apply_updates_registry(
         };
 
     state_file.config_rollback_path = Some(config_snapshot.to_string_lossy().to_string());
+    set_operation_progress(
+        &mut state_file,
+        "apply",
+        "backup",
+        "running",
+        "Created config backup archive",
+        None,
+        Some(70),
+        None,
+    );
     append_operation_log(
         &mut state_file,
         "apply",
@@ -2353,6 +2577,16 @@ async fn apply_updates_registry(
                 err
             );
             append_operation_log(&mut state_file, "apply", "error", &msg, Some(comp.as_str()));
+            set_operation_progress(
+                &mut state_file,
+                "apply",
+                "failed",
+                "failed",
+                &msg,
+                Some(comp.as_str()),
+                Some(100),
+                None,
+            );
             save_state(state, &state_file)?;
             return Ok(UpdatesActionResult {
                 operation: "apply".to_string(),
@@ -2380,13 +2614,26 @@ async fn apply_updates_registry(
     );
 
     // Step 4: Apply artifacts atomically
-    for (component_name, version, artifact_path) in &downloads {
+    let deploy_count = downloads.len().max(1);
+    for (idx, (component_name, version, artifact_path)) in downloads.iter().enumerate() {
         let comp = match component_name.as_str() {
             "core" => RepoComponent::Core,
             "ui" => RepoComponent::Ui,
             "rootfs" => RepoComponent::Rootfs,
             _ => continue,
         };
+
+        set_operation_progress(
+            &mut state_file,
+            "apply",
+            "deploying",
+            "running",
+            format!("Deploying {}", component_name),
+            Some(component_name),
+            Some((72 + (idx * 16 / deploy_count)).min(88) as u8),
+            None,
+        );
+        save_state(state, &state_file)?;
 
         match extract_and_deploy_artifact(comp, artifact_path, None).await {
             Ok(_) => {
@@ -2413,6 +2660,17 @@ async fn apply_updates_registry(
                     previous_version.as_deref(),
                     Some(version.as_str()),
                 );
+                set_operation_progress(
+                    &mut state_file,
+                    "apply",
+                    "deployed",
+                    "running",
+                    format!("Deployed {}", component_name),
+                    Some(component_name),
+                    Some((76 + ((idx + 1) * 14 / deploy_count)).min(90) as u8),
+                    None,
+                );
+                save_state(state, &state_file)?;
             }
             Err(err) => {
                 details.push(format!("FAILED to deploy {}: {}", component_name, err));
@@ -2422,6 +2680,16 @@ async fn apply_updates_registry(
                     "error",
                     format!("Failed to deploy {}: {}", component_name, err),
                     Some(component_name),
+                );
+                set_operation_progress(
+                    &mut state_file,
+                    "apply",
+                    "failed",
+                    "failed",
+                    format!("Failed to deploy {}: {}", component_name, err),
+                    Some(component_name),
+                    Some(100),
+                    None,
                 );
                 save_state(state, &state_file)?;
 
@@ -2441,6 +2709,17 @@ async fn apply_updates_registry(
         .iter()
         .any(|(component_name, _, _)| matches!(component_name.as_str(), "core" | "ui"));
     if runtime_downloaded {
+        set_operation_progress(
+            &mut state_file,
+            "apply",
+            "health_check",
+            "running",
+            "Checking service health",
+            None,
+            Some(92),
+            None,
+        );
+        save_state(state, &state_file)?;
         if let Err(err) = ensure_critical_services_healthy().await {
             details.push(format!("post-apply service health check failed: {}", err));
             append_operation_log(
@@ -2448,6 +2727,16 @@ async fn apply_updates_registry(
                 "apply",
                 "error",
                 format!("Post-apply service health check failed: {}", err),
+                None,
+            );
+            set_operation_progress(
+                &mut state_file,
+                "apply",
+                "failed",
+                "failed",
+                format!("Post-apply service health check failed: {}", err),
+                None,
+                Some(100),
                 None,
             );
             save_state(state, &state_file)?;
@@ -2478,6 +2767,16 @@ async fn apply_updates_registry(
         "apply",
         "success",
         "Artifact update apply completed",
+        None,
+    );
+    set_operation_progress(
+        &mut state_file,
+        "apply",
+        "completed",
+        "succeeded",
+        "Update completed successfully",
+        None,
+        Some(100),
         None,
     );
 
@@ -2554,7 +2853,11 @@ pub async fn apply_updates(
     force_partial_apply: bool,
 ) -> Result<UpdatesActionResult> {
     let selected = RepoComponent::from_update_component(component);
-    apply_repo_component_selection(state, selected, force_partial_apply).await
+    let result = apply_repo_component_selection(state, selected, force_partial_apply).await;
+    if let Err(err) = &result {
+        mark_operation_progress_failed(state, "apply", format!("Update failed: {err:#}"));
+    }
+    result
 }
 
 async fn apply_repo_component_selection(
@@ -2596,10 +2899,22 @@ pub async fn rollback_updates(
         "Rollback started",
         None,
     );
+    set_operation_progress(
+        &mut state_file,
+        "rollback",
+        "starting",
+        "running",
+        "Rollback started",
+        None,
+        Some(5),
+        None,
+    );
+    save_state(state, &state_file)?;
 
     info!(component = ?component, "updates: rollback started");
 
-    for comp in selected {
+    let selected_count = selected.len().max(1);
+    for (idx, comp) in selected.into_iter().enumerate() {
         let previous_version = {
             let entry = ensure_component_state(&mut state_file, comp);
             entry.rollback_version.clone()
@@ -2617,6 +2932,17 @@ pub async fn rollback_updates(
                     msg.clone(),
                     Some(comp.as_str()),
                 );
+                set_operation_progress(
+                    &mut state_file,
+                    "rollback",
+                    "rollback",
+                    "running",
+                    msg,
+                    Some(comp.as_str()),
+                    Some(((idx + 1) * 65 / selected_count).clamp(10, 70) as u8),
+                    None,
+                );
+                save_state(state, &state_file)?;
                 continue;
             }
         };
@@ -2638,6 +2964,16 @@ pub async fn rollback_updates(
                 "error",
                 msg.clone(),
                 Some(comp.as_str()),
+            );
+            set_operation_progress(
+                &mut state_file,
+                "rollback",
+                "failed",
+                "failed",
+                msg.clone(),
+                Some(comp.as_str()),
+                Some(100),
+                None,
             );
             save_state(state, &state_file)?;
             let status = get_status(state).await;
@@ -2681,6 +3017,17 @@ pub async fn rollback_updates(
             Some(target_version.as_str()),
         );
         rolled_back_components += 1;
+        set_operation_progress(
+            &mut state_file,
+            "rollback",
+            "rollback",
+            "running",
+            format!("Rolled back {}", comp.as_str()),
+            Some(comp.as_str()),
+            Some((10 + ((idx + 1) * 60 / selected_count)).min(70) as u8),
+            None,
+        );
+        save_state(state, &state_file)?;
     }
 
     if rolled_back_components == 0 {
@@ -2689,6 +3036,16 @@ pub async fn rollback_updates(
             "rollback",
             "error",
             "Rollback failed: no components could be rolled back",
+            None,
+        );
+        set_operation_progress(
+            &mut state_file,
+            "rollback",
+            "failed",
+            "failed",
+            "Rollback failed: no components could be rolled back",
+            None,
+            Some(100),
             None,
         );
         save_state(state, &state_file)?;
@@ -2713,6 +3070,16 @@ pub async fn rollback_updates(
                 "Rollback failed: no config backup archive available",
                 None,
             );
+            set_operation_progress(
+                &mut state_file,
+                "rollback",
+                "failed",
+                "failed",
+                "Rollback failed: no config backup archive available",
+                None,
+                Some(100),
+                None,
+            );
             save_state(state, &state_file)?;
             let status = get_status(state).await;
             return Ok(UpdatesActionResult {
@@ -2732,6 +3099,16 @@ pub async fn rollback_updates(
             err
         );
         append_operation_log(&mut state_file, "rollback", "error", &msg, None);
+        set_operation_progress(
+            &mut state_file,
+            "rollback",
+            "failed",
+            "failed",
+            &msg,
+            None,
+            Some(100),
+            None,
+        );
         save_state(state, &state_file)?;
         let status = get_status(state).await;
         return Ok(UpdatesActionResult {
@@ -2753,6 +3130,16 @@ pub async fn rollback_updates(
         ),
         None,
     );
+    set_operation_progress(
+        &mut state_file,
+        "rollback",
+        "restore_config",
+        "running",
+        "Restored config backup archive",
+        None,
+        Some(85),
+        None,
+    );
     state_file.config_rollback_path = None;
 
     state_file.last_applied_at = Some(Utc::now().to_rfc3339());
@@ -2762,6 +3149,16 @@ pub async fn rollback_updates(
         "rollback",
         "success",
         "Rollback completed",
+        None,
+    );
+    set_operation_progress(
+        &mut state_file,
+        "rollback",
+        "completed",
+        "succeeded",
+        "Rollback completed",
+        None,
+        Some(100),
         None,
     );
     save_state(state, &state_file)?;
@@ -3239,8 +3636,7 @@ pub async fn start_update_checker(state: std::sync::Arc<AppState>) {
                         .filter(|c| c.update_available)
                         .count();
                     info!(available, "updates: periodic check completed");
-                    if let Err(err) =
-                        run_scheduled_update_actions(&state, &status, &settings).await
+                    if let Err(err) = run_scheduled_update_actions(&state, &status, &settings).await
                     {
                         warn!(error = %err, "updates: scheduled update action failed");
                     }

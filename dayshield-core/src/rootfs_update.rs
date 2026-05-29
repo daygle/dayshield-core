@@ -296,8 +296,32 @@ pub fn signal_boot_success() -> Result<()> {
         return Ok(());
     }
 
-    // Case 2: normal promotion — pending exists
+    // Case 2: normal promotion — pending exists AND the running rootfs version
+    // matches it.  Without the version match check we would falsely promote even
+    // when the initramfs hook failed to apply the new image (the system would
+    // then claim to be running the new version while actually still on the old
+    // one — a phantom update).
     if let Some(pending_meta) = read_meta(&pending_path()) {
+        let running_version = read_build_version();
+        let pending_version_norm = normalized_rootfs_version(&pending_meta.version);
+
+        if running_version.is_some()
+            && pending_version_norm.is_some()
+            && running_version != pending_version_norm
+        {
+            warn!(
+                pending = %pending_meta.version,
+                running = ?running_version,
+                "rootfs: pending version does not match running rootfs; leaving pending in place"
+            );
+            // Don't promote and don't delete pending — the next apply attempt
+            // (or a manual cleanup) can reconcile.  Still write the boot-success
+            // marker so the rest of the system knows we are healthy.
+            std::fs::write(boot_success_marker(), Utc::now().to_rfc3339())
+                .with_context(|| "failed to write boot-success marker")?;
+            return Ok(());
+        }
+
         let current = read_meta(&current_path());
         info!(
             version = %pending_meta.version,
@@ -450,15 +474,21 @@ fn read_previous_version_from_update_state(current_version: Option<&str>) -> Opt
 }
 
 fn repair_current_from_build_version(current: Option<&RootfsVersionMeta>) -> Option<String> {
-    if let Some(version) = meta_version(current) {
-        return Some(version);
+    let build_version = read_build_version();
+
+    // When the build-stamped version is available, it is the source of truth
+    // for what is actually running — current.json can lie if a previous
+    // signal_boot_success promoted a pending that the initramfs never applied
+    // (phantom update), or if it was hand-edited.  Trust the build stamp.
+    if let Some(ref build_v) = build_version {
+        if meta_version(current).as_deref() != Some(build_v.as_str()) {
+            let _ = mark_current(build_v);
+        }
+        return Some(build_v.clone());
     }
 
-    let version = read_build_version()?;
-    if mark_current(&version).is_err() {
-        return Some(version);
-    }
-    Some(version)
+    // No build stamp (very early/dev environment): fall back to current.json.
+    meta_version(current)
 }
 
 fn repair_previous_from_update_state(

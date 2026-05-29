@@ -1239,7 +1239,7 @@ fn build_http_client() -> Result<reqwest::Client> {
         .context("failed to build HTTP client")
 }
 
-async fn download_artifact(url: &str, destination: &Path) -> Result<()> {
+pub(crate) async fn download_artifact(url: &str, destination: &Path) -> Result<()> {
     let client = build_http_client()?;
     let response = client
         .get(url)

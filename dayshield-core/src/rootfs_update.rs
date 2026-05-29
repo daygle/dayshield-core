@@ -51,6 +51,9 @@ pub const ROOTFS_UPDATE_HELPER: &str = "/usr/local/lib/dayshield/rootfs-update.s
 
 /// Path to the version string stamped into the rootfs image at build time.
 const ROOTFS_VERSION_FILE: &str = "/etc/dayshield/version";
+const ROOTFS_IMAGE_STORE: &str = "/boot/dayshield/images";
+const DEFAULT_ROOTFS_REPO_URL: &str = "https://github.com/daygle/dayshield-rootfs";
+const UPDATE_SETTINGS_FILE_PATH: &str = "/etc/dayshield/config/updates_settings.json";
 
 fn state_dir() -> PathBuf {
     PathBuf::from(ROOTFS_UPDATE_STATE_DIR)
@@ -66,6 +69,11 @@ fn pending_path() -> PathBuf {
 
 fn previous_path() -> PathBuf {
     state_dir().join("previous.json")
+}
+
+fn rootfs_image_path(version: &str) -> Option<PathBuf> {
+    let version = normalized_rootfs_version(version)?;
+    Some(Path::new(ROOTFS_IMAGE_STORE).join(format!("rootfs-{version}.squashfs")))
 }
 
 fn boot_success_marker() -> PathBuf {
@@ -179,6 +187,12 @@ pub struct RootfsRebootState {
     pub current_version: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateSettingsSnapshot {
+    rootfs_repo_url: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // In-process operation serialisation
 // ---------------------------------------------------------------------------
@@ -206,8 +220,7 @@ fn write_meta(path: &Path, meta: &RootfsVersionMeta) -> Result<()> {
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let text = serde_json::to_string_pretty(meta)?;
-    std::fs::write(path, text)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    std::fs::write(path, text).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
 
@@ -236,8 +249,12 @@ pub fn signal_boot_success() -> Result<()> {
         );
 
         // Rotate current → previous
-        if let Some(current_meta) = &current {
-            write_meta(&previous_path(), current_meta)?;
+        if let Some(previous_version) = meta_version(current.as_ref()).or_else(|| {
+            read_previous_version_from_update_state(Some(pending_meta.version.as_str()))
+        }) {
+            if previous_version != pending_meta.version {
+                write_meta(&previous_path(), &RootfsVersionMeta::new(previous_version))?;
+            }
         }
 
         // Promote pending → current
@@ -273,7 +290,149 @@ fn read_build_version() -> Option<String> {
 }
 
 fn is_placeholder_version(v: &str) -> bool {
-    v.is_empty() || v == "unknown" || v == "initial"
+    let trimmed = v.trim();
+    trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("unknown")
+        || trimmed.eq_ignore_ascii_case("initial")
+}
+
+fn normalized_rootfs_version(version: &str) -> Option<String> {
+    let trimmed = version.trim().trim_start_matches('v');
+    if is_placeholder_version(trimmed)
+        || trimmed
+            .chars()
+            .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')))
+    {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn usable_version(v: &str) -> Option<String> {
+    normalized_rootfs_version(v)
+}
+
+fn meta_version(meta: Option<&RootfsVersionMeta>) -> Option<String> {
+    meta.and_then(|m| usable_version(&m.version))
+}
+
+fn read_update_state() -> Option<crate::update::UpdateStateFile> {
+    let path = Path::new(crate::update::UPDATE_STATE_FILE_PATH);
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn read_update_settings() -> Option<UpdateSettingsSnapshot> {
+    let text = std::fs::read_to_string(UPDATE_SETTINGS_FILE_PATH).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn configured_rootfs_repo_url() -> String {
+    std::env::var("DAYSHIELD_UPDATE_ROOTFS_URL")
+        .ok()
+        .and_then(|value| non_empty_trimmed(value.as_str()))
+        .or_else(|| {
+            read_update_settings()
+                .and_then(|settings| settings.rootfs_repo_url)
+                .and_then(|value| non_empty_trimmed(value.as_str()))
+        })
+        .unwrap_or_else(|| DEFAULT_ROOTFS_REPO_URL.to_string())
+}
+
+fn non_empty_trimmed(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn previous_rootfs_download_url(version: &str) -> Option<String> {
+    let version = normalized_rootfs_version(version)?;
+    let repo_url = configured_rootfs_repo_url();
+    let repo_url = repo_url
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches(".git");
+    Some(format!(
+        "{repo_url}/releases/download/v{version}/rootfs-v{version}.squashfs"
+    ))
+}
+
+fn previous_version_from_update_state_file(
+    state: &crate::update::UpdateStateFile,
+    current_version: Option<&str>,
+) -> Option<String> {
+    let component = state.components.iter().find(|c| c.component == "rootfs");
+
+    component
+        .and_then(|c| c.rollback_version.as_deref())
+        .and_then(usable_version)
+        .filter(|v| Some(v.as_str()) != current_version)
+        .or_else(|| {
+            state
+                .operation_logs
+                .iter()
+                .rev()
+                .find(|entry| {
+                    entry.operation == "apply"
+                        && entry.level == "success"
+                        && entry.component.as_deref() == Some("rootfs")
+                        && entry.to_version.as_deref().map_or(true, |to| {
+                            current_version.map_or(true, |current| to == current)
+                        })
+                })
+                .and_then(|entry| entry.from_version.as_deref())
+                .and_then(usable_version)
+                .filter(|v| Some(v.as_str()) != current_version)
+        })
+}
+
+fn read_previous_version_from_update_state(current_version: Option<&str>) -> Option<String> {
+    read_update_state()
+        .as_ref()
+        .and_then(|state| previous_version_from_update_state_file(state, current_version))
+}
+
+fn repair_current_from_build_version(current: Option<&RootfsVersionMeta>) -> Option<String> {
+    if let Some(version) = meta_version(current) {
+        return Some(version);
+    }
+
+    let version = read_build_version()?;
+    if mark_current(&version).is_err() {
+        return Some(version);
+    }
+    Some(version)
+}
+
+fn repair_previous_from_update_state(
+    previous: Option<&RootfsVersionMeta>,
+    current_version: Option<&str>,
+) -> Option<String> {
+    if let Some(version) = meta_version(previous) {
+        return Some(version);
+    }
+
+    let version = read_previous_version_from_update_state(current_version)?;
+    let _ = write_meta(&previous_path(), &RootfsVersionMeta::new(version.clone()));
+    Some(version)
+}
+
+fn ensure_previous_marker_version(version: &str) -> Result<()> {
+    let version = normalized_rootfs_version(version)
+        .with_context(|| format!("invalid previous rootfs version: {version}"))?;
+    let mut meta =
+        read_meta(&previous_path()).unwrap_or_else(|| RootfsVersionMeta::new(version.clone()));
+    if meta.version != version {
+        meta.version = version;
+        meta.recorded_at = Utc::now().to_rfc3339();
+    }
+    write_meta(&previous_path(), &meta)
+        .with_context(|| "failed to repair rootfs previous marker")?;
+    Ok(())
 }
 
 /// Return the current rootfs update status.
@@ -288,23 +447,11 @@ pub async fn status() -> RootfsUpdateStatus {
     // stamped into /etc/dayshield/version at build time so that a fresh install
     // (or a current.json written with a placeholder like "initial") still
     // displays the correct version.
-    let current_version = current
-        .as_ref()
-        .map(|m| m.version.as_str())
-        .filter(|v| !is_placeholder_version(v))
-        .map(|v| v.to_string())
-        .or_else(read_build_version);
-
-    // Auto-bootstrap current.json from the build-time version on first run so
-    // that signal_boot_success and rollback tracking work correctly going forward.
-    if current.is_none() {
-        if let Some(ref v) = current_version {
-            let _ = mark_current(v);
-        }
-    }
+    let current_version = repair_current_from_build_version(current.as_ref());
 
     let pending_version = pending.as_ref().map(|m| m.version.clone());
-    let previous_version = previous.as_ref().map(|m| m.version.clone());
+    let previous_version =
+        repair_previous_from_update_state(previous.as_ref(), current_version.as_deref());
 
     let reboot_required = pending_version.is_some();
     let rollback_available = previous_version.is_some();
@@ -405,7 +552,9 @@ pub async fn stage_update() -> Result<RootfsActionResult> {
         run_helper_stage(&mut details).await
     } else {
         // Fallback: best-effort stub used on development hosts
-        let msg = "rootfs-update helper not installed; skipping artifact download (development mode)".to_string();
+        let msg =
+            "rootfs-update helper not installed; skipping artifact download (development mode)"
+                .to_string();
         warn!("{}", msg);
         details.push(msg.clone());
         (true, msg)
@@ -549,6 +698,53 @@ async fn run_helper_apply(details: &mut Vec<String>) -> (bool, String) {
 // Rollback
 // ---------------------------------------------------------------------------
 
+async fn ensure_previous_image_available(version: &str, details: &mut Vec<String>) -> Result<()> {
+    let image_path = rootfs_image_path(version)
+        .with_context(|| format!("invalid previous rootfs version: {version}"))?;
+    if image_path.exists() {
+        return Ok(());
+    }
+
+    let download_url = previous_rootfs_download_url(version)
+        .with_context(|| format!("cannot build download URL for rootfs version {version}"))?;
+    if let Some(parent) = image_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let tmp_path = image_path.with_extension("squashfs.tmp");
+    let _ = std::fs::remove_file(&tmp_path);
+
+    let message = format!(
+        "Previous rootfs image not found at {}; downloading {}",
+        image_path.display(),
+        download_url
+    );
+    warn!("{}", message);
+    details.push(message);
+
+    match crate::update::download_artifact(&download_url, &tmp_path).await {
+        Ok(()) => {
+            std::fs::rename(&tmp_path, &image_path).with_context(|| {
+                format!(
+                    "failed to install downloaded rollback image at {}",
+                    image_path.display()
+                )
+            })?;
+            details.push(format!(
+                "Downloaded rollback image for rootfs version {version}"
+            ));
+            Ok(())
+        }
+        Err(err) => {
+            let _ = std::fs::remove_file(&tmp_path);
+            Err(err).with_context(|| {
+                format!("failed to download rollback image for rootfs version {version}")
+            })
+        }
+    }
+}
+
 /// Revert to the previous known-good rootfs version.
 ///
 /// Writes a rollback marker that the initramfs reads on the next boot to
@@ -559,7 +755,12 @@ pub async fn rollback() -> Result<RootfsActionResult> {
     let mut details = Vec::new();
 
     let previous = read_meta(&previous_path());
-    if previous.is_none() && !Path::new(ROOTFS_UPDATE_HELPER).exists() {
+    let current = read_meta(&current_path());
+    let current_version = meta_version(current.as_ref());
+    let previous_version =
+        repair_previous_from_update_state(previous.as_ref(), current_version.as_deref());
+
+    if previous_version.is_none() && !Path::new(ROOTFS_UPDATE_HELPER).exists() {
         let msg = "No previous rootfs version available for rollback.".to_string();
         warn!("{}", msg);
         let status = status().await;
@@ -573,13 +774,29 @@ pub async fn rollback() -> Result<RootfsActionResult> {
     }
 
     let (success, message) = if Path::new(ROOTFS_UPDATE_HELPER).exists() {
-        run_helper_rollback(&mut details).await
+        if let Some(version) = previous_version.as_deref() {
+            if let Err(err) = ensure_previous_marker_version(version) {
+                let msg = format!("Rootfs rollback failed: {err:#}");
+                warn!("{}", msg);
+                (false, msg)
+            } else if let Err(err) = ensure_previous_image_available(version, &mut details).await {
+                let msg = format!("Rootfs rollback failed: {err:#}");
+                warn!("{}", msg);
+                (false, msg)
+            } else {
+                run_helper_rollback(&mut details).await
+            }
+        } else {
+            let msg = "No previous rootfs version available for rollback.".to_string();
+            warn!("{}", msg);
+            (false, msg)
+        }
     } else {
         // Fallback stub: write a rollback marker
         let rollback_path = state_dir().join("rollback");
         match std::fs::write(&rollback_path, Utc::now().to_rfc3339()) {
             Ok(()) => {
-                let version = previous.as_ref().map(|m| m.version.as_str()).unwrap_or("previous");
+                let version = previous_version.as_deref().unwrap_or("previous");
                 let msg = format!("Rollback to version {version} scheduled for next boot.");
                 info!(version, "rootfs: rollback marker written");
                 details.push(msg.clone());
@@ -626,8 +843,18 @@ async fn run_helper_rollback(details: &mut Vec<String>) -> (bool, String) {
                 )
             } else {
                 let code = output.status.code().unwrap_or(-1);
-                warn!(exit_code = code, "rootfs: rollback helper failed");
-                (false, format!("Rootfs rollback failed (exit {code})."))
+                let reason = stderr
+                    .lines()
+                    .chain(stdout.lines())
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .map(|line| format!(": {line}"))
+                    .unwrap_or_default();
+                warn!(exit_code = code, reason = %reason, "rootfs: rollback helper failed");
+                (
+                    false,
+                    format!("Rootfs rollback failed (exit {code}){reason}."),
+                )
             }
         }
         Err(err) => {
@@ -646,14 +873,16 @@ async fn run_helper_rollback(details: &mut Vec<String>) -> (bool, String) {
 /// Write the `pending.json` marker after the update orchestrator has
 /// successfully staged a rootfs artifact.
 pub fn mark_pending(version: &str, artifact_path: &Path, sha256: &str) -> Result<()> {
+    let current = read_meta(&current_path());
+    let _ = repair_current_from_build_version(current.as_ref());
+
     let meta = RootfsVersionMeta {
         version: version.to_string(),
         artifact_path: Some(artifact_path.to_string_lossy().into_owned()),
         artifact_sha256: Some(sha256.to_string()),
         recorded_at: Utc::now().to_rfc3339(),
     };
-    write_meta(&pending_path(), &meta)
-        .with_context(|| "failed to write rootfs pending marker")?;
+    write_meta(&pending_path(), &meta).with_context(|| "failed to write rootfs pending marker")?;
     info!(
         version,
         artifact = %artifact_path.display(),
@@ -666,8 +895,7 @@ pub fn mark_pending(version: &str, artifact_path: &Path, sha256: &str) -> Result
 /// the appliance rebuild is acknowledged by the operator).
 pub fn mark_current(version: &str) -> Result<()> {
     let meta = RootfsVersionMeta::new(version);
-    write_meta(&current_path(), &meta)
-        .with_context(|| "failed to write rootfs current marker")?;
+    write_meta(&current_path(), &meta).with_context(|| "failed to write rootfs current marker")?;
     info!(version, "rootfs: current version marker written");
     Ok(())
 }
@@ -684,7 +912,9 @@ mod tests {
     fn rootfs_version_meta_roundtrips_json() {
         let meta = RootfsVersionMeta {
             version: "1.2.3".to_string(),
-            artifact_path: Some("/var/lib/dayshield/rootfs-update/staging/rootfs-1.2.3.squashfs".to_string()),
+            artifact_path: Some(
+                "/var/lib/dayshield/rootfs-update/staging/rootfs-1.2.3.squashfs".to_string(),
+            ),
             artifact_sha256: Some("abc123".to_string()),
             recorded_at: "2026-01-01T00:00:00Z".to_string(),
         };
@@ -730,6 +960,65 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&RootfsTransactionState::RollingBack).unwrap(),
             "\"rolling_back\""
+        );
+    }
+
+    #[test]
+    fn placeholder_versions_are_not_user_facing_versions() {
+        assert_eq!(usable_version("initial"), None);
+        assert_eq!(usable_version(" unknown "), None);
+        assert_eq!(usable_version("1.2.3"), Some("1.2.3".to_string()));
+        assert_eq!(usable_version("v1.2.3"), Some("1.2.3".to_string()));
+        assert_eq!(usable_version("../1.2.3"), None);
+
+        let placeholder = RootfsVersionMeta::new("initial");
+        assert_eq!(meta_version(Some(&placeholder)), None);
+    }
+
+    #[test]
+    fn previous_version_can_be_recovered_from_update_log() {
+        let state = crate::update::UpdateStateFile {
+            operation_logs: vec![crate::update::UpdateLogEntry {
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                operation: "apply".to_string(),
+                level: "success".to_string(),
+                message: "Deployed rootfs from v1.2.2 to v1.2.3".to_string(),
+                component: Some("rootfs".to_string()),
+                from_version: Some("1.2.2".to_string()),
+                to_version: Some("1.2.3".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            previous_version_from_update_state_file(&state, Some("1.2.3")),
+            Some("1.2.2".to_string())
+        );
+    }
+
+    #[test]
+    fn rollback_version_takes_precedence_over_update_log() {
+        let state = crate::update::UpdateStateFile {
+            components: vec![crate::update::ComponentState {
+                component: "rootfs".to_string(),
+                rollback_version: Some("1.2.1".to_string()),
+                ..Default::default()
+            }],
+            operation_logs: vec![crate::update::UpdateLogEntry {
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                operation: "apply".to_string(),
+                level: "success".to_string(),
+                message: "Deployed rootfs from v1.2.2 to v1.2.3".to_string(),
+                component: Some("rootfs".to_string()),
+                from_version: Some("1.2.2".to_string()),
+                to_version: Some("1.2.3".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            previous_version_from_update_state_file(&state, Some("1.2.3")),
+            Some("1.2.1".to_string())
         );
     }
 }

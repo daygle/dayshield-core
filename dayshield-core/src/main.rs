@@ -131,6 +131,26 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Reconcile network interfaces.  After a rootfs update the rsync
+    // extraction has wiped /etc/systemd/network/*.network (squashfs ships
+    // an empty directory there); we rewrite them from the persisted config
+    // so the user's WAN/LAN assignments and IPs survive every update.
+    match app_state.config_store.load_interfaces() {
+        Ok(interfaces) => {
+            for iface in &interfaces {
+                if let Err(err) =
+                    engine::interfaces::apply_interface_with_ipv6(iface, ipv6_enabled).await
+                {
+                    warn!(
+                        interface = %iface.name,
+                        "failed to reconcile interface at startup: {err:#}"
+                    );
+                }
+            }
+        }
+        Err(err) => warn!("failed to load interfaces for startup reconcile: {err:#}"),
+    }
+
     // Reconcile Kea with the persisted DayShield config. Kea units can be
     // enabled independently by the package/rootfs, so startup must recreate
     // the distro config mirrors before those services are expected healthy.

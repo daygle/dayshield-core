@@ -72,6 +72,32 @@ async fn main() -> anyhow::Result<()> {
         println!("Boot success signalled.");
         return Ok(());
     }
+    if args.get(1).map(String::as_str) == Some("rootfs-apply") {
+        let result = rootfs_update::apply_update()
+            .await
+            .map_err(|e| anyhow::anyhow!("rootfs-apply failed: {e:#}"))?;
+        println!("{}", result.message);
+        for line in &result.details {
+            println!("  {line}");
+        }
+        if !result.success {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+    if args.get(1).map(String::as_str) == Some("rootfs-rollback") {
+        let result = rootfs_update::rollback()
+            .await
+            .map_err(|e| anyhow::anyhow!("rootfs-rollback failed: {e:#}"))?;
+        println!("{}", result.message);
+        for line in &result.details {
+            println!("  {line}");
+        }
+        if !result.success {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     if matches!(
         args.get(1).map(String::as_str),
         Some(

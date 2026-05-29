@@ -1497,7 +1497,7 @@ async fn query_registry_with_component_fallbacks(
     Ok(manifest)
 }
 
-fn artifact_version_from_name(component: &str, asset_name: &str) -> Option<String> {
+pub(crate) fn artifact_version_from_name(component: &str, asset_name: &str) -> Option<String> {
     let prefix = format!("{component}-v");
     let stripped = asset_name.strip_prefix(&prefix)?;
     let version = stripped
@@ -1850,7 +1850,12 @@ async fn build_manifest_from_release(
 /// Extract artifact and deploy to target location
 /// Stage a standalone rootfs squashfs image directly to the update staging dir.
 /// Bypasses the tar/zstd path entirely — the squashfs is not archive-wrapped.
-fn stage_rootfs_squashfs_direct(artifact_path: &Path) -> Result<()> {
+/// Stage a downloaded squashfs into the rootfs update staging directory and
+/// IMMEDIATELY apply it to the inactive A/B slot — there's no separate
+/// "apply" step in the A/B model.  The slot write happens in dayshield-core's
+/// userspace context because it requires mkfs + unsquashfs + grub-editenv,
+/// none of which want to live inside an initramfs.
+async fn stage_rootfs_squashfs_direct(artifact_path: &Path) -> Result<()> {
     let staging_dir = PathBuf::from(crate::rootfs_update::ROOTFS_UPDATE_STAGING_DIR);
     fs::create_dir_all(&staging_dir)?;
 
@@ -1861,10 +1866,7 @@ fn stage_rootfs_squashfs_direct(artifact_path: &Path) -> Result<()> {
         .to_string();
 
     let dest = staging_dir.join(&image_filename);
-    // Use plain file mode (0o644) — squashfs is a data image, not an executable.
     install_file_atomic_with_mode(artifact_path, &dest, Some(0o644))?;
-
-    let sha256 = compute_file_sha256(&dest)?;
 
     let version = artifact_path
         .file_name()
@@ -1872,18 +1874,30 @@ fn stage_rootfs_squashfs_direct(artifact_path: &Path) -> Result<()> {
         .and_then(|n| artifact_version_from_name("rootfs", n))
         .unwrap_or_else(|| "unknown".to_string());
 
-    if let Err(err) = crate::rootfs_update::mark_pending(&version, &dest, &sha256) {
-        warn!(
-            error = %err,
-            version,
-            "updates: failed to write rootfs pending marker; artifact staged but not marked"
-        );
-    } else {
-        info!(
-            version,
-            artifact = %dest.display(),
-            "updates: rootfs squashfs staged and pending marker written"
-        );
+    info!(
+        version,
+        artifact = %dest.display(),
+        "updates: rootfs squashfs staged; applying to inactive A/B slot"
+    );
+
+    // Apply to the inactive slot — this is what arms GRUB for the next boot.
+    match crate::rootfs_update::apply_staged_image(&dest, &version).await {
+        Ok(result) => {
+            info!(
+                version,
+                success = result.success,
+                msg = %result.message,
+                "updates: rootfs A/B apply complete"
+            );
+        }
+        Err(err) => {
+            warn!(
+                error = %err,
+                version,
+                "updates: rootfs A/B apply failed; leaving image in staging for manual retry"
+            );
+            return Err(err);
+        }
     }
 
     Ok(())
@@ -1894,11 +1908,12 @@ async fn extract_and_deploy_artifact(
     artifact_path: &Path,
     target_dir: Option<&Path>,
 ) -> Result<()> {
-    // Rootfs squashfs images are not tar-wrapped — handle them directly.
+    // Rootfs squashfs images bypass the tar/zstd flow and route into the
+    // A/B slot apply path entirely.
     if matches!(component, RepoComponent::Rootfs)
         && artifact_path.extension().and_then(|e| e.to_str()) == Some("squashfs")
     {
-        return stage_rootfs_squashfs_direct(artifact_path);
+        return stage_rootfs_squashfs_direct(artifact_path).await;
     }
 
     let artifact_file = std::fs::File::open(artifact_path)
@@ -1931,7 +1946,7 @@ async fn extract_and_deploy_artifact(
             // Also update the rootfs-update helper when bundled in the core artifact
             let helper = tmp_dir.join("rootfs-update.sh");
             if helper.exists() {
-                let helper_dest = Path::new(crate::rootfs_update::ROOTFS_UPDATE_HELPER);
+                let helper_dest = Path::new("/usr/local/lib/dayshield/rootfs-update.sh");
                 match install_executable_file_atomic(&helper, helper_dest) {
                     Ok(()) => info!(
                         target = %helper_dest.display(),
@@ -1964,56 +1979,36 @@ async fn extract_and_deploy_artifact(
             let _ = fs::remove_dir_all(&tmp_dir);
         }
         RepoComponent::Rootfs => {
-            // Stage the rootfs image artifact for initramfs-driven activation
-            // on the next boot.  The artifact is a .tar.zst containing a
-            // rootfs image file (e.g. rootfs.squashfs).
-            let staging_dir = PathBuf::from(crate::rootfs_update::ROOTFS_UPDATE_STAGING_DIR);
-            fs::create_dir_all(&staging_dir)?;
-
-            // Extract to a temp location first
+            // Legacy .tar.zst rootfs path: extract the embedded squashfs and
+            // route it through the A/B slot apply helper.  Newer releases ship
+            // a bare .squashfs and are handled by the earlier branch above
+            // before we ever reach this tar/zstd decoder.
             let tmp_dir = PathBuf::from("/tmp/dayshield-rootfs-stage");
             fs::create_dir_all(&tmp_dir)?;
             archive
                 .unpack(&tmp_dir)
                 .with_context(|| "failed to extract rootfs artifact")?;
 
-            // Find the rootfs image file inside the extracted archive
             let image_path = find_rootfs_image(&tmp_dir)?;
+            let staging_dir = PathBuf::from(crate::rootfs_update::ROOTFS_UPDATE_STAGING_DIR);
+            fs::create_dir_all(&staging_dir)?;
             let image_filename = image_path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .unwrap_or("rootfs.img")
+                .unwrap_or("rootfs.squashfs")
                 .to_string();
-
             let dest = staging_dir.join(&image_filename);
-            install_executable_file_atomic(&image_path, &dest)?;
+            install_file_atomic_with_mode(&image_path, &dest, Some(0o644))?;
             let _ = fs::remove_dir_all(&tmp_dir);
 
-            // Compute SHA-256 of the staged image for integrity verification
-            let sha256 = compute_file_sha256(&dest)?;
-
-            // Extract version from artifact filename, e.g. rootfs-v1.2.3.tar.zst
             let version = artifact_path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .and_then(|n| artifact_version_from_name("rootfs", n))
                 .unwrap_or_else(|| "unknown".to_string());
 
-            // Write the pending-version marker for rootfs_update and the
-            // initramfs to pick up on the next boot.
-            if let Err(err) = crate::rootfs_update::mark_pending(&version, &dest, &sha256) {
-                warn!(
-                    error = %err,
-                    version,
-                    "updates: failed to write rootfs pending marker; artifact staged but not marked"
-                );
-            } else {
-                info!(
-                    version,
-                    artifact = %dest.display(),
-                    "updates: rootfs artifact staged and pending marker written"
-                );
-            }
+            crate::rootfs_update::apply_staged_image(&dest, &version).await
+                .with_context(|| "rootfs A/B slot apply failed")?;
         }
     }
 

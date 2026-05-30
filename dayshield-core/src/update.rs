@@ -2054,7 +2054,7 @@ pub async fn get_status(state: &AppState) -> UpdatesStatus {
     let available_update_count = components.iter().filter(|c| c.update_available).count();
 
     // Include reboot_required from the rootfs pending-update marker if present.
-    let rootfs_reboot_required = crate::rootfs_update::reboot_state_sync();
+    let rootfs_reboot_required = crate::rootfs_update::reboot_state().await.reboot_required;
 
     UpdatesStatus {
         settings,

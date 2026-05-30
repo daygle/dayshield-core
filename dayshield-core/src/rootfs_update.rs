@@ -601,6 +601,17 @@ pub async fn apply_staged_image(staged_image_path: &Path, version: &str) -> Resu
         target_slot.as_str()
     ));
 
+    // ── Preserve identity / admin state into the new slot ─────────────────
+    // The squashfs ships build-time defaults for these paths.  We need the
+    // running system's values to survive the slot switch (root password, SSH
+    // host identity, hostname, timezone, fstab UUIDs, network config,
+    // DayShield admin credentials & certificates, etc.) — otherwise the new
+    // slot boots with a default password and the user loses everything.
+    //
+    // `/var` is shared between slots and is NOT touched here.
+    let preserved = copy_identity_files_to_slot(mount_path, &mut details).await;
+    details.push(format!("preserved {preserved} identity files/directories"));
+
     // ── Copy the new kernel + initrd to /boot/dayshield/slot-X/ ───────────
     // The slot's own /boot directory (visible at mount_path/boot) holds the
     // kernel installed alongside the new rootfs.  Copy the highest-versioned
@@ -886,6 +897,135 @@ async fn running_root_device() -> Option<PathBuf> {
     } else {
         Some(PathBuf::from(path))
     }
+}
+
+/// Paths under `/` that must survive a rootfs update.  Sourced from the
+/// running rootfs (`/etc/...`) and copied into the new slot mount.  Anything
+/// listed here overrides the squashfs's build-time default.
+///
+/// `/var` is shared between slots and never touched.
+const IDENTITY_PATHS: &[&str] = &[
+    // Mount layout — installer's UUIDs/labels for this specific disk.
+    "/etc/fstab",
+    // Persistent identity.
+    "/etc/machine-id",
+    "/etc/hostname",
+    "/etc/hosts",
+    // User database — root password.
+    "/etc/shadow",
+    "/etc/shadow-",
+    "/etc/gshadow",
+    "/etc/gshadow-",
+    "/etc/passwd",
+    "/etc/passwd-",
+    "/etc/group",
+    "/etc/group-",
+    "/etc/subuid",
+    "/etc/subgid",
+    "/etc/sudoers",
+    "/etc/sudoers.d",
+    // Locale & time.
+    "/etc/timezone",
+    "/etc/localtime",
+    "/etc/locale.conf",
+    "/etc/default/locale",
+    "/etc/default/keyboard",
+    // SSH server identity (host keys generated on first boot).
+    "/etc/ssh/sshd_config",
+    // DayShield admin / config / certs / TLS.
+    "/etc/dayshield",
+    // Network & services that DayShield writes to.
+    "/etc/systemd/network",
+    "/etc/systemd/timesyncd.conf",
+    "/etc/chrony/chrony.conf",
+    "/etc/nftables.d",
+    "/etc/wireguard",
+    "/etc/letsencrypt",
+    "/etc/kea",
+    "/etc/cloudflared",
+    "/etc/crowdsec",
+    "/etc/suricata",
+    "/etc/ppp",
+    // GRUB user overrides.
+    "/etc/default/grub",
+];
+
+/// Copy each identity path from the running rootfs into `slot_root`.
+/// Returns the number of paths successfully copied.
+async fn copy_identity_files_to_slot(slot_root: &Path, details: &mut Vec<String>) -> usize {
+    let mut count = 0usize;
+    for src_rel in IDENTITY_PATHS {
+        // src_rel starts with /, so we use trim_start_matches to avoid Path
+        // join eating the rest.
+        let trimmed = src_rel.trim_start_matches('/');
+        let src = Path::new("/").join(trimmed);
+        let dst = slot_root.join(trimmed);
+
+        // Skip when source doesn't exist (not applicable on this install).
+        if !src.exists() && !src.is_symlink() {
+            continue;
+        }
+        if let Some(parent) = dst.parent() {
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                details.push(format!(
+                    "skip {}: failed to create {}: {err}",
+                    src.display(),
+                    parent.display()
+                ));
+                continue;
+            }
+        }
+        // For directories use cp -a; for files copy with permissions.
+        let result = if src.is_dir() {
+            tokio::process::Command::new("cp")
+                .args(["-a", "--no-target-directory"])
+                .arg(&src)
+                .arg(&dst)
+                .output()
+                .await
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        } else {
+            tokio::process::Command::new("cp")
+                .args(["-a"])
+                .arg(&src)
+                .arg(&dst)
+                .output()
+                .await
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        if result {
+            count += 1;
+        } else {
+            details.push(format!("warning: failed to preserve {}", src.display()));
+        }
+    }
+
+    // SSH host keys: match the glob /etc/ssh/ssh_host_* (key + .pub pairs).
+    if let Ok(entries) = std::fs::read_dir("/etc/ssh") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("ssh_host_") {
+                let dst = slot_root.join("etc/ssh").join(name);
+                let _ = std::fs::create_dir_all(dst.parent().unwrap());
+                let ok = tokio::process::Command::new("cp")
+                    .args(["-a"])
+                    .arg(entry.path())
+                    .arg(&dst)
+                    .output()
+                    .await
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                if ok {
+                    count += 1;
+                }
+            }
+        }
+    }
+
+    count
 }
 
 /// If the device is currently mounted, return its mount point.

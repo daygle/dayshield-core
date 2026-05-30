@@ -517,6 +517,35 @@ pub async fn apply_staged_image(staged_image_path: &Path, version: &str) -> Resu
         .with_context(|| "failed to resolve target slot device")?;
     details.push(format!("target partition: {}", target_dev.display()));
 
+    // ── Safety checks before we destructively format the target ────────────
+
+    // 1. The target slot device must NOT be the same as the running root.
+    //    This guards against single-rootfs installs (no A/B layout on disk)
+    //    where both labels could end up pointing at the same partition.
+    let running_dev = running_root_device().await.unwrap_or_default();
+    if !running_dev.as_os_str().is_empty() && running_dev == target_dev {
+        anyhow::bail!(
+            "target slot device {} is the running root partition — \
+             this system does not appear to have an A/B partition layout. \
+             Reinstall from a current DayShield ISO (which creates DS_ROOT_A and DS_ROOT_B) \
+             before in-place rootfs updates can work.",
+            target_dev.display()
+        );
+    }
+
+    // 2. The target slot device must not be currently mounted anywhere.
+    //    mkfs.ext4 refuses to format mounted filesystems for obvious reasons,
+    //    but the user-facing error is much clearer if we catch this ourselves.
+    if let Some(mp) = device_mountpoint(&target_dev).await {
+        anyhow::bail!(
+            "target slot device {} is currently mounted at {}. \
+             Refusing to format. (This usually means the system was installed \
+             with a non-A/B layout; reinstall from a current DayShield ISO.)",
+            target_dev.display(),
+            mp.display()
+        );
+    }
+
     // ── Format the target partition fresh ─────────────────────────────────
     info!(slot = target_slot.as_str(), "rootfs: formatting target slot");
     run_status(
@@ -813,17 +842,69 @@ fn sync_grubenv_get(key: &str) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 async fn run_status(cmd: &mut Command, label: &str) -> Result<()> {
-    let status = cmd
+    let output = cmd
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .status()
+        .output()
         .await
         .with_context(|| format!("failed to spawn {label}"))?;
-    if !status.success() {
-        anyhow::bail!("{label} exited with status {}", status);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let code = output
+            .status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "?".to_string());
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("{label} exited with status {}", output.status)
+        };
+        anyhow::bail!("{label} failed (exit {code}): {detail}");
     }
     Ok(())
+}
+
+/// Block device underlying `/`, e.g. `/dev/sda4`.  Used to verify the target
+/// slot is NOT the currently-running root partition.
+async fn running_root_device() -> Option<PathBuf> {
+    let output = Command::new("findmnt")
+        .args(["-n", "-o", "SOURCE", "/"])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
+}
+
+/// If the device is currently mounted, return its mount point.
+async fn device_mountpoint(dev: &Path) -> Option<PathBuf> {
+    let output = Command::new("findmnt")
+        .args(["-n", "-o", "TARGET", "--source"])
+        .arg(dev)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
 }
 
 fn pick_latest_with_prefix(dir: &Path, prefix: &str) -> Result<PathBuf> {

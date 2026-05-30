@@ -37,7 +37,7 @@ use crate::{
 
 const DEFAULT_SUGGESTIONS_PATH: &str = "/var/lib/dayshield/ai/suggestions.json";
 const DEFAULT_ACTION_LOG_PATH: &str = "/var/log/dayshield/ai_actions.log";
-const DEFAULT_INTENTS_PATH: &str = "/etc/dayshield/intents.json";
+const DEFAULT_INTENTS_PATH: &str = "/var/lib/dayshield/ai/intents.json";
 const DEFAULT_MODE_PATH: &str = "/var/lib/dayshield/ai/mode.json";
 const DEFAULT_AUTOMATION_SETTINGS_PATH: &str = "/var/lib/dayshield/ai/automation_settings.json";
 const ZERO_TRUST_BASELINE_PRIORITY: i32 = -125;

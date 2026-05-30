@@ -46,8 +46,9 @@ use super::verify::sha256_hex;
 // Default locations
 // ---------------------------------------------------------------------------
 
-/// Default directory where backup archives are stored.
-pub const DEFAULT_BACKUP_DIR: &str = "/etc/dayshield/backups";
+/// Default directory where backup archives are stored.  Persisted under
+/// `/var/lib` so backups survive rootfs A/B updates.
+pub const DEFAULT_BACKUP_DIR: &str = "/var/lib/dayshield/backups";
 
 /// Application version embedded in every backup's metadata.
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");

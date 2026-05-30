@@ -1969,7 +1969,7 @@ fn default_acme_renew_interval_hours() -> u64 {
 }
 
 fn default_acme_cert_storage_path() -> String {
-    "/etc/dayshield/certs".to_string()
+    "/var/lib/dayshield/certs".to_string()
 }
 
 /// ACME provider to use for certificate issuance.

@@ -36,7 +36,7 @@ use crate::{
 };
 
 /// Fallback config directory used when the config store path has no parent.
-const DEFAULT_CONFIG_DIR: &str = "/etc/dayshield/config";
+const DEFAULT_CONFIG_DIR: &str = "/var/lib/dayshield/config";
 
 // ---------------------------------------------------------------------------
 // Error type

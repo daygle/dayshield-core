@@ -35,7 +35,7 @@ use crate::{
 };
 
 const DEFAULT_SESSION_PATH: &str = "/var/lib/dayshield/captive_portal/sessions.json";
-const DEFAULT_CONFIG_DIR: &str = "/etc/dayshield/config";
+const DEFAULT_CONFIG_DIR: &str = "/var/lib/dayshield/config";
 const REAPER_INTERVAL_SECONDS: u64 = 60;
 const LISTENER_CONFIG_POLL_SECONDS: u64 = 30;
 

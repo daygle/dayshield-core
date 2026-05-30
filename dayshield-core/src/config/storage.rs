@@ -37,7 +37,10 @@ use super::models::{
 };
 
 /// Default path to the configuration directory.
-const DEFAULT_CONFIG_DIR: &str = "/etc/dayshield/config";
+///
+/// Lives under `/var/lib/` so the persisted DayShield state survives every
+/// rootfs A/B update — `/var` is on its own partition shared by both slots.
+const DEFAULT_CONFIG_DIR: &str = "/var/lib/dayshield/config";
 /// Config file name inside the config directory.
 const CONFIG_FILE: &str = "config.json";
 /// Temporary file suffix used for atomic writes.

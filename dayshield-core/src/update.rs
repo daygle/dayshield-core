@@ -25,13 +25,13 @@ const STATE_FILE: &str = "updates_state.json";
 /// Default absolute path of the persisted update state file.
 /// This constant is published so that `rootfs_update` can read the file
 /// without requiring access to AppState.
-pub const UPDATE_STATE_FILE_PATH: &str = "/etc/dayshield/config/updates_state.json";
+pub const UPDATE_STATE_FILE_PATH: &str = "/var/lib/dayshield/config/updates_state.json";
 const DEFAULT_CORE_URL: &str = "https://github.com/daygle/dayshield-core";
 const DEFAULT_UI_URL: &str = "https://github.com/daygle/dayshield-ui";
 const DEFAULT_ROOTFS_URL: &str = "https://github.com/daygle/dayshield-rootfs";
 const RUNTIME_MARKER_DIR: &str = "/var/lib/dayshield/update";
 const RUNTIME_ROLLBACK_DIR: &str = "/var/lib/dayshield/update/rollback";
-const DEFAULT_TRUSTED_SIGNERS_FILE: &str = "/etc/dayshield/update_trusted_signers";
+const DEFAULT_TRUSTED_SIGNERS_FILE: &str = "/var/lib/dayshield/update_trusted_signers";
 const ARTIFACT_STAGING_DIR: &str = "/var/lib/dayshield/update-staging";
 const UPDATE_BACKUP_KEY_FILE: &str = "update_backup_key";
 const UPDATE_HTTP_USER_AGENT: &str = concat!("dayshield-core/", env!("CARGO_PKG_VERSION"));
@@ -582,7 +582,7 @@ fn config_dir(state: &AppState) -> PathBuf {
         .config_store
         .config_path()
         .parent()
-        .unwrap_or(Path::new("/etc/dayshield/config"))
+        .unwrap_or(Path::new("/var/lib/dayshield/config"))
         .to_path_buf()
 }
 

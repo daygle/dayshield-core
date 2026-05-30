@@ -1,4 +1,4 @@
-//! User storage - persist the admin account to `/etc/dayshield/admin.json`.
+//! User storage - persist the admin account to `/var/lib/dayshield/admin.json`.
 //!
 //! # Guarantees
 //!
@@ -52,8 +52,10 @@ fn write_restricted_auth(path: &Path, data: &[u8]) -> anyhow::Result<()> {
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Default path to the persisted admin user record.
-pub const DEFAULT_ADMIN_PATH: &str = "/etc/dayshield/admin.json";
+/// Default path to the persisted admin user record.  Lives under `/var/lib`
+/// so it survives every rootfs A/B update (the STATE partition is shared
+/// between both root slots).
+pub const DEFAULT_ADMIN_PATH: &str = "/var/lib/dayshield/admin.json";
 
 // ---------------------------------------------------------------------------
 // UserStore

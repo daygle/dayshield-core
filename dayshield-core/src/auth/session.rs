@@ -31,8 +31,9 @@ use crate::auth::model::AuthError;
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Default path to the session signing key.
-pub const DEFAULT_KEY_PATH: &str = "/etc/dayshield/session.key";
+/// Default path to the session signing key.  Persisted under `/var/lib`
+/// so all logged-in sessions survive rootfs A/B updates.
+pub const DEFAULT_KEY_PATH: &str = "/var/lib/dayshield/session.key";
 
 /// Session lifetime in seconds (8 hours = 28 800 seconds).
 pub const SESSION_DURATION_SECS: u64 = 8 * 3600;

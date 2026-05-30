@@ -17,7 +17,7 @@ use crate::state::AppState;
 
 const CONFIG_FILE: &str = "system_schedules.json";
 const STATUS_FILE: &str = "system_schedules_status.json";
-const CONFIG_DIR_FALLBACK: &str = "/etc/dayshield/config";
+const CONFIG_DIR_FALLBACK: &str = "/var/lib/dayshield/config";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]

@@ -23,15 +23,17 @@ use crate::config::models::{
     DotConfig,
 };
 
-/// Path where Unbound's configuration file is written.
-const UNBOUND_CONF_PATH: &str = "/etc/dayshield/unbound.conf";
+/// Path where Unbound's configuration file is written.  Persisted under
+/// `/var/lib` so DNS settings survive rootfs A/B updates.  The base
+/// /etc/unbound/unbound.conf includes from this path.
+const UNBOUND_CONF_PATH: &str = "/var/lib/dayshield/unbound/dayshield.conf";
 
 /// Directory where DoT TLS certificate and key are stored.
-const DOT_CERTS_DIR: &str = "/etc/dayshield/certs";
+const DOT_CERTS_DIR: &str = "/var/lib/dayshield/certs";
 /// Path to the DoT TLS certificate file.
-pub const DOT_CERT_PATH: &str = "/etc/dayshield/certs/dot.crt";
+pub const DOT_CERT_PATH: &str = "/var/lib/dayshield/certs/dot.crt";
 /// Path to the DoT TLS private key file.
-pub const DOT_KEY_PATH: &str = "/etc/dayshield/certs/dot.key";
+pub const DOT_KEY_PATH: &str = "/var/lib/dayshield/certs/dot.key";
 
 // ---------------------------------------------------------------------------
 // Public API

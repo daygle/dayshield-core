@@ -932,8 +932,11 @@ const IDENTITY_PATHS: &[&str] = &[
     "/etc/default/keyboard",
     // SSH server identity (host keys generated on first boot).
     "/etc/ssh/sshd_config",
-    // DayShield admin / config / certs / TLS.
-    "/etc/dayshield",
+    // NOTE: DayShield's persistent config (admin.json, config.json, certs/,
+    // session.key, etc.) lives on /var/lib/dayshield/ which is on the shared
+    // STATE partition — it is NOT touched by the rsync, so we do not need to
+    // copy it across slots here.
+    //
     // Network & services that DayShield writes to.
     "/etc/systemd/network",
     "/etc/systemd/timesyncd.conf",

@@ -53,7 +53,7 @@ const SCHEDULE_FILE: &str = "backup_schedule.json";
 
 /// Fallback config directory used when the path cannot be derived from the
 /// store.  Matches the `DEFAULT_CONFIG_DIR` constant in `config/storage.rs`.
-const CONFIG_DIR_FALLBACK: &str = "/etc/dayshield/config";
+const CONFIG_DIR_FALLBACK: &str = "/var/lib/dayshield/config";
 
 /// Load the [`BackupScheduleConfig`] from the config directory derived from
 /// `state`.  Returns `BackupScheduleConfig::default()` if the file does not

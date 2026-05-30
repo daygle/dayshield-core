@@ -136,7 +136,7 @@ pub async fn update_config(
             .load_acme_config()
             .map_err(DotError::StorageError)?
             .map(|cfg| cfg.cert_storage_path)
-            .or_else(|| Some("/etc/dayshield/certs".to_string()))
+            .or_else(|| Some("/var/lib/dayshield/certs".to_string()))
     } else {
         None
     };

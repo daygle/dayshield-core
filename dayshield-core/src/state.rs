@@ -21,7 +21,7 @@ use crate::{
     notify::queue::NotifyQueue,
 };
 
-const DEFAULT_CONFIG_DIR: &str = "/etc/dayshield/config";
+const DEFAULT_CONFIG_DIR: &str = "/var/lib/dayshield/config";
 
 /// Known DayShield service names used as health-map keys.
 pub const SVC_NFTABLES: &str = "nftables";

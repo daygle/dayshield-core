@@ -18,14 +18,17 @@ use tokio::process::Command;
 use tracing::{info, warn};
 
 pub const CONFIG_DIR: &str = "/etc/kea";
-pub const DAYSHIELD_CONFIG_DIR: &str = "/etc/dayshield";
+pub const DAYSHIELD_CONFIG_DIR: &str = "/var/lib/dayshield/kea";
 pub const DATA_DIR: &str = "/var/lib/kea";
 
-pub const DHCP4_DAYSHIELD_CONF_PATH: &str = "/etc/dayshield/kea-dhcp4.conf";
+// DayShield-authored Kea configs live under /var so DHCP settings survive
+// rootfs A/B updates.  Kea itself still reads from /etc/kea/, which is a
+// symlink target the install-time setup wires up to the /var paths.
+pub const DHCP4_DAYSHIELD_CONF_PATH: &str = "/var/lib/dayshield/kea/kea-dhcp4.conf";
 pub const DHCP4_SYSTEM_CONF_PATH: &str = "/etc/kea/kea-dhcp4.conf";
 pub const DHCP4_LEASES_PATH: &str = "/var/lib/kea/kea-leases4.csv";
 
-pub const DHCP6_DAYSHIELD_CONF_PATH: &str = "/etc/dayshield/kea-dhcp6.conf";
+pub const DHCP6_DAYSHIELD_CONF_PATH: &str = "/var/lib/dayshield/kea/kea-dhcp6.conf";
 pub const DHCP6_SYSTEM_CONF_PATH: &str = "/etc/kea/kea-dhcp6.conf";
 pub const DHCP6_LEASES_PATH: &str = "/var/lib/kea/kea-leases6.csv";
 
@@ -176,7 +179,8 @@ async fn disable_server(server: KeaServer) -> Result<()> {
 
 async fn prepare_runtime(_server: KeaServer) -> Result<()> {
     std::fs::create_dir_all(CONFIG_DIR).context("failed to create /etc/kea")?;
-    std::fs::create_dir_all(DAYSHIELD_CONFIG_DIR).context("failed to create /etc/dayshield")?;
+    std::fs::create_dir_all(DAYSHIELD_CONFIG_DIR)
+        .context("failed to create /var/lib/dayshield/kea")?;
     std::fs::create_dir_all(DATA_DIR).context("failed to create /var/lib/kea")?;
 
     set_directory_permissions_best_effort(CONFIG_DIR);

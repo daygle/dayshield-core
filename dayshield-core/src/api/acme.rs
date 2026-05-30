@@ -128,7 +128,7 @@ pub async fn get_config(
             cloudflare_zone_id: None,
             cloudflare_api_token: None,
             provider: AcmeProvider::LetsEncrypt,
-            cert_storage_path: "/etc/dayshield/certs".into(),
+            cert_storage_path: "/var/lib/dayshield/certs".into(),
         });
 
     info!(enabled = cfg.enabled, "acme: loaded config");

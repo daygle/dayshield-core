@@ -312,6 +312,27 @@ pub fn is_valid_ipv6_addr(addr: &str) -> bool {
     addr.parse::<std::net::Ipv6Addr>().is_ok()
 }
 
+/// Return `true` if `addr` is an IPv6 link-local unicast address (`fe80::/10`).
+pub fn is_ipv6_link_local_addr(addr: &str) -> bool {
+    addr.trim()
+        .parse::<std::net::Ipv6Addr>()
+        .map(|ip| (ip.segments()[0] & 0xffc0) == 0xfe80)
+        .unwrap_or(false)
+}
+
+/// Return `true` if `value` is an IPv6 link-local address or CIDR.
+pub fn is_ipv6_link_local_cidr_or_addr(value: &str) -> bool {
+    let value = value.trim();
+    if let Some((addr, prefix)) = value.split_once('/') {
+        match prefix.parse::<u8>() {
+            Ok(prefix) if prefix <= 128 => is_ipv6_link_local_addr(addr),
+            _ => false,
+        }
+    } else {
+        is_ipv6_link_local_addr(value)
+    }
+}
+
 /// Return `true` if `start` and `end` are valid IPv4 addresses and
 /// `start` ≤ `end` in numeric order.
 pub fn is_valid_ipv4_range(start: &str, end: &str) -> bool {

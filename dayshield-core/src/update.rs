@@ -2007,7 +2007,8 @@ async fn extract_and_deploy_artifact(
                 .and_then(|n| artifact_version_from_name("rootfs", n))
                 .unwrap_or_else(|| "unknown".to_string());
 
-            crate::rootfs_update::apply_staged_image(&dest, &version).await
+            crate::rootfs_update::apply_staged_image(&dest, &version)
+                .await
                 .with_context(|| "rootfs A/B slot apply failed")?;
         }
     }

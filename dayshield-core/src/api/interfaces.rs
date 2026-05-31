@@ -24,9 +24,9 @@ use tracing::{info, warn};
 
 use crate::{
     config::models::{
-        ensure_ipv6_allowed, is_valid_cidr, is_valid_interface_name, is_valid_mss, is_valid_mtu,
-        is_valid_vlan_id, Gateway, Interface, Ipv6Mode, RouterAdvertisementMode, SystemConfig,
-        WanMode,
+        ensure_ipv6_allowed, is_ipv6_link_local_cidr_or_addr, is_valid_cidr,
+        is_valid_interface_name, is_valid_mss, is_valid_mtu, is_valid_vlan_id, Gateway, Interface,
+        Ipv6Mode, RouterAdvertisementMode, SystemConfig, WanMode,
     },
     engine::gateway::list_kernel_gateways_with_ipv6,
     engine::interfaces::{
@@ -230,7 +230,7 @@ impl InterfaceResponse {
         let (ipv6_address, ipv6_prefix) = iface
             .addresses
             .iter()
-            .find(|cidr| cidr.contains(':'))
+            .find(|cidr| cidr.contains(':') && !is_ipv6_link_local_cidr_or_addr(cidr))
             .and_then(|cidr| {
                 let parts: Vec<&str> = cidr.split('/').collect();
                 match parts.as_slice() {
@@ -456,7 +456,9 @@ impl InterfaceRequest {
             }
             if matches!(effective_mode, Ipv6Mode::Static) {
                 if let (Some(addr), Some(prefix)) = (self.ipv6_address, self.ipv6_prefix) {
-                    addresses.push(format!("{}/{}", addr, prefix));
+                    if !is_ipv6_link_local_cidr_or_addr(&addr) {
+                        addresses.push(format!("{}/{}", addr, prefix));
+                    }
                 }
             }
         }
@@ -1003,6 +1005,38 @@ mod tests {
     use super::{InterfaceRequest, InterfaceResponse};
     use crate::config::models::{Interface, Ipv6Mode, WanMode};
 
+    fn base_request() -> InterfaceRequest {
+        InterfaceRequest {
+            name: "eth0".into(),
+            description: None,
+            r#type: Some("ethernet".into()),
+            enabled: true,
+            dhcp4: false,
+            dhcp6: Some(false),
+            accept_ra: Some(false),
+            ipv6_mode: Some("static".into()),
+            track_source_interface: None,
+            track_prefix_id: None,
+            delegated_prefix_len: None,
+            ra_mode: None,
+            ia_pd_hint_len: None,
+            mtu: None,
+            mss: None,
+            vlan: None,
+            parent_interface: None,
+            wan_mode: None,
+            pppoe_username: None,
+            pppoe_password: None,
+            ipv4_address: None,
+            ipv4_prefix: None,
+            ipv6_address: None,
+            ipv6_prefix: None,
+            gateway: None,
+            block_private_networks: false,
+            block_bogon_networks: false,
+        }
+    }
+
     #[test]
     fn interface_request_to_interface_preserves_vlan_parent() {
         let req = InterfaceRequest {
@@ -1038,6 +1072,18 @@ mod tests {
         let iface = req.to_interface();
         assert_eq!(iface.vlan, Some(100));
         assert_eq!(iface.parent_interface.as_deref(), Some("eth0"));
+        assert_eq!(iface.addresses, vec!["192.168.100.1/24".to_string()]);
+    }
+
+    #[test]
+    fn interface_request_to_interface_ignores_ipv6_link_local() {
+        let mut req = base_request();
+        req.ipv4_address = Some("192.168.100.1".into());
+        req.ipv4_prefix = Some(24);
+        req.ipv6_address = Some("fe80::be24:11ff:fef3:4e47".into());
+        req.ipv6_prefix = Some(64);
+
+        let iface = req.to_interface();
         assert_eq!(iface.addresses, vec!["192.168.100.1/24".to_string()]);
     }
 
@@ -1187,5 +1233,42 @@ mod tests {
         assert_eq!(resp.r#type, "vlan");
         assert_eq!(resp.vlan, Some(100));
         assert_eq!(resp.parent_interface.as_deref(), Some("eth0"));
+    }
+
+    #[test]
+    fn interface_response_from_interface_skips_link_local_ipv6() {
+        let iface = Interface {
+            name: "eth0".into(),
+            description: None,
+            addresses: vec![
+                "192.168.100.1/24".into(),
+                "fe80::be24:11ff:fef3:4e47/64".into(),
+                "2001:db8::2/64".into(),
+            ],
+            mtu: None,
+            mss: None,
+            enabled: true,
+            dhcp4: false,
+            dhcp6: false,
+            accept_ra: false,
+            ipv6_mode: Some(Ipv6Mode::Static),
+            track_source_interface: None,
+            track_prefix_id: None,
+            delegated_prefix_len: None,
+            ra_mode: None,
+            ia_pd_hint_len: None,
+            vlan: None,
+            parent_interface: None,
+            wan_mode: None,
+            pppoe_username: None,
+            pppoe_password: None,
+            gateway: None,
+            block_private_networks: false,
+            block_bogon_networks: false,
+        };
+
+        let resp = InterfaceResponse::from_interface(&iface);
+        assert_eq!(resp.ipv6_address.as_deref(), Some("2001:db8::2"));
+        assert_eq!(resp.ipv6_prefix, Some(64));
     }
 }

@@ -23,7 +23,10 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
-use crate::config::models::{is_valid_cidr, is_valid_interface_name, Interface, Ipv6Mode, WanMode};
+use crate::config::models::{
+    is_ipv6_link_local_cidr_or_addr, is_valid_cidr, is_valid_interface_name, Interface, Ipv6Mode,
+    WanMode,
+};
 use crate::engine::{prefix_delegation, radvd};
 
 const DHCP_LEASE_DIR: &str = "/var/lib/dhcp";
@@ -185,6 +188,8 @@ struct IpAddrEntry {
 struct IpAddrInfo {
     local: String,
     prefixlen: u8,
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -245,7 +250,7 @@ pub async fn list_kernel_interfaces() -> Result<Vec<KernelInterface>, InterfaceE
         let cidrs: Vec<String> = entry
             .addr_info
             .iter()
-            .map(|a| format!("{}/{}", a.local, a.prefixlen))
+            .filter_map(kernel_address_cidr)
             .collect();
         addr_map.insert(entry.ifname.clone(), cidrs);
     }
@@ -558,15 +563,19 @@ pub async fn sync_interfaces_with_ipv6(
             })
             .cloned()
             .collect::<Vec<String>>();
-        let addrs_match = (manage_ipv4_static || manage_ipv6_static)
-            && desired_addrs.len() == managed_kernel_addrs.len()
-            && desired_addrs.iter().all(|a| {
-                managed_kernel_addrs
-                    .iter()
-                    .any(|kernel_addr| kernel_addr == a)
-            });
+        let addrs_match = if manage_ipv4_static || manage_ipv6_static {
+            desired_addrs.len() == managed_kernel_addrs.len()
+                && desired_addrs.iter().all(|a| {
+                    managed_kernel_addrs
+                        .iter()
+                        .any(|kernel_addr| kernel_addr == a)
+                })
+        } else {
+            true
+        };
+        let dhcp4_needs_reset = dhcp4_needs_address_reset(config, kernel_iface);
 
-        if needs_pppoe_apply || !already_up || !addrs_match {
+        if needs_pppoe_apply || dhcp4_needs_reset || !already_up || !addrs_match {
             apply_interface_with_ipv6(config, ipv6_enabled).await?;
         } else if config.enabled {
             // Keep RA policy synchronized even when addresses/state are unchanged.
@@ -708,6 +717,33 @@ fn managed_static_address_families(config: &Interface, ipv6_enabled: bool) -> (b
     )
 }
 
+fn is_ipv4_cidr(cidr: &str) -> bool {
+    !cidr.contains(':')
+}
+
+fn ipv4_address_count(addresses: &[String]) -> usize {
+    addresses.iter().filter(|addr| is_ipv4_cidr(addr)).count()
+}
+
+fn dhcp4_needs_address_reset(config: &Interface, kernel_iface: Option<&KernelInterface>) -> bool {
+    config.enabled
+        && config.dhcp4
+        && kernel_iface
+            .map(|iface| ipv4_address_count(&iface.addresses) != 1)
+            .unwrap_or(false)
+}
+
+fn kernel_address_cidr(addr: &IpAddrInfo) -> Option<String> {
+    let is_ipv6 = addr.local.contains(':');
+    if is_ipv6
+        && (addr.scope.as_deref() == Some("link") || is_ipv6_link_local_cidr_or_addr(&addr.local))
+    {
+        return None;
+    }
+
+    Some(format!("{}/{}", addr.local, addr.prefixlen))
+}
+
 fn desired_static_addresses(config: &Interface, ipv6_enabled: bool) -> Vec<&str> {
     let (manage_ipv4_static, manage_ipv6_static) =
         managed_static_address_families(config, ipv6_enabled);
@@ -717,7 +753,7 @@ fn desired_static_addresses(config: &Interface, ipv6_enabled: bool) -> Vec<&str>
         .iter()
         .filter(|addr| {
             if addr.contains(':') {
-                manage_ipv6_static
+                manage_ipv6_static && !is_ipv6_link_local_cidr_or_addr(addr)
             } else {
                 manage_ipv4_static
             }
@@ -773,6 +809,10 @@ async fn flush_interface_addresses(name: &str) {
     let _ = run_ip(&["-6", "addr", "flush", "dev", name, "scope", "global"]).await;
 }
 
+async fn flush_ipv4_global_addresses(name: &str) -> Result<(), InterfaceError> {
+    run_ip(&["-4", "addr", "flush", "dev", name, "scope", "global"]).await
+}
+
 pub(crate) async fn teardown_interface_runtime(name: &str) {
     stop_pppoe(name).await;
     remove_pppoe_config(name).await;
@@ -792,8 +832,9 @@ pub(crate) async fn teardown_interface_runtime(name: &str) {
 async fn start_dhcp_client(name: &str) -> Result<(), InterfaceError> {
     let pid_file = format!("/run/dhclient.{name}.pid");
 
-    // Release any existing lease and clean up the old process first.
+    // Release any existing lease and clean up stale aliases before requesting a new lease.
     stop_dhcp_client(name).await;
+    flush_ipv4_global_addresses(name).await?;
     ensure_dhclient_lease_dirs().await?;
 
     info!(name = %name, pid_file = %pid_file, "interfaces: starting dhclient");
@@ -1361,6 +1402,20 @@ mod tests {
 
     #[test]
     fn desired_static_addresses_respects_dynamic_modes() {
+        let static_iface = iface(
+            "eth2",
+            vec![
+                "192.0.2.4/24",
+                "fe80::be24:11ff:fef3:4e47/64",
+                "2001:db8::4/64",
+            ],
+            true,
+        );
+        assert_eq!(
+            desired_static_addresses(&static_iface, true),
+            vec!["192.0.2.4/24", "2001:db8::4/64"]
+        );
+
         let mut dhcp = iface("eth0", vec!["192.0.2.2/24", "2001:db8::2/64"], true);
         dhcp.dhcp4 = true;
         assert_eq!(
@@ -1371,6 +1426,57 @@ mod tests {
         let mut pppoe = iface("eth1", vec!["192.0.2.3/24", "2001:db8::3/64"], true);
         pppoe.wan_mode = Some(WanMode::Pppoe);
         assert!(desired_static_addresses(&pppoe, true).is_empty());
+    }
+
+    #[test]
+    fn kernel_address_cidr_skips_ipv6_link_local() {
+        let link_local = IpAddrInfo {
+            local: "fe80::be24:11ff:fef3:4e47".into(),
+            prefixlen: 64,
+            scope: Some("link".into()),
+        };
+        assert_eq!(kernel_address_cidr(&link_local), None);
+
+        let global = IpAddrInfo {
+            local: "2001:db8::2".into(),
+            prefixlen: 64,
+            scope: Some("global".into()),
+        };
+        assert_eq!(
+            kernel_address_cidr(&global).as_deref(),
+            Some("2001:db8::2/64")
+        );
+    }
+
+    #[test]
+    fn dhcp4_needs_address_reset_when_ipv4_count_is_not_one() {
+        let mut config = iface("ens18", vec![], true);
+        config.dhcp4 = true;
+
+        let mut kernel = KernelInterface {
+            name: "ens18".into(),
+            mac: None,
+            mtu: Some(1500),
+            state: "UP".into(),
+            flags: vec!["UP".into()],
+            addresses: vec!["192.168.20.18/24".into()],
+            rx_packets: None,
+            rx_bytes: None,
+            tx_packets: None,
+            tx_bytes: None,
+        };
+
+        assert!(!dhcp4_needs_address_reset(&config, Some(&kernel)));
+
+        kernel.addresses.clear();
+        assert!(dhcp4_needs_address_reset(&config, Some(&kernel)));
+
+        kernel.addresses.push("192.168.20.18/24".into());
+        kernel.addresses.push("192.168.20.19/24".into());
+        assert!(dhcp4_needs_address_reset(&config, Some(&kernel)));
+
+        config.dhcp4 = false;
+        assert!(!dhcp4_needs_address_reset(&config, Some(&kernel)));
     }
 
     #[test]

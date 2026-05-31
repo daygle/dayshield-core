@@ -1141,9 +1141,7 @@ pub async fn get_rootfs_status() -> impl IntoResponse {
 }
 
 /// Handler: trigger an immediate check for a new rootfs image artifact.
-pub async fn check_rootfs_updates(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn check_rootfs_updates(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let _ = update::check_for_updates(&state).await;
     Json(rootfs_update::status().await)
 }
@@ -1171,7 +1169,12 @@ pub async fn stage_rootfs_update(
     tokio::spawn(async move {
         match rootfs_update::stage_update().await {
             Ok(result) => {
-                audit_sensitive_rootfs_result("stage", &user_clone, result.success, &result.message);
+                audit_sensitive_rootfs_result(
+                    "stage",
+                    &user_clone,
+                    result.success,
+                    &result.message,
+                );
                 crate::live_logs::ui::publish(crate::live_logs::LogEvent::UpdateEvent {
                     timestamp: chrono::Utc::now().to_rfc3339(),
                     operation: "stage".to_string(),
@@ -1229,7 +1232,12 @@ pub async fn apply_rootfs_update(
     tokio::spawn(async move {
         match rootfs_update::apply_update().await {
             Ok(result) => {
-                audit_sensitive_rootfs_result("apply", &user_clone, result.success, &result.message);
+                audit_sensitive_rootfs_result(
+                    "apply",
+                    &user_clone,
+                    result.success,
+                    &result.message,
+                );
                 crate::live_logs::ui::publish(crate::live_logs::LogEvent::UpdateEvent {
                     timestamp: chrono::Utc::now().to_rfc3339(),
                     operation: "apply".to_string(),
@@ -1434,7 +1442,6 @@ fn audit_sensitive_rootfs_error(operation: &str, user: &AuthenticatedUser, err: 
         "rootfs: sensitive operation failed"
     );
 }
-
 
 // ---------------------------------------------------------------------------
 // Software updates

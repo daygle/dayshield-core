@@ -16,6 +16,8 @@
 //! routes are managed by `dhclient` / `pppd` respectively.  This engine only
 //! writes routes for gateways that have an explicit `gateway_ip`.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tracing::{debug, info, warn};
@@ -102,13 +104,24 @@ async fn list_kernel_gateways_for_family(args: &[&str]) -> Vec<KernelGateway> {
 
     let entries: Vec<IpRouteEntry> = serde_json::from_slice(&out.stdout).unwrap_or_default();
 
-    entries
+    dedupe_kernel_gateways(
+        entries
+            .into_iter()
+            .map(|e| KernelGateway {
+                interface: e.dev,
+                gateway_ip: e.gateway,
+                state: GatewayState::Unknown,
+            })
+            .collect(),
+    )
+}
+
+fn dedupe_kernel_gateways(gateways: Vec<KernelGateway>) -> Vec<KernelGateway> {
+    let mut seen = HashSet::new();
+
+    gateways
         .into_iter()
-        .map(|e| KernelGateway {
-            interface: e.dev,
-            gateway_ip: e.gateway,
-            state: GatewayState::Unknown,
-        })
+        .filter(|gateway| seen.insert((gateway.interface.clone(), gateway.gateway_ip.clone())))
         .collect()
 }
 
@@ -260,4 +273,35 @@ pub async fn probe_all_gateways(gateways: &[Gateway]) -> Vec<(&Gateway, GatewayS
     }
 
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{dedupe_kernel_gateways, GatewayState, KernelGateway};
+
+    fn kernel_gateway(interface: &str, gateway_ip: Option<&str>) -> KernelGateway {
+        KernelGateway {
+            interface: interface.to_string(),
+            gateway_ip: gateway_ip.map(str::to_string),
+            state: GatewayState::Unknown,
+        }
+    }
+
+    #[test]
+    fn dedupe_kernel_gateways_drops_exact_route_duplicates() {
+        let gateways = dedupe_kernel_gateways(vec![
+            kernel_gateway("ens18", Some("192.168.20.1")),
+            kernel_gateway("ens18", Some("192.168.20.1")),
+            kernel_gateway("ens19", Some("192.168.30.1")),
+            kernel_gateway("ens18", Some("192.168.20.254")),
+        ]);
+
+        assert_eq!(gateways.len(), 3);
+        assert_eq!(gateways[0].interface, "ens18");
+        assert_eq!(gateways[0].gateway_ip.as_deref(), Some("192.168.20.1"));
+        assert_eq!(gateways[1].interface, "ens19");
+        assert_eq!(gateways[1].gateway_ip.as_deref(), Some("192.168.30.1"));
+        assert_eq!(gateways[2].interface, "ens18");
+        assert_eq!(gateways[2].gateway_ip.as_deref(), Some("192.168.20.254"));
+    }
 }

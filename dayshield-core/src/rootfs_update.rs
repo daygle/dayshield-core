@@ -197,8 +197,7 @@ fn write_slots_state(state: &SlotsState) -> Result<()> {
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let text = serde_json::to_string_pretty(state)?;
-    std::fs::write(SLOTS_FILE, text)
-        .with_context(|| format!("failed to write {SLOTS_FILE}"))?;
+    std::fs::write(SLOTS_FILE, text).with_context(|| format!("failed to write {SLOTS_FILE}"))?;
     Ok(())
 }
 
@@ -492,7 +491,10 @@ fn slot_boot_dir(slot: Slot) -> PathBuf {
 
 /// Apply the staged rootfs squashfs at `staged_image_path` to the inactive
 /// slot.  Called from `update.rs` after the download + verify step.
-pub async fn apply_staged_image(staged_image_path: &Path, version: &str) -> Result<RootfsActionResult> {
+pub async fn apply_staged_image(
+    staged_image_path: &Path,
+    version: &str,
+) -> Result<RootfsActionResult> {
     let _guard = operation_lock().lock().await;
 
     let mut details = Vec::new();
@@ -547,7 +549,10 @@ pub async fn apply_staged_image(staged_image_path: &Path, version: &str) -> Resu
     }
 
     // ── Format the target partition fresh ─────────────────────────────────
-    info!(slot = target_slot.as_str(), "rootfs: formatting target slot");
+    info!(
+        slot = target_slot.as_str(),
+        "rootfs: formatting target slot"
+    );
     run_status(
         Command::new(MKFS_BIN)
             .args(["-F", "-L", target_slot.label()])
@@ -555,7 +560,13 @@ pub async fn apply_staged_image(staged_image_path: &Path, version: &str) -> Resu
         "mkfs.ext4",
     )
     .await
-    .with_context(|| format!("failed to format {} as {}", target_dev.display(), target_slot.label()))?;
+    .with_context(|| {
+        format!(
+            "failed to format {} as {}",
+            target_dev.display(),
+            target_slot.label()
+        )
+    })?;
     details.push(format!(
         "formatted {} as ext4 with label {}",
         target_dev.display(),
@@ -563,8 +574,7 @@ pub async fn apply_staged_image(staged_image_path: &Path, version: &str) -> Resu
     ));
 
     // ── Mount and unsquashfs ──────────────────────────────────────────────
-    let mount_dir = tempfile::tempdir()
-        .with_context(|| "failed to create temp mount dir")?;
+    let mount_dir = tempfile::tempdir().with_context(|| "failed to create temp mount dir")?;
     let mount_path = mount_dir.path();
 
     run_status(
@@ -575,7 +585,13 @@ pub async fn apply_staged_image(staged_image_path: &Path, version: &str) -> Resu
         "mount",
     )
     .await
-    .with_context(|| format!("failed to mount {} at {}", target_dev.display(), mount_path.display()))?;
+    .with_context(|| {
+        format!(
+            "failed to mount {} at {}",
+            target_dev.display(),
+            mount_path.display()
+        )
+    })?;
 
     // Use a guard so we umount even on early-return.
     let mount_guard = MountGuard(mount_path.to_path_buf());
@@ -665,8 +681,7 @@ pub async fn apply_staged_image(staged_image_path: &Path, version: &str) -> Resu
 
     info!(
         slot = target_slot.as_str(),
-        version,
-        "rootfs: update applied; reboot required"
+        version, "rootfs: update applied; reboot required"
     );
 
     let status = status().await;
@@ -823,8 +838,7 @@ pub fn signal_boot_success() -> Result<()> {
 
     info!(
         slot = running_slot.as_str(),
-        auto_reverted,
-        "rootfs: boot success confirmed"
+        auto_reverted, "rootfs: boot success confirmed"
     );
     Ok(())
 }
@@ -1102,19 +1116,12 @@ pub async fn apply_update() -> Result<RootfsActionResult> {
     let mut candidates: Vec<PathBuf> = std::fs::read_dir(staging)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| {
-            p.extension().and_then(|e| e.to_str()) == Some("squashfs")
-        })
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("squashfs"))
         .collect();
-    candidates.sort_by_key(|p| {
-        std::fs::metadata(p)
-            .and_then(|m| m.modified())
-            .ok()
-    });
-    let staged = candidates
-        .into_iter()
-        .last()
-        .ok_or_else(|| anyhow::anyhow!("no staged rootfs squashfs found in {ROOTFS_UPDATE_STAGING_DIR}"))?;
+    candidates.sort_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+    let staged = candidates.into_iter().last().ok_or_else(|| {
+        anyhow::anyhow!("no staged rootfs squashfs found in {ROOTFS_UPDATE_STAGING_DIR}")
+    })?;
     let version = crate::update::artifact_version_from_name(
         "rootfs",
         staged.file_name().and_then(|n| n.to_str()).unwrap_or(""),

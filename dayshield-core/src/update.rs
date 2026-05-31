@@ -133,7 +133,12 @@ fn default_auto_check_month_days() -> Vec<u8> {
 }
 
 fn default_verify_artifact_signatures() -> bool {
-    true
+    // Off by default until the release pipeline starts publishing detached
+    // `.sig` files alongside each artifact AND the trusted_signers_file is
+    // provisioned with the project's release pubkey.  Operators flip this on
+    // in the management UI once both are in place.  See README for the
+    // ed25519 signing setup the build workflow needs.
+    false
 }
 
 fn default_encrypt_update_config_backups() -> bool {
@@ -1328,6 +1333,119 @@ fn verify_checksum(file_path: &Path, expected: &str) -> Result<()> {
     Ok(())
 }
 
+/// Parse a `trusted_signers` file.  Format mirrors `~/.ssh/authorized_keys`
+/// in spirit: one signer per line, blank/`#`-prefixed lines ignored, and each
+/// entry is `<name> <base64-ed25519-pubkey>`.  The pubkey is exactly 32 bytes
+/// (44 base64 chars including `=` padding).
+fn load_trusted_signers(path: &Path) -> Result<Vec<ed25519_dalek::VerifyingKey>> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("failed to read trusted signers file {}", path.display()))?;
+    let mut keys = Vec::new();
+    for (lineno, raw_line) in contents.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Name is optional; if present, it's the first whitespace-separated
+        // token and we ignore it.  The pubkey is always the last token so
+        // operators can add comments after it on a single line.
+        let pubkey_b64 = line.split_whitespace().last().unwrap_or("");
+        let raw = B64.decode(pubkey_b64).with_context(|| {
+            format!(
+                "trusted signers file {}:{}: pubkey is not valid base64",
+                path.display(),
+                lineno + 1
+            )
+        })?;
+        let bytes: [u8; 32] = raw.as_slice().try_into().map_err(|_| {
+            anyhow::anyhow!(
+                "trusted signers file {}:{}: pubkey must be 32 bytes (got {})",
+                path.display(),
+                lineno + 1,
+                raw.len()
+            )
+        })?;
+        let key = ed25519_dalek::VerifyingKey::from_bytes(&bytes).with_context(|| {
+            format!(
+                "trusted signers file {}:{}: pubkey is not a valid ed25519 point",
+                path.display(),
+                lineno + 1
+            )
+        })?;
+        keys.push(key);
+    }
+    Ok(keys)
+}
+
+/// Verify a detached ed25519 signature over the SHA256 digest of an artifact.
+///
+/// The signature is the base64 body of the `.sig` file the build pipeline
+/// publishes alongside each artifact, and is computed as
+/// `ed25519_sign(privkey, sha256(artifact_bytes))`.  Verification succeeds if
+/// *any* trusted signer's public key validates the signature.
+fn verify_artifact_signature(
+    artifact_path: &Path,
+    sig_b64: &str,
+    trusted_signers: &[ed25519_dalek::VerifyingKey],
+) -> Result<()> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    use ed25519_dalek::Verifier;
+
+    if trusted_signers.is_empty() {
+        anyhow::bail!(
+            "no trusted signers configured; cannot verify signature for {}",
+            artifact_path.display()
+        );
+    }
+
+    let sig_bytes = B64
+        .decode(sig_b64.trim())
+        .context("artifact signature is not valid base64")?;
+    let sig_array: [u8; 64] = sig_bytes.as_slice().try_into().map_err(|_| {
+        anyhow::anyhow!(
+            "artifact signature must be 64 bytes (got {})",
+            sig_bytes.len()
+        )
+    })?;
+    let signature = ed25519_dalek::Signature::from_bytes(&sig_array);
+
+    let digest_hex = compute_file_sha256(artifact_path)?;
+    let message = digest_hex.as_bytes();
+
+    for key in trusted_signers {
+        if key.verify(message, &signature).is_ok() {
+            return Ok(());
+        }
+    }
+    anyhow::bail!(
+        "artifact signature for {} did not match any trusted signer",
+        artifact_path.display()
+    );
+}
+
+/// Fetch the raw body of a `.sig` URL into memory.  Signatures are tiny
+/// (~100 bytes base64) so a bounded in-memory fetch is the right tool.
+async fn fetch_signature_body(url: &str) -> Result<String> {
+    let client = build_http_client()?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("failed to fetch signature from {}", url))?;
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "signature fetch {} returned HTTP {}",
+            url,
+            response.status()
+        );
+    }
+    response
+        .text()
+        .await
+        .with_context(|| format!("failed to read signature body from {}", url))
+}
+
 /// Download artifact from registry
 fn build_http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
@@ -1619,42 +1737,53 @@ async fn populate_github_release_checksums(
     }
 
     for component in components.iter_mut() {
-        if !component.checksum_sha256.is_empty() {
-            continue;
-        }
-
         let Some(artifact_name) = component.download_url.rsplit('/').next() else {
             continue;
         };
-        let checksum_name = format!("{artifact_name}.sha256");
-        let Some(checksum_asset) = release.assets.iter().find(|a| a.name == checksum_name) else {
-            warn!(
-                component = %component.component,
-                artifact = artifact_name,
-                "updates: no checksum asset found for GitHub release artifact"
-            );
-            continue;
-        };
 
-        match fetch_github_asset_text(client, checksum_asset).await {
-            Ok(checksum_text) => {
-                if let Some(checksum) = checksum_from_text(&checksum_text, artifact_name) {
-                    component.checksum_sha256 = checksum;
-                } else {
-                    warn!(
-                        component = %component.component,
-                        artifact = artifact_name,
-                        "updates: checksum asset did not contain a SHA-256 for artifact"
-                    );
+        if component.checksum_sha256.is_empty() {
+            let checksum_name = format!("{artifact_name}.sha256");
+            if let Some(checksum_asset) =
+                release.assets.iter().find(|a| a.name == checksum_name)
+            {
+                match fetch_github_asset_text(client, checksum_asset).await {
+                    Ok(checksum_text) => {
+                        if let Some(checksum) = checksum_from_text(&checksum_text, artifact_name)
+                        {
+                            component.checksum_sha256 = checksum;
+                        } else {
+                            warn!(
+                                component = %component.component,
+                                artifact = artifact_name,
+                                "updates: checksum asset did not contain a SHA-256 for artifact"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            component = %component.component,
+                            artifact = artifact_name,
+                            error = %e,
+                            "updates: failed to fetch artifact checksum asset"
+                        );
+                    }
                 }
-            }
-            Err(e) => {
+            } else {
                 warn!(
                     component = %component.component,
                     artifact = artifact_name,
-                    error = %e,
-                    "updates: failed to fetch artifact checksum asset"
+                    "updates: no checksum asset found for GitHub release artifact"
                 );
+            }
+        }
+
+        // Detached ed25519 signature asset, if the build pipeline publishes
+        // one.  Absence is not fatal here - it only becomes an error at apply
+        // time when verify_artifact_signatures is enabled on the appliance.
+        if component.signature_url.is_none() {
+            let sig_name = format!("{artifact_name}.sig");
+            if let Some(sig_asset) = release.assets.iter().find(|a| a.name == sig_name) {
+                component.signature_url = Some(sig_asset.browser_download_url.clone());
             }
         }
     }
@@ -2427,6 +2556,56 @@ async fn apply_updates_registry(
                 );
                 save_state(state, &state_file)?;
                 verify_checksum(&dest, &artifact.checksum_sha256)?;
+            }
+
+            // Cryptographic signature check.  Gated on
+            // `verify_artifact_signatures`: when enabled, both a `.sig` URL on
+            // the manifest entry AND at least one trusted signer must be
+            // present, and the ed25519 signature must validate against the
+            // artifact's SHA256 digest.
+            if settings.verify_artifact_signatures {
+                let sig_url = artifact.signature_url.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "artifact signature verification is enabled but no signature_url \
+                         is published for {}-{}",
+                        artifact.component,
+                        artifact.version
+                    )
+                })?;
+                let signers_path = Path::new(&settings.trusted_signers_file);
+                let trusted = load_trusted_signers(signers_path).with_context(|| {
+                    format!(
+                        "failed to load trusted signers from {} (required when \
+                         verify_artifact_signatures is enabled)",
+                        signers_path.display()
+                    )
+                })?;
+                let sig_body = fetch_signature_body(sig_url).await?;
+                verify_artifact_signature(&dest, &sig_body, &trusted).with_context(|| {
+                    format!(
+                        "signature verification failed for {}-{}",
+                        artifact.component, artifact.version
+                    )
+                })?;
+                append_operation_log(
+                    &mut state_file,
+                    "apply",
+                    "info",
+                    format!(
+                        "ed25519 signature verified for {}-{}",
+                        &artifact.component, &artifact.version
+                    ),
+                    Some(&artifact.component),
+                );
+            } else if artifact.signature_url.is_some() {
+                // Build pipeline shipped a signature but the appliance has
+                // opted out of verification - log it so operators see the
+                // unused signal in the apply log.
+                warn!(
+                    component = %artifact.component,
+                    version = %artifact.version,
+                    "updates: signature_url present but verify_artifact_signatures is disabled"
+                );
             }
 
             downloads.push((artifact.component.clone(), artifact.version.clone(), dest));

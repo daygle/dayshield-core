@@ -757,7 +757,7 @@ pub async fn rollback() -> Result<RootfsActionResult> {
 /// - Updates `slots.json` so `currentSlot` matches the slot we actually
 ///   booted from (this handles both normal apply success AND auto-revert).
 /// - On auto-revert, writes the `recovered` marker so the UI can surface it.
-pub fn signal_boot_success() -> Result<()> {
+pub async fn signal_boot_success() -> Result<()> {
     use std::process::Command as SyncCommand;
 
     let running_slot = detect_running_slot();
@@ -840,7 +840,79 @@ pub fn signal_boot_success() -> Result<()> {
         slot = running_slot.as_str(),
         auto_reverted, "rootfs: boot success confirmed"
     );
+
+    // Mirror identity files (root password, ssh host keys, network, etc.)
+    // from the just-confirmed slot back into the standby slot.  This closes
+    // the rollback gap: without it, a password change made between
+    // apply-update and signal-boot-success would be lost on any future
+    // rollback because the standby slot still holds the pre-update copies.
+    //
+    // Skipped when we got here via auto-revert — the standby slot is the
+    // one that just failed to boot, and we have no reason to push the
+    // running slot's state into it (the operator will repair or reapply).
+    if !auto_reverted {
+        if let Err(err) = sync_identity_to_standby(running_slot.other()).await {
+            // Don't fail boot-success on a sync error — the boot itself
+            // is healthy; log and let the operator retry from the CLI
+            // with `dayshield-core rootfs-sync-identity`.
+            warn!(
+                error = %err,
+                "rootfs: failed to mirror identity files to standby slot — rollback may lose recent credential changes"
+            );
+        }
+    }
+
     Ok(())
+}
+
+/// Mount the standby slot's root partition at a temporary directory, copy the
+/// IDENTITY_PATHS files from the running slot into it, then unmount.  Used by
+/// `signal_boot_success` to keep both slots' user-database / host-keys /
+/// network state in sync so rollback never silently loses recent changes.
+pub async fn sync_identity_to_standby(standby_slot: Slot) -> Result<()> {
+    let device = slot_device(standby_slot).await?;
+
+    let running = running_root_device().await;
+    if running.as_deref() == Some(device.as_path()) {
+        anyhow::bail!(
+            "refusing to sync identity into {} - it is the running root partition",
+            device.display()
+        );
+    }
+    if let Some(mp) = device_mountpoint(&device).await {
+        anyhow::bail!(
+            "standby slot device {} is already mounted at {} - refusing to sync",
+            device.display(),
+            mp.display()
+        );
+    }
+
+    let mount_dir =
+        tempfile::tempdir().context("failed to create scratch mount dir for identity sync")?;
+    let mount_path = mount_dir.path();
+
+    run_status(
+        Command::new("mount").arg(&device).arg(mount_path),
+        "mount standby slot for identity sync",
+    )
+    .await?;
+
+    let mut details: Vec<String> = Vec::new();
+    let count = copy_identity_files_to_slot(mount_path, &mut details).await;
+
+    let umount_result =
+        run_status(Command::new("umount").arg(mount_path), "umount standby slot").await;
+
+    info!(
+        slot = standby_slot.as_str(),
+        copied = count,
+        "rootfs: mirrored identity files to standby slot"
+    );
+    for line in &details {
+        info!(target: "rootfs::sync_identity", "{}", line);
+    }
+
+    umount_result
 }
 
 fn sync_grubenv_get(key: &str) -> Option<String> {

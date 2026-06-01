@@ -68,8 +68,17 @@ async fn main() -> anyhow::Result<()> {
     }
     if args.get(1).map(String::as_str) == Some("signal-boot-success") {
         rootfs_update::signal_boot_success()
+            .await
             .map_err(|e| anyhow::anyhow!("signal-boot-success failed: {e:#}"))?;
         println!("Boot success signalled.");
+        return Ok(());
+    }
+    if args.get(1).map(String::as_str) == Some("rootfs-sync-identity") {
+        let running = rootfs_update::detect_running_slot();
+        rootfs_update::sync_identity_to_standby(running.other())
+            .await
+            .map_err(|e| anyhow::anyhow!("rootfs-sync-identity failed: {e:#}"))?;
+        println!("Identity files mirrored from {} to standby.", running.as_str());
         return Ok(());
     }
     if args.get(1).map(String::as_str) == Some("rootfs-apply") {

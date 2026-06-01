@@ -49,6 +49,10 @@ zstd = "0.13"
 aes-gcm = "0.10"
 rand = "0.10"
 
+# Update artifact signature verification (ed25519 over the SHA256 digest).
+ed25519-dalek = "2"
+base64 = "0.22"
+
 # TLS for the management HTTPS listener
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 rustls-pemfile = "2"

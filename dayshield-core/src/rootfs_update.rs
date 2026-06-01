@@ -1206,6 +1206,15 @@ pub async fn apply_update() -> Result<RootfsActionResult> {
         staged.file_name().and_then(|n| n.to_str()).unwrap_or(""),
     )
     .unwrap_or_else(|| "unknown".to_string());
+
+    // Checkpoint the current configuration so it can be restored alongside a
+    // rootfs rollback. Best-effort: never block the update on history failure.
+    if let Err(e) =
+        crate::config::ConfigStore::new().snapshot(&format!("Before rootfs update to {version}"))
+    {
+        tracing::warn!(error = %e, "failed to snapshot config before rootfs update");
+    }
+
     apply_staged_image(&staged, &version).await
 }
 

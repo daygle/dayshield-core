@@ -3848,6 +3848,38 @@ impl Default for AdminSecuritySettings {
     }
 }
 
+/// Settings controlling the configuration revision history.
+///
+/// Every successful configuration save archives the committed config as a
+/// timestamped revision. These settings control whether that happens and how
+/// many revisions are retained.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfigHistorySettings {
+    /// Whether new revisions are archived when the configuration is saved.
+    #[serde(default = "default_history_enabled")]
+    pub enabled: bool,
+    /// Maximum number of revisions retained; the oldest are pruned first.
+    #[serde(default = "default_history_max_revisions")]
+    pub max_revisions: u32,
+}
+
+fn default_history_enabled() -> bool {
+    true
+}
+
+fn default_history_max_revisions() -> u32 {
+    50
+}
+
+impl Default for ConfigHistorySettings {
+    fn default() -> Self {
+        Self {
+            enabled: default_history_enabled(),
+            max_revisions: default_history_max_revisions(),
+        }
+    }
+}
+
 /// Root configuration object that is persisted to disk and loaded on startup.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SystemConfig {
@@ -3928,4 +3960,7 @@ pub struct SystemConfig {
     /// DNS-over-TLS (DoT) listener configuration.
     #[serde(default)]
     pub dot: Option<DotConfig>,
+    /// Configuration revision history settings (retention, enable/disable).
+    #[serde(default)]
+    pub config_history: Option<ConfigHistorySettings>,
 }

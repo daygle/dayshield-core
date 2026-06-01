@@ -142,7 +142,10 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `GET  /backup/scheduler`                              - get the scheduler configuration
 /// - `POST /backup/scheduler`                              - update the scheduler configuration
 /// - `GET  /config/history`                                - list archived configuration revisions
+/// - `GET  /config/history-settings`                       - get history retention settings
+/// - `PUT  /config/history-settings`                       - update history retention settings
 /// - `GET  /config/history/{id}`                           - fetch the full configuration of one revision
+/// - `DELETE /config/history/{id}`                         - delete a single archived revision
 /// - `POST /config/history/{id}/restore`                   - restore a revision as the live configuration
 /// - `GET  /notify/config`                                 - get notification configuration
 /// - `POST /notify/config`                                 - update notification configuration
@@ -477,7 +480,19 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/backup/scheduler", post(backup::update_scheduler_handler))
         // Configuration history (revisions)
         .route("/config/history", get(config_history::list_handler))
+        .route(
+            "/config/history-settings",
+            get(config_history::get_settings_handler),
+        )
+        .route(
+            "/config/history-settings",
+            put(config_history::put_settings_handler),
+        )
         .route("/config/history/{id}", get(config_history::get_handler))
+        .route(
+            "/config/history/{id}",
+            delete(config_history::delete_handler),
+        )
         .route(
             "/config/history/{id}/restore",
             post(config_history::restore_handler),

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// A DayShield administrator account.
 ///
 /// Only the `admin` account exists in v1.0. The struct is serialised to
-/// `/etc/dayshield/admin.json` as the persistent user record.
+/// `/var/lib/dayshield/admin.json` as the persistent user record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     /// Login name - always `"admin"` in v1.0.

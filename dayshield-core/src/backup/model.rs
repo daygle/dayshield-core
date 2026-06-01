@@ -14,6 +14,13 @@ use serde::{Deserialize, Serialize};
 ///
 /// When used with [`create_backup`](super::create::create_backup), `None`
 /// means **all** subsystems.
+///
+/// Note: the configuration *revision history* (see
+/// [`crate::config::storage`]) is intentionally **not** a backup subsystem. It
+/// is a machine-local audit trail of how *this* appliance's configuration
+/// evolved; transplanting one machine's history onto another via restore would
+/// be misleading. Backups capture the current configuration state; history
+/// captures how it got there, and the two are kept separate by design.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Subsystem {

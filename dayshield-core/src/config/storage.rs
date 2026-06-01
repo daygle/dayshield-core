@@ -36,6 +36,7 @@ use tracing::{debug, info, warn};
 use super::history;
 use super::models::{
     AcmeConfig, AdminSecuritySettings, AiEngineConfig, CaptivePortalConfig, CloudflaredConfig,
+    ConfigHistorySettings,
     CrowdSecConfig, Dhcp6Config, DhcpConfig, DnsConfig, DnsDomainOverride, DnsHostOverride,
     DotConfig, DynamicDnsConfig, FirewallAlias, FirewallRule, FirewallSettings, Gateway,
     HoneypotConfig, Interface, NatConfig, NotifyConfig, NtpConfig, QosConfig, SuricataConfig,
@@ -104,7 +105,7 @@ pub(crate) fn write_restricted(path: &Path, data: &[u8]) -> Result<()> {
 /// Increment this constant whenever the [`SystemConfig`] format changes in a
 /// backwards-incompatible way, and add a corresponding arm to
 /// [`migrate_config`].
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// On-disk envelope that carries a schema version alongside the config.
 ///
@@ -125,7 +126,7 @@ struct VersionedConfig {
 ///
 /// Each arm of the `match` applies one incremental migration step.  Future
 /// schema changes should add a new arm here and bump [`CURRENT_SCHEMA_VERSION`].
-fn migrate_config(config: SystemConfig, from_version: u32) -> Result<SystemConfig> {
+fn migrate_config(mut config: SystemConfig, from_version: u32) -> Result<SystemConfig> {
     if from_version > CURRENT_SCHEMA_VERSION {
         anyhow::bail!(
             "Unknown schema version {from_version}; cannot migrate to {CURRENT_SCHEMA_VERSION}"
@@ -141,6 +142,17 @@ fn migrate_config(config: SystemConfig, from_version: u32) -> Result<SystemConfi
                 // field was simply added to the on-disk envelope.
                 debug!("Migrating config from schema v0 to v1 (no-op)");
                 version = 1;
+            }
+            1 => {
+                // Migration v1 -> v2: the configuration revision history became a
+                // first-class, configurable feature. Older configs predate the
+                // `config_history` settings, so initialise them with the built-in
+                // defaults (enabled, retain 50) rather than leaving them absent.
+                if config.config_history.is_none() {
+                    debug!("Migrating config from schema v1 to v2 (init config_history)");
+                    config.config_history = Some(ConfigHistorySettings::default());
+                }
+                version = 2;
             }
             other => {
                 anyhow::bail!(
@@ -1281,7 +1293,7 @@ impl ConfigStore {
     pub fn save_acme_config(&self, acme: AcmeConfig) -> Result<()> {
         let mut config = self.load()?;
         config.acme = Some(acme);
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated ACME/TLS certificate configuration"))
     }
 
     /// Return the CrowdSec configuration from the persisted config.
@@ -1299,7 +1311,7 @@ impl ConfigStore {
     pub fn save_crowdsec_config(&self, crowdsec: CrowdSecConfig) -> Result<()> {
         let mut config = self.load()?;
         config.crowdsec = Some(crowdsec);
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated CrowdSec configuration"))
     }
 
     /// Return the WireGuard interface list from the persisted config.
@@ -1315,7 +1327,7 @@ impl ConfigStore {
     pub fn save_wireguard_interfaces(&self, interfaces: Vec<WireGuardInterface>) -> Result<()> {
         let mut config = self.load()?;
         config.wireguard_interfaces = interfaces;
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated WireGuard interfaces"))
     }
 
     /// Return only the interface slice from the persisted config.
@@ -1332,7 +1344,7 @@ impl ConfigStore {
     pub fn save_interfaces(&self, interfaces: Vec<Interface>) -> Result<()> {
         let mut config = self.load()?;
         config.interfaces = interfaces;
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated network interfaces"))
     }
 
     /// Return only the firewall-rule slice from the persisted config.
@@ -1350,7 +1362,7 @@ impl ConfigStore {
     pub fn save_firewall_rules(&self, rules: Vec<FirewallRule>) -> Result<()> {
         let mut config = self.load()?;
         config.firewall_rules = rules;
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated firewall rules"))
     }
 
     /// Return firewall global settings from persisted config.
@@ -1364,7 +1376,7 @@ impl ConfigStore {
     pub fn save_firewall_settings(&self, settings: FirewallSettings) -> Result<()> {
         let mut config = self.load()?;
         config.firewall_settings = Some(settings);
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated firewall settings"))
     }
 
     /// Return the DNS configuration from the persisted config.
@@ -1382,7 +1394,7 @@ impl ConfigStore {
     pub fn save_dns_config(&self, dns: DnsConfig) -> Result<()> {
         let mut config = self.load()?;
         config.dns = Some(dns);
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated DNS configuration"))
     }
 
     /// Return the DNS-over-TLS configuration from the persisted config.
@@ -1400,7 +1412,7 @@ impl ConfigStore {
     pub fn save_dot_config(&self, dot: DotConfig) -> Result<()> {
         let mut config = self.load()?;
         config.dot = Some(dot);
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated DNS-over-TLS configuration"))
     }
 
     /// Return the DHCP configuration from the persisted config.
@@ -1418,7 +1430,7 @@ impl ConfigStore {
     pub fn save_dhcp_config(&self, dhcp: DhcpConfig) -> Result<()> {
         let mut config = self.load()?;
         config.dhcp = Some(dhcp);
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated DHCP configuration"))
     }
 
     /// Return the DHCPv6 configuration from the persisted config.
@@ -1436,7 +1448,7 @@ impl ConfigStore {
     pub fn save_dhcp6_config(&self, dhcp6: Dhcp6Config) -> Result<()> {
         let mut config = self.load()?;
         config.dhcp6 = Some(dhcp6);
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated DHCPv6 configuration"))
     }
 
     /// Return the Suricata configuration from the persisted config.
@@ -1454,7 +1466,7 @@ impl ConfigStore {
     pub fn save_suricata_config(&self, suricata: SuricataConfig) -> Result<()> {
         let mut config = self.load()?;
         config.suricata = Some(suricata);
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated Suricata IDS/IPS configuration"))
     }
 
     /// Return the firewall alias list from the persisted config.
@@ -1470,7 +1482,7 @@ impl ConfigStore {
     pub fn save_firewall_aliases(&self, aliases: Vec<FirewallAlias>) -> Result<()> {
         let mut config = self.load()?;
         config.firewall_aliases = aliases;
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated firewall aliases"))
     }
 
     /// Return the DNS host and domain overrides from the persisted config.
@@ -1494,7 +1506,7 @@ impl ConfigStore {
         let mut config = self.load()?;
         config.dns_host_overrides = host_overrides;
         config.dns_domain_overrides = domain_overrides;
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated DNS overrides"))
     }
 
     /// Return the notification configuration from the persisted config.
@@ -1512,7 +1524,7 @@ impl ConfigStore {
     pub fn save_notify_config(&self, notify: NotifyConfig) -> Result<()> {
         let mut config = self.load()?;
         config.notify = Some(notify);
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated notification configuration"))
     }
 
     /// Return the NTP configuration from the persisted config.
@@ -1530,7 +1542,7 @@ impl ConfigStore {
     pub fn save_ntp_config(&self, ntp: NtpConfig) -> Result<()> {
         let mut config = self.load()?;
         config.ntp = Some(ntp);
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated NTP configuration"))
     }
 
     /// Return the Dynamic DNS configuration from the persisted config.
@@ -1542,7 +1554,7 @@ impl ConfigStore {
     pub fn save_dynamic_dns_config(&self, dynamic_dns: DynamicDnsConfig) -> Result<()> {
         let mut config = self.load()?;
         config.dynamic_dns = Some(dynamic_dns);
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated dynamic DNS configuration"))
     }
 
     /// Return the Cloudflared configuration from the persisted config.
@@ -1554,7 +1566,7 @@ impl ConfigStore {
     pub fn save_cloudflared_config(&self, cloudflared: CloudflaredConfig) -> Result<()> {
         let mut config = self.load()?;
         config.cloudflared = Some(cloudflared);
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated Cloudflare Tunnel configuration"))
     }
 
     /// Return the Captive Portal configuration from the persisted config.
@@ -1566,7 +1578,7 @@ impl ConfigStore {
     pub fn save_captive_portal_config(&self, captive_portal: CaptivePortalConfig) -> Result<()> {
         let mut config = self.load()?;
         config.captive_portal = Some(captive_portal);
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated captive portal configuration"))
     }
 
     /// Return the AI engine configuration from persisted config.
@@ -1580,7 +1592,7 @@ impl ConfigStore {
     pub fn save_ai_engine_config(&self, ai_engine: AiEngineConfig) -> Result<()> {
         let mut config = self.load()?;
         config.ai_engine = Some(ai_engine);
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated AI threat engine configuration"))
     }
 
     /// Return the honeypot configuration from persisted config.
@@ -1594,7 +1606,7 @@ impl ConfigStore {
     pub fn save_honeypot_config(&self, honeypots: HoneypotConfig) -> Result<()> {
         let mut config = self.load()?;
         config.honeypots = Some(honeypots);
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated honeypot configuration"))
     }
 
     /// Return the NAT configuration from the persisted config.
@@ -1612,7 +1624,7 @@ impl ConfigStore {
     pub fn save_nat_config(&self, nat: NatConfig) -> Result<()> {
         let mut config = self.load()?;
         config.nat = Some(nat);
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated NAT configuration"))
     }
 
     /// Return the QoS configuration from persisted config.
@@ -1626,7 +1638,7 @@ impl ConfigStore {
     pub fn save_qos_config(&self, qos: QosConfig) -> Result<()> {
         let mut config = self.load()?;
         config.qos = Some(qos);
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated QoS configuration"))
     }
 
     /// Return the system settings from the persisted config.
@@ -1643,7 +1655,7 @@ impl ConfigStore {
     pub fn save_system_settings(&self, settings: super::models::SystemSettings) -> Result<()> {
         let mut config = self.load()?;
         config.system_settings = Some(settings);
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated system settings"))
     }
 
     /// Return the gateway list from the persisted config.
@@ -1655,7 +1667,7 @@ impl ConfigStore {
     pub fn save_gateways(&self, gateways: Vec<Gateway>) -> Result<()> {
         let mut config = self.load()?;
         config.gateways = gateways;
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated gateways"))
     }
 
     /// Return the admin security settings from the persisted config.
@@ -1672,7 +1684,7 @@ impl ConfigStore {
     ) -> Result<()> {
         let mut config = self.load()?;
         config.admin_security = Some(settings);
-        self.save_with_rollback(&config)
+        self.save_with_rollback_described(&config, Some("Updated admin security settings"))
     }
 
     /// Validate and atomically write config to disk.
@@ -1787,19 +1799,23 @@ impl ConfigStore {
             }
         }
 
-        // Step 5 - archive the committed config as a history revision.
-        match std::fs::read(&self.config_path) {
-            Ok(bytes) => {
-                if let Err(e) = history::write_revision(
-                    &self.config_path,
-                    &bytes,
-                    description,
-                    history::MAX_HISTORY_REVISIONS,
-                ) {
-                    warn!(error = %e, "Failed to archive config revision");
+        // Step 5 - archive the committed config as a history revision, honoring
+        // the (possibly customised) history retention settings.
+        let history_settings = normalized_config.config_history.clone().unwrap_or_default();
+        if history_settings.enabled {
+            match std::fs::read(&self.config_path) {
+                Ok(bytes) => {
+                    if let Err(e) = history::write_revision(
+                        &self.config_path,
+                        &bytes,
+                        description,
+                        history_settings.max_revisions as usize,
+                    ) {
+                        warn!(error = %e, "Failed to archive config revision");
+                    }
                 }
+                Err(e) => warn!(error = %e, "Failed to read committed config for history"),
             }
-            Err(e) => warn!(error = %e, "Failed to read committed config for history"),
         }
 
         // Step 6 - notify engine layer.
@@ -1833,6 +1849,50 @@ impl ConfigStore {
     pub fn restore_revision(&self, id: &str) -> Result<()> {
         let config = self.load_revision(id)?;
         self.save_with_rollback_described(&config, Some(&format!("Restored revision {id}")))
+    }
+
+    /// Delete a single archived revision by id.
+    pub fn delete_revision(&self, id: &str) -> Result<()> {
+        history::delete_revision(&self.config_path, id)
+    }
+
+    /// Archive the *current* on-disk configuration as a new history revision
+    /// tagged with `description`, without otherwise modifying it.
+    ///
+    /// Useful for capturing a checkpoint outside the normal save flow — for
+    /// example just before a rootfs update is applied. Honors the configured
+    /// retention settings; a no-op (returns `Ok(None)`) when history is
+    /// disabled, no config exists yet, or the config is unchanged since the
+    /// most recent revision.
+    pub fn snapshot(&self, description: &str) -> Result<Option<history::ConfigRevision>> {
+        let settings = self.load_history_settings().unwrap_or_default();
+        if !settings.enabled {
+            return Ok(None);
+        }
+        let bytes = match std::fs::read(&self.config_path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        history::write_revision(
+            &self.config_path,
+            &bytes,
+            Some(description),
+            settings.max_revisions as usize,
+        )
+    }
+
+    /// Return the configuration history settings (retention, enable/disable),
+    /// falling back to defaults when none have been persisted yet.
+    pub fn load_history_settings(&self) -> Result<ConfigHistorySettings> {
+        Ok(self.load()?.config_history.unwrap_or_default())
+    }
+
+    /// Atomically replace the configuration history settings.
+    pub fn save_history_settings(&self, settings: ConfigHistorySettings) -> Result<()> {
+        let mut config = self.load()?;
+        config.config_history = Some(settings);
+        self.save_with_rollback_described(&config, Some("Updated config history settings"))
     }
 
     // ------------------------------------------------------------------
@@ -3230,6 +3290,103 @@ mod tests {
     fn migrate_config_errors_on_unknown_version() {
         let cfg = SystemConfig::default();
         assert!(migrate_config(cfg, 9999).is_err());
+    }
+
+    #[test]
+    fn migrate_v1_to_v2_initialises_config_history() {
+        // A v1 config predates the history settings, so it carries none.
+        let mut cfg = SystemConfig::default();
+        cfg.config_history = None;
+
+        let migrated = migrate_config(cfg, 1).unwrap();
+        // The v1 -> v2 migration must populate it with the built-in defaults.
+        let history = migrated
+            .config_history
+            .expect("config_history must be initialised by the v1->v2 migration");
+        assert!(history.enabled);
+        assert_eq!(history.max_revisions, 50);
+    }
+
+    #[test]
+    fn load_migrates_v1_file_to_v2_and_populates_history() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        // A v1 on-disk file with no config_history field.
+        let v1_json = r#"{"schema_version":1,"hostname":"v1-fw"}"#;
+        std::fs::write(store.config_path(), v1_json).unwrap();
+
+        let cfg = store.load().unwrap();
+        assert_eq!(cfg.hostname, "v1-fw");
+        assert!(
+            cfg.config_history.is_some(),
+            "loading a v1 file must migrate it and initialise config_history"
+        );
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(store.config_path()).unwrap()).unwrap();
+        assert_eq!(saved["schema_version"].as_u64(), Some(2));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_revision_removes_only_that_revision() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        cfg.hostname = "one".into();
+        store.save_with_rollback(&cfg).unwrap();
+        cfg.hostname = "two".into();
+        store.save_with_rollback(&cfg).unwrap();
+
+        let revs = store.list_revisions().unwrap();
+        assert_eq!(revs.len(), 2);
+
+        store.delete_revision(&revs[0].id).unwrap();
+        let after = store.list_revisions().unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].id, revs[1].id);
+
+        // Deleting a non-existent revision is an error.
+        assert!(store.delete_revision("does-not-exist").is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn history_settings_round_trip_and_control_retention() {
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        // Default settings: enabled, retain 50.
+        let defaults = store.load_history_settings().unwrap();
+        assert!(defaults.enabled);
+        assert_eq!(defaults.max_revisions, 50);
+
+        // Tighten retention to 2 and verify it is honored by subsequent saves.
+        store
+            .save_history_settings(crate::config::models::ConfigHistorySettings {
+                enabled: true,
+                max_revisions: 2,
+            })
+            .unwrap();
+
+        let mut cfg = store.load().unwrap();
+        for i in 0..5 {
+            cfg.hostname = format!("h{i}");
+            store.save_with_rollback(&cfg).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        assert_eq!(
+            store.list_revisions().unwrap().len(),
+            2,
+            "retention setting must cap the number of revisions"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // -----------------------------------------------------------------------

@@ -1809,7 +1809,7 @@ impl ConfigStore {
                         &self.config_path,
                         &bytes,
                         description,
-                        history_settings.max_revisions as usize,
+                        history_settings.effective_max_revisions(),
                     ) {
                         warn!(error = %e, "Failed to archive config revision");
                     }
@@ -1878,7 +1878,7 @@ impl ConfigStore {
             &self.config_path,
             &bytes,
             Some(description),
-            settings.max_revisions as usize,
+            settings.effective_max_revisions(),
         )
     }
 
@@ -3351,6 +3351,35 @@ mod tests {
 
         // Deleting a non-existent revision is an error.
         assert!(store.delete_revision("does-not-exist").is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn zero_max_revisions_is_clamped_and_still_prunes() {
+        // A corrupt/hand-edited config with max_revisions = 0 must not disable
+        // pruning (which would let history grow without bound); it is clamped
+        // to retain at least the most recent revision.
+        let dir = temp_dir();
+        let store = ConfigStore::with_dir(&dir);
+
+        let mut cfg = SystemConfig::default();
+        cfg.config_history = Some(crate::config::models::ConfigHistorySettings {
+            enabled: true,
+            max_revisions: 0,
+        });
+
+        for i in 0..4 {
+            cfg.hostname = format!("h{i}");
+            store.save_with_rollback(&cfg).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        assert_eq!(
+            store.list_revisions().unwrap().len(),
+            1,
+            "max_revisions = 0 must clamp to 1, not disable pruning"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

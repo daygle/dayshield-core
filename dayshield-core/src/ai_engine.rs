@@ -353,7 +353,7 @@ impl AiRuntime {
             let _ = state
                 .notify_queue
                 .enqueue(NotifyEvent {
-                    category: NotifyCategory::System,
+                    category: NotifyCategory::AiThreatEngine,
                     subject: "[AI] Threat escalation".to_string(),
                     body,
                     timestamp: now_unix_secs(),

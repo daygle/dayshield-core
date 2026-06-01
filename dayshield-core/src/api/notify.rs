@@ -186,25 +186,19 @@ pub async fn send_test(
 ///
 /// Category names match the `NotifyCategory` serialization (snake_case).
 pub async fn get_categories() -> impl IntoResponse {
-    let categories = vec![
-        serde_json::json!({
-            "name": serde_json::to_value(NotifyCategory::Suricata).unwrap_or_default(),
-            "description": "Suricata IDS/IPS alerts"
-        }),
-        serde_json::json!({
-            "name": serde_json::to_value(NotifyCategory::CrowdSec).unwrap_or_default(),
-            "description": "CrowdSec remediation decisions"
-        }),
-        serde_json::json!({
-            "name": serde_json::to_value(NotifyCategory::Acme).unwrap_or_default(),
-            "description": "ACME certificate events"
-        }),
-        serde_json::json!({
-            "name": serde_json::to_value(NotifyCategory::System).unwrap_or_default(),
-            "description": "System-level alerts"
-        }),
-    ];
-    Json(categories)
+    Json(available_categories())
+}
+
+fn available_categories() -> Vec<serde_json::Value> {
+    NotifyCategory::ALL
+        .iter()
+        .map(|category| {
+            serde_json::json!({
+                "name": serde_json::to_value(category).unwrap_or_default(),
+                "description": category.description(),
+            })
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -252,5 +246,35 @@ mod tests {
 
         let api_err: NotifyApiError = NotifyError::SmtpError("timeout".into()).into();
         assert!(matches!(api_err, NotifyApiError::SmtpError(_)));
+    }
+
+    #[test]
+    fn notify_categories_cover_all_known_sources() {
+        let categories = available_categories();
+        let names: Vec<_> = categories
+            .iter()
+            .map(|category| {
+                category
+                    .get("name")
+                    .and_then(|name| name.as_str())
+                    .expect("category name should be a string")
+                    .to_string()
+            })
+            .collect();
+        let expected: Vec<_> = NotifyCategory::ALL
+            .iter()
+            .map(|category| {
+                serde_json::to_value(category)
+                    .expect("category should serialize")
+                    .as_str()
+                    .expect("category should serialize as string")
+                    .to_string()
+            })
+            .collect();
+
+        assert_eq!(names, expected);
+        assert!(names.contains(&"ai_threat_engine".to_string()));
+        assert!(names.contains(&"dynamic_dns".to_string()));
+        assert!(names.contains(&"backups".to_string()));
     }
 }

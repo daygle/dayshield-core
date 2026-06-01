@@ -2621,14 +2621,95 @@ pub fn validate_endpoint(endpoint: &str) -> bool {
 // Notifications
 // ---------------------------------------------------------------------------
 
-/// Category of a notification event; used to filter which alerts are sent.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Category/source of a notification event; used to filter which alerts are sent.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NotifyCategory {
-    Suricata,
-    CrowdSec,
-    Acme,
     System,
+    Interfaces,
+    Gateways,
+    Firewall,
+    Nat,
+    Dns,
+    DnsOverTls,
+    Dhcp,
+    WireGuard,
+    Suricata,
+    ManagedRulesets,
+    CrowdSec,
+    Honeypots,
+    AiThreatEngine,
+    Acme,
+    DynamicDns,
+    Cloudflared,
+    CaptivePortal,
+    Ntp,
+    Notifications,
+    Backups,
+    Updates,
+    SystemSchedules,
+    LogsMetrics,
+    AdminSecurity,
+}
+
+impl NotifyCategory {
+    pub const ALL: &'static [NotifyCategory] = &[
+        NotifyCategory::System,
+        NotifyCategory::Interfaces,
+        NotifyCategory::Gateways,
+        NotifyCategory::Firewall,
+        NotifyCategory::Nat,
+        NotifyCategory::Dns,
+        NotifyCategory::DnsOverTls,
+        NotifyCategory::Dhcp,
+        NotifyCategory::WireGuard,
+        NotifyCategory::Suricata,
+        NotifyCategory::ManagedRulesets,
+        NotifyCategory::CrowdSec,
+        NotifyCategory::Honeypots,
+        NotifyCategory::AiThreatEngine,
+        NotifyCategory::Acme,
+        NotifyCategory::DynamicDns,
+        NotifyCategory::Cloudflared,
+        NotifyCategory::CaptivePortal,
+        NotifyCategory::Ntp,
+        NotifyCategory::Notifications,
+        NotifyCategory::Backups,
+        NotifyCategory::Updates,
+        NotifyCategory::SystemSchedules,
+        NotifyCategory::LogsMetrics,
+        NotifyCategory::AdminSecurity,
+    ];
+
+    pub fn description(self) -> &'static str {
+        match self {
+            NotifyCategory::System => "Host system health and service alerts",
+            NotifyCategory::Interfaces => "Network interface and link-state events",
+            NotifyCategory::Gateways => "WAN gateway and default-route events",
+            NotifyCategory::Firewall => "Firewall rule and packet-filter events",
+            NotifyCategory::Nat => "NAT and port-forwarding events",
+            NotifyCategory::Dns => "Recursive DNS resolver events",
+            NotifyCategory::DnsOverTls => "DNS-over-TLS listener and certificate events",
+            NotifyCategory::Dhcp => "DHCP lease and address-assignment events",
+            NotifyCategory::WireGuard => "WireGuard tunnel and peer events",
+            NotifyCategory::Suricata => "Suricata IDS/IPS alerts",
+            NotifyCategory::ManagedRulesets => "Managed Suricata ruleset update events",
+            NotifyCategory::CrowdSec => "CrowdSec remediation decisions",
+            NotifyCategory::Honeypots => "Honeypot listener and interaction events",
+            NotifyCategory::AiThreatEngine => "AI threat detection and escalation events",
+            NotifyCategory::Acme => "ACME certificate events",
+            NotifyCategory::DynamicDns => "Dynamic DNS update events",
+            NotifyCategory::Cloudflared => "Cloudflared tunnel health events",
+            NotifyCategory::CaptivePortal => "Captive portal session and authentication events",
+            NotifyCategory::Ntp => "Time synchronization events",
+            NotifyCategory::Notifications => "Notification delivery and configuration events",
+            NotifyCategory::Backups => "Backup and restore events",
+            NotifyCategory::Updates => "Software and root filesystem update events",
+            NotifyCategory::SystemSchedules => "Scheduled task execution events",
+            NotifyCategory::LogsMetrics => "Logging and metrics pipeline events",
+            NotifyCategory::AdminSecurity => "Administrative security and authentication events",
+        }
+    }
 }
 
 fn default_notify_rate_limit() -> u32 {
@@ -2636,12 +2717,7 @@ fn default_notify_rate_limit() -> u32 {
 }
 
 fn default_notify_categories() -> Vec<NotifyCategory> {
-    vec![
-        NotifyCategory::Suricata,
-        NotifyCategory::CrowdSec,
-        NotifyCategory::Acme,
-        NotifyCategory::System,
-    ]
+    NotifyCategory::ALL.to_vec()
 }
 
 /// Configuration for the email notification subsystem.
@@ -2661,7 +2737,7 @@ pub struct NotifyConfig {
     pub from_address: String,
     /// List of recipient e-mail addresses.
     pub to_addresses: Vec<String>,
-    /// Which alert categories should trigger notifications.
+    /// Which event sources/categories should trigger notifications.
     #[serde(default = "default_notify_categories")]
     pub categories: Vec<NotifyCategory>,
     /// Maximum number of emails sent per minute (token-bucket rate limit).

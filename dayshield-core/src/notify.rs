@@ -1,6 +1,6 @@
 //! Notifications subsystem.
 //!
-//! Provides email alerting for Suricata, CrowdSec, ACME, and system events.
+//! Provides email alerting for DayShield module and system events.
 //!
 //! # Usage
 //!

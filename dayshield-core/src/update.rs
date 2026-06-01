@@ -11,7 +11,7 @@ use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveTime, Timelike, U
 use reqwest::header::{HeaderName, HeaderValue, ACCEPT, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use tokio::{process::Command, sync::Mutex};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::backup::{
     create::{create_backup, DEFAULT_BACKUP_DIR},
@@ -1637,19 +1637,28 @@ async fn query_registry_with_component_fallbacks(
                 }
             }
             Err(err) => {
-                let err_text = err.to_string();
-                if err_text.contains("HTTP 404") || component.as_str() == "rootfs" {
-                    info!(
-                        component = component.as_str(),
-                        repo_url,
-                        error = %err,
-                        "updates: component repo release fallback not found"
-                    );
+                let err_detail = format!("{err:#}");
+                if is_release_absence_error(&err_detail) {
+                    if matches!(component, RepoComponent::Rootfs) {
+                        debug!(
+                            component = component.as_str(),
+                            repo_url,
+                            error = %err_detail,
+                            "updates: optional component repo release fallback not found"
+                        );
+                    } else {
+                        info!(
+                            component = component.as_str(),
+                            repo_url,
+                            error = %err_detail,
+                            "updates: component repo release fallback not found"
+                        );
+                    }
                 } else {
                     warn!(
                         component = component.as_str(),
                         repo_url,
-                        error = %err,
+                        error = %err_detail,
                         "updates: failed to query component repo release fallback"
                     );
                 }
@@ -1658,6 +1667,12 @@ async fn query_registry_with_component_fallbacks(
     }
 
     Ok(manifest)
+}
+
+fn is_release_absence_error(err_text: &str) -> bool {
+    err_text.contains("HTTP 404")
+        || err_text.contains("has no published assets")
+        || err_text.contains("has no artifacts matching patterns")
 }
 
 pub(crate) fn artifact_version_from_name(component: &str, asset_name: &str) -> Option<String> {
@@ -3975,6 +3990,22 @@ mod tests {
         assert!(!super::is_remote_version_newer("1.0.0", "1.0.0"));
         assert!(!super::is_remote_version_newer("1.0.1", "1.0.0"));
         assert!(!super::is_remote_version_newer("1.0.0", "1.0"));
+    }
+
+    #[test]
+    fn release_absence_detection_only_matches_expected_empty_sources() {
+        assert!(super::is_release_absence_error(
+            "GitHub releases query failed: HTTP 404 from https://api.github.com/repos/daygle/dayshield-rootfs/releases/latest"
+        ));
+        assert!(super::is_release_absence_error(
+            "GitHub release v1.0.0 has no published assets (release may still be building)"
+        ));
+        assert!(super::is_release_absence_error(
+            "GitHub release v1.0.0 has no artifacts matching patterns core-v*.tar.zst / ui-v*.tar.zst / rootfs-v*.squashfs"
+        ));
+        assert!(!super::is_release_absence_error(
+            "failed to read GitHub release response from https://api.github.com/repos/daygle/dayshield-rootfs/releases/latest: operation timed out"
+        ));
     }
 
     #[test]

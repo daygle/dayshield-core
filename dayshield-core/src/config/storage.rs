@@ -1,8 +1,11 @@
 //! Configuration storage layer.
 //!
 //! Persists [`SystemConfig`] as a single JSON file under
-//! `/etc/dayshield/config/config.json` with the following guarantees:
+//! `/var/lib/dayshield/config/config.json` with the following guarantees:
 //!
+//! - **Single source of truth**: there is exactly one configuration file. The
+//!   whole running configuration is serialised into it, so "what is my current
+//!   config?" always has one unambiguous answer.
 //! - **Atomic writes**: the new file is written to a temporary path next to the
 //!   target and then renamed into place, so a crash mid-write cannot leave a
 //!   partially-written file.
@@ -15,9 +18,11 @@
 //! - **Schema versioning**: on-disk files carry a `schema_version` integer.
 //!   [`ConfigStore::load`] automatically migrates older versions to the current
 //!   schema so new code can always assume the latest format.
-//! - **Config fragments**: [`ConfigStore::load_fragments`] merges all
-//!   `*.json` files found in the config directory into a single
-//!   [`SystemConfig`], enabling modular configuration management.
+//! - **Config history**: every successful [`ConfigStore::save_with_rollback`]
+//!   archives the committed configuration as a timestamped revision under
+//!   `history/`. Past revisions can be listed, inspected and restored via
+//!   [`ConfigStore::list_revisions`], [`ConfigStore::load_revision`] and
+//!   [`ConfigStore::restore_revision`].
 //! - **Engine notifications**: register a post-save callback via
 //!   [`ConfigStore::set_on_save`] to push config changes to live engine
 //!   services immediately after a successful commit.
@@ -28,6 +33,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
+use super::history;
 use super::models::{
     AcmeConfig, AdminSecuritySettings, AiEngineConfig, CaptivePortalConfig, CloudflaredConfig,
     CrowdSecConfig, Dhcp6Config, DhcpConfig, DnsConfig, DnsDomainOverride, DnsHostOverride,
@@ -56,7 +62,7 @@ const BAK_SUFFIX: &str = ".bak";
 /// at `<path>.tmp`, written with restricted permissions, and then renamed to
 /// `path`.
 #[cfg(unix)]
-fn write_restricted(path: &Path, data: &[u8]) -> Result<()> {
+pub(crate) fn write_restricted(path: &Path, data: &[u8]) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -82,7 +88,7 @@ fn write_restricted(path: &Path, data: &[u8]) -> Result<()> {
 
 /// Fallback for non-Unix platforms (uses standard write).
 #[cfg(not(unix))]
-fn write_restricted(path: &Path, data: &[u8]) -> Result<()> {
+pub(crate) fn write_restricted(path: &Path, data: &[u8]) -> Result<()> {
     let tmp = PathBuf::from(format!("{}{}", path.display(), TMP_SUFFIX));
     std::fs::write(&tmp, data)
         .with_context(|| format!("Failed to write temp file {}", tmp.display()))?;
@@ -238,69 +244,6 @@ impl ConfigStore {
             }
         }
 
-        Ok(config)
-    }
-
-    /// Load and merge all `*.json` fragment files found in the configuration
-    /// directory, then overlay them onto a base [`SystemConfig`].
-    ///
-    /// Fragment files are read in lexicographic order.  Each file is parsed as
-    /// a JSON object and shallow-merged (via [`serde_json::Value`]) into the
-    /// accumulated configuration.  This allows operators to split large
-    /// configurations across multiple files (e.g. `interfaces.json`,
-    /// `firewall.json`) without having to maintain a single monolithic file.
-    ///
-    /// The primary `config.json` is **excluded** from this scan; it is loaded
-    /// separately by [`Self::load`].
-    ///
-    /// Returns the merged [`SystemConfig`], or an error if any fragment cannot
-    /// be parsed.
-    pub fn load_fragments(&self) -> Result<SystemConfig> {
-        let dir = self
-            .config_path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Config path has no parent directory"))?;
-
-        if !dir.exists() {
-            return Ok(SystemConfig::default());
-        }
-
-        // Collect all *.json files in the directory except the primary config.
-        let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
-            .with_context(|| format!("Failed to read config directory {}", dir.display()))?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| {
-                p.extension().and_then(|e| e.to_str()) == Some("json")
-                    && p.file_name() != self.config_path.file_name()
-            })
-            .collect();
-
-        entries.sort();
-
-        if entries.is_empty() {
-            return Ok(SystemConfig::default());
-        }
-
-        // Start from an empty JSON object and merge each fragment in order.
-        let mut merged = serde_json::Value::Object(serde_json::Map::new());
-
-        for path in &entries {
-            let raw = std::fs::read_to_string(path)
-                .with_context(|| format!("Failed to read fragment {}", path.display()))?;
-            let fragment: serde_json::Value = serde_json::from_str(&raw)
-                .with_context(|| format!("Failed to parse fragment {}", path.display()))?;
-            merge_json(&mut merged, fragment);
-            debug!(path = %path.display(), "Loaded config fragment");
-        }
-
-        let config: SystemConfig = serde_json::from_value(merged)
-            .context("Failed to deserialise merged config fragments")?;
-
-        info!(
-            count = entries.len(),
-            "Loaded config fragments from directory"
-        );
         Ok(config)
     }
 
@@ -1786,14 +1729,32 @@ impl ConfigStore {
 
     /// Save with automatic rollback on post-write validation failure.
     ///
+    /// Equivalent to [`Self::save_with_rollback_described`] with no change
+    /// description.
+    pub fn save_with_rollback(&self, config: &SystemConfig) -> Result<()> {
+        self.save_with_rollback_described(config, None)
+    }
+
+    /// Save with automatic rollback, archiving the committed config as a
+    /// revision tagged with an optional `description`.
+    ///
     /// Workflow:
     /// 1. Back up the current config file (if it exists).
     /// 2. Write the new config atomically via [`Self::save`].
     /// 3. Re-load and re-validate the written file.
     /// 4. If step 3 fails, restore the backup and return the error.
-    /// 5. On success, invoke the registered [`OnSaveFn`] hook (if any) so
-    ///    that live engine services receive the updated configuration.
-    pub fn save_with_rollback(&self, config: &SystemConfig) -> Result<()> {
+    /// 5. On success, archive the committed config as a history revision.
+    /// 6. Invoke the registered [`OnSaveFn`] hook (if any) so that live engine
+    ///    services receive the updated configuration.
+    ///
+    /// History archival is best-effort: a failure to record the revision is
+    /// logged but does not fail the save, since the configuration has already
+    /// been committed and validated.
+    pub fn save_with_rollback_described(
+        &self,
+        config: &SystemConfig,
+        description: Option<&str>,
+    ) -> Result<()> {
         let bak_path = PathBuf::from(format!("{}{}", self.config_path.display(), BAK_SUFFIX));
 
         // Step 1 - backup.
@@ -1826,12 +1787,52 @@ impl ConfigStore {
             }
         }
 
-        // Step 5 - notify engine layer.
+        // Step 5 - archive the committed config as a history revision.
+        match std::fs::read(&self.config_path) {
+            Ok(bytes) => {
+                if let Err(e) = history::write_revision(
+                    &self.config_path,
+                    &bytes,
+                    description,
+                    history::MAX_HISTORY_REVISIONS,
+                ) {
+                    warn!(error = %e, "Failed to archive config revision");
+                }
+            }
+            Err(e) => warn!(error = %e, "Failed to read committed config for history"),
+        }
+
+        // Step 6 - notify engine layer.
         if let Some(hook) = &self.on_save {
             hook(&normalized_config);
         }
 
         Ok(())
+    }
+
+    /// List archived configuration revisions, newest first.
+    pub fn list_revisions(&self) -> Result<Vec<history::ConfigRevision>> {
+        history::list_revisions(&self.config_path)
+    }
+
+    /// Load the [`SystemConfig`] stored in the revision identified by `id`,
+    /// migrating it to the current schema version if necessary.
+    pub fn load_revision(&self, id: &str) -> Result<SystemConfig> {
+        let value = history::read_revision_config(&self.config_path, id)?;
+        let versioned: VersionedConfig = serde_json::from_value(value)
+            .with_context(|| format!("Failed to parse revision {id}"))?;
+        migrate_config(versioned.config, versioned.schema_version)
+    }
+
+    /// Restore the configuration captured in revision `id`, making it the live
+    /// configuration.
+    ///
+    /// The restore goes through [`Self::save_with_rollback_described`], so it is
+    /// validated, atomic, and itself archived as a new revision (allowing a
+    /// restore to be undone).
+    pub fn restore_revision(&self, id: &str) -> Result<()> {
+        let config = self.load_revision(id)?;
+        self.save_with_rollback_described(&config, Some(&format!("Restored revision {id}")))
     }
 
     // ------------------------------------------------------------------
@@ -1857,35 +1858,6 @@ impl ConfigStore {
 impl Default for ConfigStore {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-// Ã¢â€â‚¬Ã¢â€â‚¬ JSON fragment merge Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
-
-/// Recursively merge `src` into `dst`.
-///
-/// - Object fields in `src` are recursively merged into the corresponding
-///   object in `dst`.
-/// - Arrays and scalar values in `src` overwrite those in `dst`.
-fn merge_json(dst: &mut serde_json::Value, src: serde_json::Value) {
-    match (dst, src) {
-        (serde_json::Value::Object(dst_map), serde_json::Value::Object(src_map)) => {
-            for (key, src_val) in src_map {
-                // Only recurse when the destination already holds an object;
-                // otherwise overwrite directly to avoid inserting spurious nulls.
-                match dst_map.get_mut(&key) {
-                    Some(dst_val) if dst_val.is_object() && src_val.is_object() => {
-                        merge_json(dst_val, src_val);
-                    }
-                    _ => {
-                        dst_map.insert(key, src_val);
-                    }
-                }
-            }
-        }
-        (dst, src) => {
-            *dst = src;
-        }
     }
 }
 
@@ -3258,60 +3230,6 @@ mod tests {
     fn migrate_config_errors_on_unknown_version() {
         let cfg = SystemConfig::default();
         assert!(migrate_config(cfg, 9999).is_err());
-    }
-
-    // -----------------------------------------------------------------------
-    // Fragment loading
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn load_fragments_returns_default_for_empty_dir() {
-        let dir = temp_dir();
-        let store = ConfigStore::with_dir(&dir);
-        let cfg = store.load_fragments().unwrap();
-        assert!(cfg.interfaces.is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn load_fragments_merges_json_files() {
-        let dir = temp_dir();
-        let store = ConfigStore::with_dir(&dir);
-
-        // Write two fragment files.
-        std::fs::write(dir.join("hostname.json"), r#"{"hostname":"fragment-fw"}"#).unwrap();
-        std::fs::write(
-            dir.join("interfaces.json"),
-            r#"{"interfaces":[{"name":"eth0","addresses":["192.168.1.1/24"],"enabled":true,"dhcp4":false,"dhcp6":false}]}"#,
-        )
-        .unwrap();
-
-        let cfg = store.load_fragments().unwrap();
-        assert_eq!(cfg.hostname, "fragment-fw");
-        assert_eq!(cfg.interfaces.len(), 1);
-        assert_eq!(cfg.interfaces[0].name, "eth0");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn load_fragments_skips_primary_config_file() {
-        let dir = temp_dir();
-        let store = ConfigStore::with_dir(&dir);
-
-        // Write the primary config with one hostname.
-        let mut cfg = SystemConfig::default();
-        cfg.hostname = "primary".into();
-        store.save(&cfg).unwrap();
-
-        // Write a fragment with a different hostname.
-        std::fs::write(dir.join("frag.json"), r#"{"hostname":"from-fragment"}"#).unwrap();
-
-        // load_fragments should include frag.json but NOT config.json.
-        let frags = store.load_fragments().unwrap();
-        assert_eq!(frags.hostname, "from-fragment");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // -----------------------------------------------------------------------

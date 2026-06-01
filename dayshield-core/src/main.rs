@@ -41,7 +41,7 @@ mod state;
 mod update;
 mod utils;
 
-use config::models::{Dhcp6Config, DhcpConfig, SystemSettings};
+use config::models::{Dhcp6Config, DhcpConfig, DnsConfig, SystemSettings};
 use state::AppState;
 
 #[tokio::main]
@@ -157,25 +157,25 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Reconcile network interfaces.  After a rootfs update the rsync
-    // extraction has wiped /etc/systemd/network/*.network (squashfs ships
-    // an empty directory there); we rewrite them from the persisted config
-    // so the user's WAN/LAN assignments and IPs survive every update.
+    // Reconcile network interfaces. After a rootfs update the squashfs may
+    // replace network runtime files; sync only reapplies interfaces whose live
+    // state is missing or stale so an already-acquired WAN DHCP lease is not
+    // needlessly torn down during startup.
     match app_state.config_store.load_interfaces() {
         Ok(interfaces) => {
-            for iface in &interfaces {
-                if let Err(err) =
-                    engine::interfaces::apply_interface_with_ipv6(iface, ipv6_enabled).await
-                {
-                    warn!(
-                        interface = %iface.name,
-                        "failed to reconcile interface at startup: {err:#}"
-                    );
-                }
+            if let Err(err) =
+                engine::interfaces::sync_interfaces_with_ipv6(&interfaces, ipv6_enabled).await
+            {
+                warn!("failed to reconcile interfaces at startup: {err:#}");
             }
         }
         Err(err) => warn!("failed to load interfaces for startup reconcile: {err:#}"),
     }
+
+    // Recreate generated Unbound runtime config from persisted DayShield state.
+    // The service may already be enabled by the rootfs image, and its base
+    // config includes /var/lib/dayshield/unbound/dayshield.conf.
+    reconcile_dns_runtime(&app_state.config_store, ipv6_enabled).await;
 
     // Reconcile Kea with the persisted DayShield config. Kea units can be
     // enabled independently by the package/rootfs, so startup must recreate
@@ -474,6 +474,29 @@ async fn reconcile_dhcp_runtime(config_store: &config::ConfigStore) {
             }
         }
         Err(err) => warn!("failed to load DHCPv6 config for startup reconcile: {err:#}"),
+    }
+}
+
+async fn reconcile_dns_runtime(config_store: &config::ConfigStore, ipv6_enabled: bool) {
+    let cfg = match config_store.load_dns_config() {
+        Ok(Some(cfg)) => cfg,
+        Ok(None) => DnsConfig::default(),
+        Err(err) => {
+            warn!("failed to load DNS config for startup reconcile: {err:#}");
+            return;
+        }
+    };
+
+    let dot = match config_store.load_dot_config() {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            warn!("failed to load DoT config for startup reconcile: {err:#}");
+            None
+        }
+    };
+
+    if let Err(err) = engine::dns::apply_config_with_ipv6(&cfg, dot.as_ref(), ipv6_enabled).await {
+        warn!("failed to reconcile DNS runtime config: {err:#}");
     }
 }
 

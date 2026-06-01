@@ -17,7 +17,7 @@
 //! | `start_dhcp_client`        | Spawn dhclient for a DHCP4 interface.         |
 //! | `stop_dhcp_client`         | Release DHCP lease and stop dhclient.         |
 
-use std::collections::HashMap;
+use std::{collections::HashMap, path::Path};
 
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
@@ -809,10 +809,6 @@ async fn flush_interface_addresses(name: &str) {
     let _ = run_ip(&["-6", "addr", "flush", "dev", name, "scope", "global"]).await;
 }
 
-async fn flush_ipv4_global_addresses(name: &str) -> Result<(), InterfaceError> {
-    run_ip(&["-4", "addr", "flush", "dev", name, "scope", "global"]).await
-}
-
 pub(crate) async fn teardown_interface_runtime(name: &str) {
     stop_pppoe(name).await;
     remove_pppoe_config(name).await;
@@ -831,17 +827,30 @@ pub(crate) async fn teardown_interface_runtime(name: &str) {
 /// dropped intentionally so it continues renewing leases independently.
 async fn start_dhcp_client(name: &str) -> Result<(), InterfaceError> {
     let pid_file = format!("/run/dhclient.{name}.pid");
+    let lease_file = format!("{DHCP_LEASE_DIR}/dhclient.{name}.leases");
 
-    // Release any existing lease and clean up stale aliases before requesting a new lease.
-    stop_dhcp_client(name).await;
-    flush_ipv4_global_addresses(name).await?;
     ensure_dhclient_lease_dirs().await?;
+    if !command_exists("dhclient") {
+        return Err(InterfaceError::ApplyFailed(
+            "dhclient is not installed or not on PATH; cannot acquire DHCPv4 lease".to_string(),
+        ));
+    }
 
-    info!(name = %name, pid_file = %pid_file, "interfaces: starting dhclient");
+    // Release only a DayShield-managed client from this boot. If the OS has
+    // already obtained a lease during boot, keep that address in place until
+    // dhclient has a chance to renew or replace it.
+    stop_dhcp_client(name).await;
+
+    info!(
+        name = %name,
+        pid_file = %pid_file,
+        lease_file = %lease_file,
+        "interfaces: starting dhclient"
+    );
 
     // Spawn dhclient in background (no -1 flag so it keeps renewing).
     Command::new("dhclient")
-        .args(["-pf", &pid_file, name])
+        .args(["-pf", &pid_file, "-lf", &lease_file, name])
         .spawn()
         .map_err(|e| {
             InterfaceError::ApplyFailed(format!("failed to spawn dhclient for {name}: {e}"))
@@ -853,6 +862,7 @@ async fn start_dhcp_client(name: &str) -> Result<(), InterfaceError> {
 /// Start `dhclient` for `name` to acquire IPv6 configuration via DHCPv6.
 async fn start_dhcp6_client(name: &str) -> Result<(), InterfaceError> {
     let pid_file = format!("/run/dhclient6.{name}.pid");
+    let lease_file = format!("{DHCP_LEASE_DIR}/dhclient6.{name}.leases");
 
     stop_dhcp6_client(name).await;
     ensure_dhclient_lease_dirs().await?;
@@ -860,7 +870,7 @@ async fn start_dhcp6_client(name: &str) -> Result<(), InterfaceError> {
     info!(name = %name, pid_file = %pid_file, "interfaces: starting dhclient -6");
 
     Command::new("dhclient")
-        .args(["-6", "-pf", &pid_file, name])
+        .args(["-6", "-pf", &pid_file, "-lf", &lease_file, name])
         .spawn()
         .map_err(|e| {
             InterfaceError::ApplyFailed(format!("failed to spawn dhclient -6 for {name}: {e}"))
@@ -874,10 +884,20 @@ async fn start_dhcp6_client(name: &str) -> Result<(), InterfaceError> {
 /// Errors are logged and swallowed because dhclient may not be running.
 async fn stop_dhcp_client(name: &str) {
     let pid_file = format!("/run/dhclient.{name}.pid");
+    let lease_file = format!("{DHCP_LEASE_DIR}/dhclient.{name}.leases");
+
+    if !Path::new(&pid_file).exists() {
+        debug!(
+            name = %name,
+            pid_file = %pid_file,
+            "interfaces: no dhclient PID file; skipping DHCP lease release"
+        );
+        return;
+    }
 
     // Attempt a graceful release (sends DHCPRELEASE to the upstream server).
     let result = Command::new("dhclient")
-        .args(["-r", "-pf", &pid_file, name])
+        .args(["-r", "-pf", &pid_file, "-lf", &lease_file, name])
         .output()
         .await;
 
@@ -909,9 +929,19 @@ async fn stop_dhcp_client(name: &str) {
 /// Stop `dhclient -6` for `name`, releasing the DHCPv6 lease.
 async fn stop_dhcp6_client(name: &str) {
     let pid_file = format!("/run/dhclient6.{name}.pid");
+    let lease_file = format!("{DHCP_LEASE_DIR}/dhclient6.{name}.leases");
+
+    if !Path::new(&pid_file).exists() {
+        debug!(
+            name = %name,
+            pid_file = %pid_file,
+            "interfaces: no dhclient6 PID file; skipping DHCPv6 lease release"
+        );
+        return;
+    }
 
     let result = Command::new("dhclient")
-        .args(["-6", "-r", "-pf", &pid_file, name])
+        .args(["-6", "-r", "-pf", &pid_file, "-lf", &lease_file, name])
         .output()
         .await;
 
@@ -994,6 +1024,17 @@ async fn ensure_dhclient_lease_dirs() -> Result<(), InterfaceError> {
             ))
         })?;
     Ok(())
+}
+
+fn command_exists(bin: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths).any(|dir| {
+                let candidate = dir.join(bin);
+                candidate.is_file()
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// Stop the DHCPv6-PD client for `name`, releasing any active prefix lease.

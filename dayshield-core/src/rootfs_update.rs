@@ -951,8 +951,12 @@ const IDENTITY_PATHS: &[&str] = &[
     // STATE partition — it is NOT touched by the rsync, so we do not need to
     // copy it across slots here.
     //
-    // Network & services that DayShield writes to.
+    // Network & services that DayShield and the installer write to.
     "/etc/systemd/network",
+    "/etc/netplan",
+    "/etc/network",
+    "/etc/dhcp",
+    "/etc/NetworkManager/system-connections",
     "/etc/systemd/timesyncd.conf",
     "/etc/chrony/chrony.conf",
     "/etc/nftables.d",
@@ -1201,5 +1205,21 @@ mod tests {
             serde_json::to_string(&RootfsTransactionState::RollingBack).unwrap(),
             "\"rolling_back\""
         );
+    }
+
+    #[test]
+    fn identity_paths_preserve_network_boot_config() {
+        for path in [
+            "/etc/systemd/network",
+            "/etc/netplan",
+            "/etc/network",
+            "/etc/dhcp",
+            "/etc/NetworkManager/system-connections",
+        ] {
+            assert!(
+                IDENTITY_PATHS.contains(&path),
+                "{path} must survive A/B rootfs updates"
+            );
+        }
     }
 }

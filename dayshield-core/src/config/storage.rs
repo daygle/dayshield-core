@@ -35,7 +35,8 @@ use tracing::{debug, info, warn};
 
 use super::history;
 use super::models::{
-    AcmeConfig, AdminSecuritySettings, AiEngineConfig, CaptivePortalConfig, CloudflaredConfig,
+    AcmeConfig, AdminSecuritySettings, AiEngineConfig, CaddyConfig, CaptivePortalConfig,
+    CloudflaredConfig,
     ConfigHistorySettings,
     CrowdSecConfig, Dhcp6Config, DhcpConfig, DnsConfig, DnsDomainOverride, DnsHostOverride,
     DotConfig, DynamicDnsConfig, FirewallAlias, FirewallRule, FirewallSettings, Gateway,
@@ -1223,6 +1224,14 @@ impl ConfigStore {
             }
         }
 
+        // Caddy reverse-proxy config validation.
+        if let Some(caddy) = &config.caddy {
+            use crate::config::models::validate_caddy_config;
+            if let Err(msg) = validate_caddy_config(caddy) {
+                anyhow::bail!("Caddy config is invalid: {msg}");
+            }
+        }
+
         // Captive portal config validation.
         if let Some(captive_portal) = &config.captive_portal {
             use crate::config::models::validate_captive_portal_config_with_ipv6;
@@ -1567,6 +1576,18 @@ impl ConfigStore {
         let mut config = self.load()?;
         config.cloudflared = Some(cloudflared);
         self.save_with_rollback_described(&config, Some("Updated Cloudflare Tunnel configuration"))
+    }
+
+    /// Return the Caddy reverse-proxy configuration from the persisted config.
+    pub fn load_caddy_config(&self) -> Result<Option<CaddyConfig>> {
+        Ok(self.load()?.caddy)
+    }
+
+    /// Atomically replace the Caddy reverse-proxy configuration in the persisted config.
+    pub fn save_caddy_config(&self, caddy: CaddyConfig) -> Result<()> {
+        let mut config = self.load()?;
+        config.caddy = Some(caddy);
+        self.save_with_rollback_described(&config, Some("Updated Caddy reverse proxy configuration"))
     }
 
     /// Return the Captive Portal configuration from the persisted config.

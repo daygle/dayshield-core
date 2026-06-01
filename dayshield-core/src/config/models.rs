@@ -3549,6 +3549,107 @@ pub fn validate_cloudflared_config(config: &CloudflaredConfig) -> Result<(), Str
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Caddy reverse proxy
+// ---------------------------------------------------------------------------
+
+fn default_caddy_log_level() -> String {
+    "info".to_string()
+}
+
+/// Single Caddy reverse-proxy site mapping.
+///
+/// Each site routes an incoming `domain` (virtual host) to a backend
+/// `upstream`. Caddy provisions and renews a TLS certificate for `domain`
+/// automatically via its built-in ACME client when automatic HTTPS is enabled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaddySite {
+    /// Public hostname clients connect to, e.g. `app.example.com`.
+    pub domain: String,
+    /// Backend the request is proxied to, e.g. `http://10.0.0.5:8080`.
+    pub upstream: String,
+    /// Whether this site is served. Disabled sites are omitted from the
+    /// rendered Caddyfile so they neither listen nor request certificates.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+/// Configuration for the Caddy reverse-proxy integration.
+///
+/// Caddy fronts user-defined sites and terminates TLS using automatic HTTPS
+/// (Let's Encrypt). `acme_email` is the ACME account contact address used for
+/// certificate issuance and expiry notices.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaddyConfig {
+    pub enabled: bool,
+    /// ACME account email used for automatic HTTPS certificate issuance.
+    #[serde(default)]
+    pub acme_email: String,
+    #[serde(default = "default_caddy_log_level")]
+    pub log_level: String,
+    #[serde(default)]
+    pub sites: Vec<CaddySite>,
+}
+
+impl Default for CaddyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            acme_email: String::new(),
+            log_level: default_caddy_log_level(),
+            sites: vec![],
+        }
+    }
+}
+
+/// Validate a [`CaddyConfig`].
+///
+/// When disabled, any partially-filled configuration is accepted so operators
+/// can save a draft. When enabled, every active site must carry a valid domain
+/// and HTTP/HTTPS upstream, and an ACME contact email is required because
+/// automatic HTTPS issuance depends on it.
+pub fn validate_caddy_config(config: &CaddyConfig) -> Result<(), String> {
+    if !config.enabled {
+        return Ok(());
+    }
+
+    let active: Vec<&CaddySite> = config.sites.iter().filter(|s| s.enabled).collect();
+
+    if active.is_empty() {
+        return Err("caddy must have at least one enabled site when enabled".into());
+    }
+
+    if !validate_email(&config.acme_email) {
+        return Err(
+            "caddy acme_email must be a valid email address when automatic HTTPS is enabled".into(),
+        );
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    for site in active {
+        let domain = site.domain.trim();
+        if !is_valid_domain(domain) {
+            return Err(format!(
+                "caddy site domain {:?} is not a valid domain",
+                site.domain
+            ));
+        }
+        if !seen.insert(domain.to_ascii_lowercase()) {
+            return Err(format!("caddy site domain {:?} is duplicated", site.domain));
+        }
+        if !validate_url(&site.upstream) {
+            return Err(format!(
+                "caddy site upstream {:?} is not a valid HTTP/HTTPS URL",
+                site.upstream
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// AI threat-engine policy and blocking controls.
 ///
 /// The engine runs entirely in-process using a self-reliant local logistic
@@ -3951,6 +4052,9 @@ pub struct SystemConfig {
     /// Cloudflare Tunnel configuration.
     #[serde(default)]
     pub cloudflared: Option<CloudflaredConfig>,
+    /// Caddy reverse-proxy configuration.
+    #[serde(default)]
+    pub caddy: Option<CaddyConfig>,
     /// Captive portal configuration for guest/client network access.
     #[serde(default)]
     pub captive_portal: Option<CaptivePortalConfig>,

@@ -6,6 +6,7 @@ mod ai;
 mod aliases;
 mod auth;
 mod backup;
+mod caddy;
 mod cloudflared;
 mod config_history;
 mod crowdsec;
@@ -160,6 +161,11 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `GET  /cloudflared/status`                            - get Cloudflared service status
 /// - `POST /cloudflared/restart`                           - restart the Cloudflared service
 /// - `GET  /cloudflared/logs`                              - get Cloudflared logs
+/// - `GET  /caddy/config`                                  - get Caddy reverse-proxy configuration
+/// - `POST /caddy/config`                                  - update Caddy reverse-proxy configuration
+/// - `GET  /caddy/status`                                  - get Caddy service status
+/// - `POST /caddy/restart`                                 - restart the Caddy service
+/// - `GET  /caddy/logs`                                    - get Caddy logs
 /// - `GET  /captive-portal/config`                         - get captive portal configuration
 /// - `PUT  /captive-portal/config`                         - update captive portal configuration
 /// - `GET  /captive-portal/status`                         - get captive portal runtime status
@@ -513,6 +519,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/cloudflared/status", get(cloudflared::get_status))
         .route("/cloudflared/restart", post(cloudflared::restart_service))
         .route("/cloudflared/logs", get(cloudflared::get_logs))
+        // Caddy reverse proxy
+        .route("/caddy/config", get(caddy::get_config))
+        .route("/caddy/config", post(caddy::update_config))
+        .route("/caddy/status", get(caddy::get_status))
+        .route("/caddy/restart", post(caddy::restart_service))
+        .route("/caddy/logs", get(caddy::get_logs))
         // Captive Portal
         .route(
             "/captive-portal/config",

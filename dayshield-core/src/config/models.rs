@@ -3871,6 +3871,18 @@ fn default_history_max_revisions() -> u32 {
     50
 }
 
+impl ConfigHistorySettings {
+    /// Effective retention count, clamped to at least 1.
+    ///
+    /// Guards against a manually-edited or corrupt `max_revisions = 0`, which
+    /// would otherwise turn pruning into a no-op and let the history grow
+    /// without bound. Archiving is turned off via [`Self::enabled`], not by a
+    /// zero retention count.
+    pub fn effective_max_revisions(&self) -> usize {
+        self.max_revisions.max(1) as usize
+    }
+}
+
 impl Default for ConfigHistorySettings {
     fn default() -> Self {
         Self {

@@ -54,10 +54,13 @@ impl IntoResponse for ConfigHistoryError {
     }
 }
 
-/// Map a storage-layer error to either `404` (unknown revision id) or `500`.
+/// Map a storage-layer error to a `400`-class status: `422` for a malformed
+/// revision id, `404` for an unknown revision, or `500` otherwise.
 fn classify(err: anyhow::Error) -> ConfigHistoryError {
     let msg = err.to_string();
-    if msg.contains("not found") || msg.contains("invalid revision id") {
+    if msg.contains("invalid revision id") {
+        ConfigHistoryError::Validation(msg)
+    } else if msg.contains("not found") {
         ConfigHistoryError::NotFound(msg)
     } else {
         ConfigHistoryError::StorageError(err)

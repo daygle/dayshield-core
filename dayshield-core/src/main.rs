@@ -78,7 +78,10 @@ async fn main() -> anyhow::Result<()> {
         rootfs_update::sync_identity_to_standby(running.other())
             .await
             .map_err(|e| anyhow::anyhow!("rootfs-sync-identity failed: {e:#}"))?;
-        println!("Identity files mirrored from {} to standby.", running.as_str());
+        println!(
+            "Identity files mirrored from {} to standby.",
+            running.as_str()
+        );
         return Ok(());
     }
     if args.get(1).map(String::as_str) == Some("rootfs-apply") {

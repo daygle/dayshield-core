@@ -900,8 +900,11 @@ pub async fn sync_identity_to_standby(standby_slot: Slot) -> Result<()> {
     let mut details: Vec<String> = Vec::new();
     let count = copy_identity_files_to_slot(mount_path, &mut details).await;
 
-    let umount_result =
-        run_status(Command::new("umount").arg(mount_path), "umount standby slot").await;
+    let umount_result = run_status(
+        Command::new("umount").arg(mount_path),
+        "umount standby slot",
+    )
+    .await;
 
     info!(
         slot = standby_slot.as_str(),

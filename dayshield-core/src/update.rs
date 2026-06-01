@@ -347,6 +347,14 @@ impl RepoComponent {
         }
     }
 
+    fn display_name(self) -> &'static str {
+        match self {
+            RepoComponent::Core => "Core",
+            RepoComponent::Ui => "UI",
+            RepoComponent::Rootfs => "rootfs",
+        }
+    }
+
     fn from_update_component(component: UpdateComponent) -> Vec<Self> {
         match component {
             UpdateComponent::Core => vec![Self::Core],
@@ -355,6 +363,43 @@ impl RepoComponent {
             UpdateComponent::Both => vec![Self::Core, Self::Ui, Self::Rootfs],
         }
     }
+}
+
+fn component_log_label(component: &str) -> String {
+    component
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| match value {
+            "core" => RepoComponent::Core.display_name().to_string(),
+            "ui" => RepoComponent::Ui.display_name().to_string(),
+            "rootfs" => RepoComponent::Rootfs.display_name().to_string(),
+            other => other.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn component_log_prefix(component: Option<&str>) -> Option<String> {
+    component
+        .map(component_log_label)
+        .filter(|label| !label.is_empty())
+        .map(|label| format!("[{label}]"))
+}
+
+fn component_log_message(message: String, component: Option<&str>) -> String {
+    match component_log_prefix(component) {
+        Some(prefix) if !message.starts_with(&prefix) => format!("{prefix} {message}"),
+        _ => message,
+    }
+}
+
+fn component_log_display_value(components: &[RepoComponent]) -> String {
+    components
+        .iter()
+        .map(|component| component.display_name())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn ensure_registry_updatable_selection(_selected_components: &[RepoComponent]) -> Result<()> {
@@ -1187,7 +1232,7 @@ fn append_operation_log_with_versions(
     from_version: Option<&str>,
     to_version: Option<&str>,
 ) {
-    let message_str: String = message.into();
+    let message_str = component_log_message(message.into(), component);
 
     // Publish to live logs so update actions appear in the Logs / Live Logs view.
     crate::live_logs::ui::publish(crate::live_logs::LogEvent::UpdateEvent {
@@ -1743,13 +1788,10 @@ async fn populate_github_release_checksums(
 
         if component.checksum_sha256.is_empty() {
             let checksum_name = format!("{artifact_name}.sha256");
-            if let Some(checksum_asset) =
-                release.assets.iter().find(|a| a.name == checksum_name)
-            {
+            if let Some(checksum_asset) = release.assets.iter().find(|a| a.name == checksum_name) {
                 match fetch_github_asset_text(client, checksum_asset).await {
                     Ok(checksum_text) => {
-                        if let Some(checksum) = checksum_from_text(&checksum_text, artifact_name)
-                        {
+                        if let Some(checksum) = checksum_from_text(&checksum_text, artifact_name) {
                             component.checksum_sha256 = checksum;
                         } else {
                             warn!(
@@ -2376,11 +2418,12 @@ async fn apply_updates_registry(
     let settings = load_settings(state);
     let mut state_file = load_state(state);
     let mut details = Vec::new();
+    let update_component_label = component_log_display_value(&components_to_update);
     append_operation_log(
         &mut state_file,
         "apply",
         "info",
-        "Artifact update apply started",
+        format!("Artifact update apply started for {update_component_label}"),
         None,
     );
     set_operation_progress(
@@ -2388,7 +2431,7 @@ async fn apply_updates_registry(
         "apply",
         "starting",
         "running",
-        "Update started",
+        format!("Update started for {update_component_label}"),
         None,
         Some(2),
         None,
@@ -2407,7 +2450,7 @@ async fn apply_updates_registry(
         "apply",
         "resolved",
         "running",
-        "Resolved update artifacts",
+        format!("Resolved update artifacts for {update_component_label}"),
         None,
         Some(8),
         None,
@@ -2650,15 +2693,12 @@ async fn apply_updates_registry(
     }
 
     if downloads.is_empty() {
-        let selected = components_to_update
-            .iter()
-            .map(|c| c.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
         let message = if !skipped_up_to_date.is_empty() {
-            format!("no updates available for selected components: {selected}")
+            format!("no updates available for selected components: {update_component_label}")
         } else {
-            format!("no matching artifacts were published for selected components: {selected}")
+            format!(
+                "no matching artifacts were published for selected components: {update_component_label}"
+            )
         };
         details.push(message.clone());
         if !skipped_up_to_date.is_empty() {
@@ -2693,7 +2733,9 @@ async fn apply_updates_registry(
         match snapshot_config_for_rollback(state, settings.encrypt_update_config_backups) {
             Ok(path) => path,
             Err(err) => {
-                let msg = format!("failed to create config backup snapshot: {err}");
+                let msg = format!(
+                    "failed to create config backup snapshot for {update_component_label}: {err}"
+                );
                 append_operation_log(&mut state_file, "apply", "error", &msg, None);
                 set_operation_progress(
                     &mut state_file,
@@ -2722,7 +2764,7 @@ async fn apply_updates_registry(
         "apply",
         "backup",
         "running",
-        "Created config backup archive",
+        format!("Created config backup archive for {update_component_label}"),
         None,
         Some(70),
         None,
@@ -2732,7 +2774,7 @@ async fn apply_updates_registry(
         "apply",
         "info",
         format!(
-            "Created config backup archive: {}",
+            "Created config backup archive for {update_component_label}: {}",
             config_snapshot.display()
         ),
         None,
@@ -2784,7 +2826,7 @@ async fn apply_updates_registry(
         &mut state_file,
         "apply",
         "info",
-        "Created backup snapshots",
+        format!("Created backup snapshots for {update_component_label}"),
         None,
     );
 
@@ -2889,7 +2931,7 @@ async fn apply_updates_registry(
             "apply",
             "health_check",
             "running",
-            "Checking service health",
+            format!("Checking service health for {update_component_label}"),
             None,
             Some(92),
             None,
@@ -2901,7 +2943,10 @@ async fn apply_updates_registry(
                 &mut state_file,
                 "apply",
                 "error",
-                format!("Post-apply service health check failed: {}", err),
+                format!(
+                    "Post-apply service health check failed for {update_component_label}: {}",
+                    err
+                ),
                 None,
             );
             set_operation_progress(
@@ -2909,7 +2954,10 @@ async fn apply_updates_registry(
                 "apply",
                 "failed",
                 "failed",
-                format!("Post-apply service health check failed: {}", err),
+                format!(
+                    "Post-apply service health check failed for {update_component_label}: {}",
+                    err
+                ),
                 None,
                 Some(100),
                 None,
@@ -2929,7 +2977,7 @@ async fn apply_updates_registry(
             &mut state_file,
             "apply",
             "success",
-            "Post-apply service health check passed",
+            format!("Post-apply service health check passed for {update_component_label}"),
             None,
         );
     }
@@ -2941,7 +2989,7 @@ async fn apply_updates_registry(
         &mut state_file,
         "apply",
         "success",
-        "Artifact update apply completed",
+        format!("Artifact update apply completed for {update_component_label}"),
         None,
     );
     set_operation_progress(
@@ -2949,7 +2997,7 @@ async fn apply_updates_registry(
         "apply",
         "completed",
         "succeeded",
-        "Update completed successfully",
+        format!("Update completed successfully for {update_component_label}"),
         None,
         Some(100),
         None,
@@ -3067,11 +3115,12 @@ pub async fn rollback_updates(
 
     let mut details = Vec::new();
     let mut rolled_back_components: usize = 0;
+    let rollback_component_label = component_log_display_value(&selected);
     append_operation_log(
         &mut state_file,
         "rollback",
         "info",
-        "Rollback started",
+        format!("Rollback started for {rollback_component_label}"),
         None,
     );
     set_operation_progress(
@@ -3079,7 +3128,7 @@ pub async fn rollback_updates(
         "rollback",
         "starting",
         "running",
-        "Rollback started",
+        format!("Rollback started for {rollback_component_label}"),
         None,
         Some(5),
         None,
@@ -3210,7 +3259,9 @@ pub async fn rollback_updates(
             &mut state_file,
             "rollback",
             "error",
-            "Rollback failed: no components could be rolled back",
+            format!(
+                "Rollback failed for {rollback_component_label}: no components could be rolled back"
+            ),
             None,
         );
         set_operation_progress(
@@ -3218,7 +3269,9 @@ pub async fn rollback_updates(
             "rollback",
             "failed",
             "failed",
-            "Rollback failed: no components could be rolled back",
+            format!(
+                "Rollback failed for {rollback_component_label}: no components could be rolled back"
+            ),
             None,
             Some(100),
             None,
@@ -3242,7 +3295,9 @@ pub async fn rollback_updates(
                 &mut state_file,
                 "rollback",
                 "error",
-                "Rollback failed: no config backup archive available",
+                format!(
+                    "Rollback failed for {rollback_component_label}: no config backup archive available"
+                ),
                 None,
             );
             set_operation_progress(
@@ -3250,7 +3305,9 @@ pub async fn rollback_updates(
                 "rollback",
                 "failed",
                 "failed",
-                "Rollback failed: no config backup archive available",
+                format!(
+                    "Rollback failed for {rollback_component_label}: no config backup archive available"
+                ),
                 None,
                 Some(100),
                 None,
@@ -3269,7 +3326,7 @@ pub async fn rollback_updates(
 
     if let Err(err) = restore_config_from_snapshot(state, &snapshot_path) {
         let msg = format!(
-            "failed to restore config snapshot ({}): {}",
+            "failed to restore config snapshot for {rollback_component_label} ({}): {}",
             snapshot_path.display(),
             err
         );
@@ -3300,7 +3357,7 @@ pub async fn rollback_updates(
         "rollback",
         "success",
         format!(
-            "Restored config backup archive: {}",
+            "Restored config backup archive for {rollback_component_label}: {}",
             snapshot_path.display()
         ),
         None,
@@ -3310,7 +3367,7 @@ pub async fn rollback_updates(
         "rollback",
         "restore_config",
         "running",
-        "Restored config backup archive",
+        format!("Restored config backup archive for {rollback_component_label}"),
         None,
         Some(85),
         None,
@@ -3323,7 +3380,7 @@ pub async fn rollback_updates(
         &mut state_file,
         "rollback",
         "success",
-        "Rollback completed",
+        format!("Rollback completed for {rollback_component_label}"),
         None,
     );
     set_operation_progress(
@@ -3331,7 +3388,7 @@ pub async fn rollback_updates(
         "rollback",
         "completed",
         "succeeded",
-        "Rollback completed",
+        format!("Rollback completed for {rollback_component_label}"),
         None,
         Some(100),
         None,
@@ -3829,9 +3886,26 @@ mod tests {
     #[cfg(unix)]
     use super::install_executable_file_atomic;
     use super::{
-        artifact_version_from_name, checksum_from_text, github_repo_api_url, github_repo_slug,
-        ArtifactMetadata, RegistryManifest,
+        artifact_version_from_name, checksum_from_text, component_log_display_value,
+        component_log_label, component_log_message, github_repo_api_url, github_repo_slug,
+        ArtifactMetadata, RegistryManifest, RepoComponent,
     };
+
+    #[test]
+    fn component_log_helpers_format_operator_friendly_names() {
+        let components = vec![
+            RepoComponent::Core,
+            RepoComponent::Ui,
+            RepoComponent::Rootfs,
+        ];
+
+        assert_eq!(component_log_display_value(&components), "Core, UI, rootfs");
+        assert_eq!(component_log_label("core, ui, rootfs"), "Core, UI, rootfs");
+        assert_eq!(
+            component_log_message("Update started".to_string(), Some("core, ui, rootfs")),
+            "[Core, UI, rootfs] Update started"
+        );
+    }
 
     #[test]
     fn github_repo_slug_extracts_owner_and_repo() {

@@ -573,7 +573,11 @@ pub async fn sync_interfaces_with_ipv6(
         } else {
             true
         };
-        let dhcp4_needs_reset = dhcp4_needs_address_reset(config, kernel_iface);
+        let dhcp4_needs_reset = dhcp4_needs_address_reset(
+            config,
+            kernel_iface,
+            dhcp_client_pid_file_exists(&config.name),
+        );
 
         if needs_pppoe_apply || dhcp4_needs_reset || !already_up || !addrs_match {
             apply_interface_with_ipv6(config, ipv6_enabled).await?;
@@ -725,12 +729,36 @@ fn ipv4_address_count(addresses: &[String]) -> usize {
     addresses.iter().filter(|addr| is_ipv4_cidr(addr)).count()
 }
 
-fn dhcp4_needs_address_reset(config: &Interface, kernel_iface: Option<&KernelInterface>) -> bool {
-    config.enabled
-        && config.dhcp4
-        && kernel_iface
-            .map(|iface| ipv4_address_count(&iface.addresses) != 1)
-            .unwrap_or(false)
+fn dhcp4_needs_address_reset(
+    config: &Interface,
+    kernel_iface: Option<&KernelInterface>,
+    dhcp_client_running: bool,
+) -> bool {
+    if !config.enabled || !config.dhcp4 {
+        return false;
+    }
+
+    let Some(iface) = kernel_iface else {
+        return false;
+    };
+
+    match ipv4_address_count(&iface.addresses) {
+        0 => !dhcp_client_running,
+        1 => false,
+        _ => true,
+    }
+}
+
+fn dhcp_client_pid_file(name: &str) -> String {
+    format!("/run/dhclient.{name}.pid")
+}
+
+fn dhcp_client_lease_file(name: &str) -> String {
+    format!("{DHCP_LEASE_DIR}/dhclient.{name}.leases")
+}
+
+fn dhcp_client_pid_file_exists(name: &str) -> bool {
+    Path::new(&dhcp_client_pid_file(name)).exists()
 }
 
 fn kernel_address_cidr(addr: &IpAddrInfo) -> Option<String> {
@@ -809,6 +837,10 @@ async fn flush_interface_addresses(name: &str) {
     let _ = run_ip(&["-6", "addr", "flush", "dev", name, "scope", "global"]).await;
 }
 
+async fn flush_ipv4_global_addresses(name: &str) {
+    let _ = run_ip(&["-4", "addr", "flush", "dev", name, "scope", "global"]).await;
+}
+
 pub(crate) async fn teardown_interface_runtime(name: &str) {
     stop_pppoe(name).await;
     remove_pppoe_config(name).await;
@@ -826,8 +858,8 @@ pub(crate) async fn teardown_interface_runtime(name: &str) {
 /// dhclient runs as a detached background process; its Child handle is
 /// dropped intentionally so it continues renewing leases independently.
 async fn start_dhcp_client(name: &str) -> Result<(), InterfaceError> {
-    let pid_file = format!("/run/dhclient.{name}.pid");
-    let lease_file = format!("{DHCP_LEASE_DIR}/dhclient.{name}.leases");
+    let pid_file = dhcp_client_pid_file(name);
+    let lease_file = dhcp_client_lease_file(name);
 
     ensure_dhclient_lease_dirs().await?;
     if !command_exists("dhclient") {
@@ -836,10 +868,12 @@ async fn start_dhcp_client(name: &str) -> Result<(), InterfaceError> {
         ));
     }
 
-    // Release only a DayShield-managed client from this boot. If the OS has
-    // already obtained a lease during boot, keep that address in place until
-    // dhclient has a chance to renew or replace it.
+    // Release any DayShield-managed client from this boot, then clear global
+    // IPv4 addresses before requesting a fresh lease. This prevents DHCP WAN
+    // mode from stacking multiple upstream IPv4 leases on the same interface
+    // when boot-time networking or a previous dhclient left an address behind.
     stop_dhcp_client(name).await;
+    flush_ipv4_global_addresses(name).await;
 
     info!(
         name = %name,
@@ -883,8 +917,8 @@ async fn start_dhcp6_client(name: &str) -> Result<(), InterfaceError> {
 /// Runs `dhclient -r` for a graceful release, then removes the PID file.
 /// Errors are logged and swallowed because dhclient may not be running.
 async fn stop_dhcp_client(name: &str) {
-    let pid_file = format!("/run/dhclient.{name}.pid");
-    let lease_file = format!("{DHCP_LEASE_DIR}/dhclient.{name}.leases");
+    let pid_file = dhcp_client_pid_file(name);
+    let lease_file = dhcp_client_lease_file(name);
 
     if !Path::new(&pid_file).exists() {
         debug!(
@@ -1507,17 +1541,18 @@ mod tests {
             tx_bytes: None,
         };
 
-        assert!(!dhcp4_needs_address_reset(&config, Some(&kernel)));
+        assert!(!dhcp4_needs_address_reset(&config, Some(&kernel), false));
 
         kernel.addresses.clear();
-        assert!(dhcp4_needs_address_reset(&config, Some(&kernel)));
+        assert!(dhcp4_needs_address_reset(&config, Some(&kernel), false));
+        assert!(!dhcp4_needs_address_reset(&config, Some(&kernel), true));
 
         kernel.addresses.push("192.168.20.18/24".into());
         kernel.addresses.push("192.168.20.19/24".into());
-        assert!(dhcp4_needs_address_reset(&config, Some(&kernel)));
+        assert!(dhcp4_needs_address_reset(&config, Some(&kernel), true));
 
         config.dhcp4 = false;
-        assert!(!dhcp4_needs_address_reset(&config, Some(&kernel)));
+        assert!(!dhcp4_needs_address_reset(&config, Some(&kernel), false));
     }
 
     #[test]

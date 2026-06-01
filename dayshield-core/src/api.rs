@@ -7,6 +7,7 @@ mod aliases;
 mod auth;
 mod backup;
 mod cloudflared;
+mod config_history;
 mod crowdsec;
 mod dashboard;
 mod dhcp;
@@ -140,6 +141,9 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `POST /backup/restore`                                - restore from an uploaded backup file
 /// - `GET  /backup/scheduler`                              - get the scheduler configuration
 /// - `POST /backup/scheduler`                              - update the scheduler configuration
+/// - `GET  /config/history`                                - list archived configuration revisions
+/// - `GET  /config/history/{id}`                           - fetch the full configuration of one revision
+/// - `POST /config/history/{id}/restore`                   - restore a revision as the live configuration
 /// - `GET  /notify/config`                                 - get notification configuration
 /// - `POST /notify/config`                                 - update notification configuration
 /// - `POST /notify/test`                                   - send a test notification email
@@ -471,6 +475,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/backup/scheduler", get(backup::get_scheduler_handler))
         .route("/backup/scheduler", post(backup::update_scheduler_handler))
+        // Configuration history (revisions)
+        .route("/config/history", get(config_history::list_handler))
+        .route("/config/history/{id}", get(config_history::get_handler))
+        .route(
+            "/config/history/{id}/restore",
+            post(config_history::restore_handler),
+        )
         // Notifications
         .route("/notify/config", get(notify::get_config))
         .route("/notify/config", post(notify::update_config))

@@ -221,6 +221,19 @@ pub(crate) fn read_revision_config(config_path: &Path, id: &str) -> Result<serde
     Ok(envelope.config)
 }
 
+/// Delete a single archived revision by id.
+pub(crate) fn delete_revision(config_path: &Path, id: &str) -> Result<()> {
+    validate_id(id)?;
+    let path = history_dir(config_path).join(format!("{id}.json"));
+    if !path.exists() {
+        anyhow::bail!("revision {id} not found");
+    }
+    std::fs::remove_file(&path)
+        .with_context(|| format!("Failed to delete revision {}", path.display()))?;
+    debug!(id = %id, "Deleted config revision");
+    Ok(())
+}
+
 /// Remove the oldest revisions so at most `max_revisions` remain.
 fn prune(dir: &Path, max_revisions: usize) -> Result<()> {
     if max_revisions == 0 {

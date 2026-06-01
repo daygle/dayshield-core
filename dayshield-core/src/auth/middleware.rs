@@ -11,7 +11,7 @@
 //!    A `token` URL query parameter is accepted only on selected WebSocket
 //!    routes where browsers cannot set custom headers during handshake.
 //! 2. Validates the token signature and expiry using the HMAC-SHA256 session
-//!    key stored in `/etc/dayshield/session.key`.
+//!    key stored in `/var/lib/dayshield/session.key`.
 //! 3. On success, inserts an [`AuthenticatedUser`] extension into the request
 //!    so downstream handlers can retrieve it with
 //!    `Extension<AuthenticatedUser>`.

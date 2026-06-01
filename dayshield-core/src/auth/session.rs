@@ -3,7 +3,7 @@
 //! # Key storage
 //!
 //! The HMAC-SHA256 signing secret is read from (or generated into)
-//! `/etc/dayshield/session.key`.  The file holds the raw bytes of a 32-byte
+//! `/var/lib/dayshield/session.key`.  The file holds the raw bytes of a 32-byte
 //! random key; it is created with mode `0o600` if it does not exist.
 //!
 //! # Token format

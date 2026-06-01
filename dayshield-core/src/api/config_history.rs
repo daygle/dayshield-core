@@ -20,6 +20,7 @@ use axum::{
 };
 use tracing::info;
 
+use crate::config::models::ConfigHistorySettings;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -31,6 +32,9 @@ pub enum ConfigHistoryError {
     #[error("not found: {0}")]
     NotFound(String),
 
+    #[error("validation error: {0}")]
+    Validation(String),
+
     #[error("storage error: {0:#}")]
     StorageError(anyhow::Error),
 }
@@ -39,6 +43,7 @@ impl IntoResponse for ConfigHistoryError {
     fn into_response(self) -> Response {
         let status = match &self {
             ConfigHistoryError::NotFound(_) => StatusCode::NOT_FOUND,
+            ConfigHistoryError::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ConfigHistoryError::StorageError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (
@@ -102,4 +107,53 @@ pub async fn restore_handler(
     Ok(Json(
         serde_json::json!({ "status": "ok", "restored": id }),
     ))
+}
+
+/// `DELETE /config/history/{id}`
+///
+/// Deletes a single archived revision.
+pub async fn delete_handler(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<impl IntoResponse, ConfigHistoryError> {
+    state.config_store.delete_revision(&id).map_err(classify)?;
+    info!(revision = %id, "config revision deleted via API");
+    Ok(Json(serde_json::json!({ "status": "ok", "deleted": id })))
+}
+
+/// `GET /config/history-settings`
+///
+/// Returns the configuration history retention settings.
+pub async fn get_settings_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, ConfigHistoryError> {
+    let settings = state
+        .config_store
+        .load_history_settings()
+        .map_err(ConfigHistoryError::StorageError)?;
+    Ok(Json(settings))
+}
+
+/// `PUT /config/history-settings`
+///
+/// Updates the configuration history retention settings.
+pub async fn put_settings_handler(
+    State(state): State<Arc<AppState>>,
+    Json(settings): Json<ConfigHistorySettings>,
+) -> Result<impl IntoResponse, ConfigHistoryError> {
+    if settings.max_revisions == 0 {
+        return Err(ConfigHistoryError::Validation(
+            "max_revisions must be greater than 0".into(),
+        ));
+    }
+    state
+        .config_store
+        .save_history_settings(settings.clone())
+        .map_err(ConfigHistoryError::StorageError)?;
+    info!(
+        enabled = settings.enabled,
+        max_revisions = settings.max_revisions,
+        "config history settings updated via API"
+    );
+    Ok(Json(settings))
 }

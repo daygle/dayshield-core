@@ -4,7 +4,7 @@
 //!
 //! - **Atomic writes**: new content is written to a sibling `.tmp` file and
 //!   then renamed into place, so a mid-write crash cannot corrupt the record.
-//! - **Directory creation**: the `/etc/dayshield` directory is created if it
+//! - **Directory creation**: the `/var/lib/dayshield` directory is created if it
 //!   does not exist.
 //!
 //! # File layout

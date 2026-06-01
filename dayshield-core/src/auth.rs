@@ -6,7 +6,7 @@
 //!
 //! - [`model`]      - [`User`] model and [`AuthError`] error type.
 //! - [`password`]   - Argon2id password hashing and verification.
-//! - [`storage`]    - Persistent user storage at `/etc/dayshield/admin.json`.
+//! - [`storage`]    - Persistent user storage at `/var/lib/dayshield/admin.json`.
 //! - [`session`]    - JWT session token creation and validation.
 //! - [`middleware`] - Axum middleware that authenticates every request.
 //!

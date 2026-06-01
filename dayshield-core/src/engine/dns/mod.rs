@@ -161,8 +161,10 @@ pub fn generate_config_with_ipv6(
 ///    to [`DOT_CERT_PATH`] / [`DOT_KEY_PATH`] before generating the config.
 /// 2. Generate `unbound.conf` via [`generate_config`].
 /// 3. Write the file atomically to [`UNBOUND_CONF_PATH`].
-/// 4. If Unbound is running, send it `unbound-control reload`; otherwise
-///    attempt to start it with `systemctl start unbound`.
+/// 4. Apply the change with `systemctl reload-or-restart unbound`, which
+///    reloads Unbound when it is already running (re-reading the config
+///    without dropping the cache, via the unit's `ExecReload` SIGHUP) and
+///    starts it when it is not.
 ///
 /// # Errors
 ///
@@ -214,25 +216,11 @@ pub async fn apply_config_with_ipv6(
 
     info!(path = UNBOUND_CONF_PATH, "dns: unbound.conf written");
 
-    // Try a live reload first; fall back to a full service start.
-    let reload = Command::new("unbound-control").arg("reload").output().await;
-
-    match reload {
-        Ok(out) if out.status.success() => {
-            info!("dns: unbound-control reload succeeded");
-        }
-        Ok(out) => {
-            warn!(
-                stderr = %String::from_utf8_lossy(&out.stderr),
-                "dns: unbound-control reload failed; attempting systemctl start unbound"
-            );
-            start_unbound().await?;
-        }
-        Err(e) => {
-            warn!(error = %e, "dns: unbound-control not available; attempting systemctl start unbound");
-            start_unbound().await?;
-        }
-    }
+    // Apply the change. `reload-or-restart` sends a reload (SIGHUP, see the
+    // unbound.service `ExecReload`) when Unbound is already running - which
+    // re-reads unbound.conf and our included dayshield.conf without dropping
+    // the cache - and starts the service when it is not yet running.
+    reload_or_start_unbound().await?;
 
     Ok(())
 }
@@ -412,20 +400,24 @@ fn write_config_atomic(path: &str, content: &str) -> Result<()> {
     Ok(())
 }
 
-/// Start the Unbound service via systemctl.
-async fn start_unbound() -> Result<()> {
+/// Reload the Unbound service if it is running, or start it otherwise.
+///
+/// Uses `systemctl reload-or-restart`, which dispatches to the unit's
+/// `ExecReload` (a SIGHUP that makes Unbound re-read its configuration) when
+/// the service is active, and starts it when it is not.
+async fn reload_or_start_unbound() -> Result<()> {
     let out = Command::new("systemctl")
-        .args(["start", "unbound"])
+        .args(["reload-or-restart", "unbound"])
         .output()
         .await
         .context("failed to spawn systemctl")?;
 
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        anyhow::bail!("systemctl start unbound failed: {stderr}");
+        anyhow::bail!("systemctl reload-or-restart unbound failed: {stderr}");
     }
 
-    info!("dns: unbound started via systemctl");
+    info!("dns: unbound reloaded via systemctl");
     Ok(())
 }
 

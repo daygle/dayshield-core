@@ -65,6 +65,22 @@ cargo test -p dayshield-core
 - The UI frontend and appliance root filesystem are maintained in separate repositories.
 - Developers should validate changes with workspace build/test commands and ensure runtime integration compatibility.
 
+## Caddy reverse proxy endpoints
+
+`dayshield-core` exposes reverse-proxy management under `/caddy/`:
+
+- `GET  /caddy/config` - current Caddy reverse-proxy configuration
+- `POST /caddy/config` - update persisted config and render `/etc/caddy/Caddyfile`
+- `GET  /caddy/status` - service runtime status (unit state, binary, version, site count)
+- `POST /caddy/restart` - restart the Caddy service
+- `GET  /caddy/logs` - recent Caddy journal lines
+
+Each site maps a public `domain` to a backend `upstream` (an `http://` or
+`https://` URL). Caddy provisions and renews TLS certificates automatically via
+Let's Encrypt; the `acmeEmail` field is the ACME account contact address. The
+`caddy.service` systemd unit is installed but stays disabled until a valid
+configuration is saved, at which point `dayshield-core` enables and reloads it.
+
 ## QoS / Smart Queue Management endpoints
 
 `dayshield-core` exposes interface-level QoS controls under `/qos/`:

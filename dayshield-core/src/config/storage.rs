@@ -35,7 +35,8 @@ use tracing::{debug, info, warn};
 
 use super::history;
 use super::models::{
-    AcmeConfig, AdminSecuritySettings, AiEngineConfig, CaptivePortalConfig, CloudflaredConfig,
+    AcmeConfig, AdminSecuritySettings, AiEngineConfig, CaddyConfig, CaptivePortalConfig,
+    CloudflaredConfig,
     ConfigHistorySettings,
     CrowdSecConfig, Dhcp6Config, DhcpConfig, DnsConfig, DnsDomainOverride, DnsHostOverride,
     DotConfig, DynamicDnsConfig, FirewallAlias, FirewallRule, FirewallSettings, Gateway,
@@ -1223,6 +1224,14 @@ impl ConfigStore {
             }
         }
 
+        // Caddy reverse-proxy config validation.
+        if let Some(caddy) = &config.caddy {
+            use crate::config::models::validate_caddy_config;
+            if let Err(msg) = validate_caddy_config(caddy) {
+                anyhow::bail!("Caddy config is invalid: {msg}");
+            }
+        }
+
         // Captive portal config validation.
         if let Some(captive_portal) = &config.captive_portal {
             use crate::config::models::validate_captive_portal_config_with_ipv6;
@@ -1569,6 +1578,18 @@ impl ConfigStore {
         self.save_with_rollback_described(&config, Some("Updated Cloudflare Tunnel configuration"))
     }
 
+    /// Return the Caddy reverse-proxy configuration from the persisted config.
+    pub fn load_caddy_config(&self) -> Result<Option<CaddyConfig>> {
+        Ok(self.load()?.caddy)
+    }
+
+    /// Atomically replace the Caddy reverse-proxy configuration in the persisted config.
+    pub fn save_caddy_config(&self, caddy: CaddyConfig) -> Result<()> {
+        let mut config = self.load()?;
+        config.caddy = Some(caddy);
+        self.save_with_rollback_described(&config, Some("Updated Caddy reverse proxy configuration"))
+    }
+
     /// Return the Captive Portal configuration from the persisted config.
     pub fn load_captive_portal_config(&self) -> Result<Option<CaptivePortalConfig>> {
         Ok(self.load()?.captive_portal)
@@ -1900,17 +1921,46 @@ impl ConfigStore {
     // ------------------------------------------------------------------
 
     fn try_restore_backup(&self, bak_path: &Path) {
-        if bak_path.exists() {
-            if let Err(re) = std::fs::copy(bak_path, &self.config_path) {
-                warn!(
-                    error = %re,
-                    backup = %bak_path.display(),
-                    target = %self.config_path.display(),
-                    "Failed to restore config backup"
-                );
-            } else {
-                info!(path = %self.config_path.display(), "Config restored from backup");
+        if !bak_path.exists() {
+            return;
+        }
+
+        // Guard against any unexpected path by canonicalizing and verifying the
+        // backup file resolves within the same directory as the live config.
+        // bak_path is always self.config_path + ".bak" in practice, but this
+        // check makes that safety property explicit and suppresses path-injection
+        // analysis warnings.
+        if let Some(config_dir) = self.config_path.parent() {
+            match std::fs::canonicalize(bak_path) {
+                Ok(canonical) if !canonical.starts_with(config_dir) => {
+                    warn!(
+                        backup = %bak_path.display(),
+                        config_dir = %config_dir.display(),
+                        "Refusing to restore backup outside config directory"
+                    );
+                    return;
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        backup = %bak_path.display(),
+                        "Cannot canonicalize backup path; skipping restore"
+                    );
+                    return;
+                }
+                Ok(_) => {}
             }
+        }
+
+        if let Err(re) = std::fs::copy(bak_path, &self.config_path) {
+            warn!(
+                error = %re,
+                backup = %bak_path.display(),
+                target = %self.config_path.display(),
+                "Failed to restore config backup"
+            );
+        } else {
+            info!(path = %self.config_path.display(), "Config restored from backup");
         }
     }
 }

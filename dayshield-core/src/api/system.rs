@@ -45,8 +45,8 @@ use crate::{
     },
     rootfs_update,
     state::{
-        AppState, SVC_CLOUDFLARED, SVC_CROWDSEC, SVC_DHCP, SVC_DNS, SVC_NFTABLES, SVC_SURICATA,
-        SVC_VPN,
+        AppState, SVC_CADDY, SVC_CLOUDFLARED, SVC_CROWDSEC, SVC_DHCP, SVC_DNS, SVC_NFTABLES,
+        SVC_SURICATA, SVC_VPN,
     },
     update::{self, UpdateComponent, UpdateSettings},
 };
@@ -223,6 +223,12 @@ const SERVICE_DEFINITIONS: &[ServiceDefinition] = &[
         title: "Cloudflared",
         category: "services",
         description: "Cloudflare Tunnel connector",
+    },
+    ServiceDefinition {
+        id: SVC_CADDY,
+        title: "Caddy",
+        category: "services",
+        description: "Caddy reverse proxy with automatic HTTPS",
     },
     ServiceDefinition {
         id: SVC_VPN,
@@ -408,6 +414,7 @@ fn all_service_units(service_id: &str) -> Vec<&'static str> {
         SVC_SURICATA => vec!["suricata.service"],
         SVC_CROWDSEC => vec!["crowdsec.service"],
         SVC_CLOUDFLARED => vec!["cloudflared.service"],
+        SVC_CADDY => vec!["caddy.service"],
         SVC_NTP => vec![
             "systemd-timesyncd.service",
             "chrony.service",
@@ -502,6 +509,19 @@ async fn configured_service_units(
                 .enabled;
             Ok(if enabled {
                 vec!["cloudflared.service"]
+            } else {
+                vec![]
+            })
+        }
+        SVC_CADDY => {
+            let enabled = state
+                .config_store
+                .load_caddy_config()
+                .map_err(SystemApiError::StorageError)?
+                .unwrap_or_default()
+                .enabled;
+            Ok(if enabled {
+                vec!["caddy.service"]
             } else {
                 vec![]
             })

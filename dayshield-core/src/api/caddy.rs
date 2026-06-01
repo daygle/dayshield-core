@@ -235,8 +235,10 @@ async fn apply_caddy_config(cfg: &CaddyConfig) -> Result<(), CaddyApiError> {
 
     if cfg.enabled {
         run_systemctl(["enable", "--now", CADDY_SERVICE]).await?;
-        // Caddy supports live config reload without dropping connections.
-        let _ = run_systemctl(["reload", CADDY_SERVICE]).await;
+        // Caddy supports live config reload without dropping connections. A
+        // failure here means the rendered Caddyfile was rejected, so surface it
+        // rather than reporting success with a stale/broken running config.
+        run_systemctl(["reload", CADDY_SERVICE]).await?;
     } else {
         let _ = run_systemctl(["stop", CADDY_SERVICE]).await;
         let _ = run_systemctl(["disable", CADDY_SERVICE]).await;
@@ -449,6 +451,35 @@ mod tests {
                 site("app.example.com", "http://10.0.0.5:8080"),
                 site("APP.example.com", "http://10.0.0.6:8080"),
             ],
+            ..CaddyConfig::default()
+        };
+        assert!(validate_caddy_config(&cfg).is_err());
+    }
+
+    #[test]
+    fn invalid_log_level_is_rejected_even_when_disabled() {
+        let cfg = CaddyConfig {
+            enabled: false,
+            log_level: "verbose".into(),
+            ..CaddyConfig::default()
+        };
+        assert!(validate_caddy_config(&cfg).is_err());
+    }
+
+    #[test]
+    fn injection_in_upstream_or_email_is_rejected() {
+        let cfg = CaddyConfig {
+            enabled: true,
+            acme_email: "admin@example.com".into(),
+            sites: vec![site("app.example.com", "http://10.0.0.5:8080\n}\nadmin")],
+            ..CaddyConfig::default()
+        };
+        assert!(validate_caddy_config(&cfg).is_err());
+
+        let cfg = CaddyConfig {
+            enabled: true,
+            acme_email: "ad min@example.com".into(),
+            sites: vec![site("app.example.com", "http://10.0.0.5:8080")],
             ..CaddyConfig::default()
         };
         assert!(validate_caddy_config(&cfg).is_err());

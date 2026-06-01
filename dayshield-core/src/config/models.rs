@@ -3604,13 +3604,45 @@ impl Default for CaddyConfig {
     }
 }
 
+/// Log levels Caddy accepts in a `log { level ... }` directive.
+///
+/// Compared case-insensitively. Restricted to the set surfaced by the
+/// management UI so an out-of-range value cannot wedge the service on reload.
+const CADDY_LOG_LEVELS: [&str; 4] = ["debug", "info", "warn", "error"];
+
+/// Return `true` if `value` is safe to interpolate into a Caddyfile token.
+///
+/// Rejects whitespace and ASCII control characters along with the Caddyfile
+/// metacharacters (`{`, `}`, `#`, `"`, backtick, backslash) that could break
+/// out of a directive or comment. Domains/URLs/emails are validated separately;
+/// this is a defence-in-depth guard against directive injection.
+fn is_caddyfile_safe(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().all(|c| {
+            !c.is_whitespace()
+                && !c.is_control()
+                && !matches!(c, '{' | '}' | '#' | '"' | '`' | '\\')
+        })
+}
+
 /// Validate a [`CaddyConfig`].
 ///
 /// When disabled, any partially-filled configuration is accepted so operators
 /// can save a draft. When enabled, every active site must carry a valid domain
 /// and HTTP/HTTPS upstream, and an ACME contact email is required because
-/// automatic HTTPS issuance depends on it.
+/// automatic HTTPS issuance depends on it. Values rendered into the Caddyfile
+/// are additionally screened for metacharacters to prevent directive injection.
 pub fn validate_caddy_config(config: &CaddyConfig) -> Result<(), String> {
+    // log_level is rendered into the global Caddyfile block regardless of the
+    // enabled flag, so it is always validated to avoid persisting a value that
+    // would later fail the service reload.
+    if !CADDY_LOG_LEVELS.contains(&config.log_level.trim().to_ascii_lowercase().as_str()) {
+        return Err(format!(
+            "caddy log_level {:?} must be one of debug, info, warn, error",
+            config.log_level
+        ));
+    }
+
     if !config.enabled {
         return Ok(());
     }
@@ -3621,7 +3653,8 @@ pub fn validate_caddy_config(config: &CaddyConfig) -> Result<(), String> {
         return Err("caddy must have at least one enabled site when enabled".into());
     }
 
-    if !validate_email(&config.acme_email) {
+    let email = config.acme_email.trim();
+    if !validate_email(email) || !is_caddyfile_safe(email) {
         return Err(
             "caddy acme_email must be a valid email address when automatic HTTPS is enabled".into(),
         );
@@ -3639,7 +3672,8 @@ pub fn validate_caddy_config(config: &CaddyConfig) -> Result<(), String> {
         if !seen.insert(domain.to_ascii_lowercase()) {
             return Err(format!("caddy site domain {:?} is duplicated", site.domain));
         }
-        if !validate_url(&site.upstream) {
+        let upstream = site.upstream.trim();
+        if !validate_url(upstream) || !is_caddyfile_safe(upstream) {
             return Err(format!(
                 "caddy site upstream {:?} is not a valid HTTP/HTTPS URL",
                 site.upstream

@@ -7,10 +7,10 @@
 //!
 //! # Functions
 //!
-//! | Function            | Purpose                                              |
-//! |---------------------|------------------------------------------------------|
-//! | [`generate_config`] | Build a complete `unbound.conf` string.             |
-//! | [`apply_config`]    | Write `unbound.conf` to disk and reload Unbound.    |
+//! | Function                       | Purpose                                   |
+//! |--------------------------------|-------------------------------------------|
+//! | [`generate_config`]            | Build a complete `unbound.conf` string.   |
+//! | [`apply_config_with_overrides`]| Write `unbound.conf` to disk, reload Unbound. |
 
 use std::{io::ErrorKind, net::IpAddr, path::Path};
 
@@ -217,12 +217,12 @@ pub fn generate_config_with_overrides(
     out
 }
 
-/// Apply the provided DNS configuration to the running Unbound instance.
+/// Apply the provided DNS configuration, including persisted host/domain overrides.
 ///
 /// Steps:
 /// 1. If `dot` is `Some` and `dot.enabled`, write the TLS certificate and key
 ///    to [`DOT_CERT_PATH`] / [`DOT_KEY_PATH`] before generating the config.
-/// 2. Generate `unbound.conf` via [`generate_config`].
+/// 2. Generate `unbound.conf` via [`generate_config_with_overrides`].
 /// 3. Write the file atomically to [`UNBOUND_CONF_PATH`].
 /// 4. Validate the generated config with `unbound-checkconf` when available.
 /// 5. Apply the change with `systemctl reload-or-restart unbound`, or with a
@@ -233,20 +233,6 @@ pub fn generate_config_with_overrides(
 /// Returns an error if the certificate/key files cannot be written, if the
 /// configuration file cannot be written, or if the reload / start command
 /// fails.
-pub async fn apply_config(config: &DnsConfig, dot: Option<&DotConfig>) -> Result<()> {
-    apply_config_with_overrides(config, dot, false, &[], &[]).await
-}
-
-/// Apply the provided DNS configuration using the current IPv6 mode.
-pub async fn apply_config_with_ipv6(
-    config: &DnsConfig,
-    dot: Option<&DotConfig>,
-    ipv6_enabled: bool,
-) -> Result<()> {
-    apply_config_with_overrides(config, dot, ipv6_enabled, &[], &[]).await
-}
-
-/// Apply the provided DNS configuration, including persisted host/domain overrides.
 pub async fn apply_config_with_overrides(
     config: &DnsConfig,
     dot: Option<&DotConfig>,

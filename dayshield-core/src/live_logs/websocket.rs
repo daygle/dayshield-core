@@ -33,7 +33,7 @@ pub async fn logs_websocket(mut ws: WebSocket) {
 
     let (tx, mut rx) = mpsc::channel::<LogEvent>(MERGE_CHANNEL_CAPACITY);
 
-    // Spawn the three source tasks.
+    // Spawn the source tasks (Suricata, firewall, system, UI).
     let h_suricata = tokio::spawn({
         let tx = tx.clone();
         async move { stream_suricata(tx).await }

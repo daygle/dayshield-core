@@ -1116,7 +1116,7 @@ async fn read_neighbor_dhcp_clients(
 
     let iface = requested_iface
         .filter(|iface| dhcp_config_matches_requested_iface(Some(cfg), iface))
-        .unwrap_or_else(|| cfg.interface.as_str())
+        .unwrap_or(cfg.interface.as_str())
         .trim();
     if iface.is_empty() {
         return vec![];

@@ -5,12 +5,12 @@
 //! This module translates [`Gateway`] configuration into live kernel routing
 //! state and provides health-check probing for each configured gateway.
 //!
-//! | Function                | Purpose                                              |
-//! |-------------------------|------------------------------------------------------|
-//! | [`list_kernel_gateways`] | Read default routes from the kernel routing table.  |
-//! | [`apply_gateway`]        | Write or remove a static default route.             |
-//! | [`probe_gateway`]        | Single ICMP ping health check for one IP.           |
-//! | [`probe_all_gateways`]   | Probe every configured gateway and return results.  |
+//! | Function                            | Purpose                                  |
+//! |-------------------------------------|------------------------------------------|
+//! | [`list_kernel_gateways_with_ipv6`]  | Read default routes from the kernel.     |
+//! | [`apply_gateway_with_ipv6`]         | Write or remove a static default route.  |
+//! | [`probe_gateway`]                   | Single ICMP ping health check for one IP.|
+//! | [`probe_all_gateways`]              | Probe every configured gateway.          |
 //!
 //! DHCP and PPPoE gateways are **not** written by this module - their default
 //! routes are managed by `dhclient` / `pppd` respectively.  This engine only
@@ -63,15 +63,11 @@ struct IpRouteEntry {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Read the live default route(s) from the kernel routing table.
-///
-/// Runs `ip -j route show default` and returns one [`KernelGateway`] per
-/// default route entry.  Returns an empty list on any error.
-pub async fn list_kernel_gateways() -> Vec<KernelGateway> {
-    list_kernel_gateways_with_ipv6(false).await
-}
-
 /// Read live IPv4 default routes, plus IPv6 defaults when enabled.
+///
+/// Runs `ip -j route show default` (and the `-6` variant when `ipv6_enabled`)
+/// and returns one [`KernelGateway`] per default route entry.  Returns an empty
+/// list on any error.
 pub async fn list_kernel_gateways_with_ipv6(ipv6_enabled: bool) -> Vec<KernelGateway> {
     let mut gateways = list_kernel_gateways_for_family(&["-j", "route", "show", "default"]).await;
     if ipv6_enabled {
@@ -130,16 +126,12 @@ fn dedupe_kernel_gateways(gateways: Vec<KernelGateway>) -> Vec<KernelGateway> {
 /// Runs `ip route replace default via <ip> dev <iface>` for gateways with a
 /// configured `gateway_ip`.  If the gateway is disabled, the route is removed
 /// instead.  Gateways without a `gateway_ip` (DHCP / PPPoE) are skipped.
+/// IPv6 gateways are only applied when `ipv6_enabled` is set.
 ///
 /// # Errors
 ///
 /// Returns an error string if the `ip route` command cannot be spawned or
 /// exits with a non-zero status.
-pub async fn apply_gateway(gw: &Gateway) -> Result<(), String> {
-    apply_gateway_with_ipv6(gw, false).await
-}
-
-/// Apply a static gateway route using the current IPv6 mode.
 pub async fn apply_gateway_with_ipv6(gw: &Gateway, ipv6_enabled: bool) -> Result<(), String> {
     let ip = match &gw.gateway_ip {
         Some(ip) => ip,

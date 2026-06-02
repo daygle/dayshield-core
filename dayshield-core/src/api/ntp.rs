@@ -132,8 +132,8 @@ pub async fn get_status() -> Json<NtpStatus> {
 ///
 /// Tries `chronyc makestep` first (chrony); falls back to restarting
 /// `systemd-timesyncd` if chrony is not available. Returns HTTP 502 when no
-/// resync path succeeds so the client surfaces a real failure instead of
-/// treating an empty body as success.
+/// resync path succeeds so the client rejects the response and surfaces a real
+/// failure instead of treating a 2xx body as success.
 pub async fn resync() -> Response {
     let chrony = tokio::process::Command::new("chronyc")
         .arg("makestep")

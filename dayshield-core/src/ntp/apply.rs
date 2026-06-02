@@ -13,11 +13,13 @@
 //! # Serving NTP to LAN clients
 //!
 //! chrony cannot bind its server socket to more than one named device, so the
-//! set of interfaces a client may reach is controlled with source-subnet
-//! `allow` rules instead. For every selected interface DayShield resolves the
-//! live IP networks (via [`crate::engine::interfaces`]) and emits one
-//! `allow <network>` line each. chrony denies all clients by default, so this
-//! serves time only to the selected LAN subnets and never to the WAN.
+//! set of clients that may reach it is controlled with source-subnet `allow`
+//! rules instead. For every selected interface DayShield resolves the live IP
+//! networks (via [`crate::engine::interfaces`]) and emits one `allow <network>`
+//! line each. chrony denies all clients by default, so time is served only to
+//! the source subnets derived from the selected interfaces. A wildcard
+//! `allow 0/0` is never emitted, and when no subnet can be resolved chrony
+//! falls back to client-only mode.
 
 use std::path::Path;
 
@@ -159,8 +161,9 @@ fn render_chrony_conf(cfg: &NtpConfig, serve_clients: bool, allow_subnets: &[Str
 
     if serve_clients && !allow_subnets.is_empty() {
         // chrony denies all clients by default; only the listed source subnets
-        // (derived from the selected LAN interfaces) are served. The WAN is
-        // never included, so no `allow 0/0` is ever written.
+        // (derived from the selected interfaces) are served. A wildcard
+        // `allow 0/0` is never written, so clients outside those subnets are
+        // not served.
         lines.push("# Serve NTP only to the selected LAN subnets".into());
         for subnet in allow_subnets {
             lines.push(format!("allow {subnet}"));

@@ -73,11 +73,6 @@ impl RulesetManager {
     // Public operations
     // -----------------------------------------------------------------------
 
-    /// Return all installed rulesets.
-    pub fn list_installed(&self) -> Result<Vec<InstalledRuleset>> {
-        self.store.load()
-    }
-
     /// Install a curated ruleset by id.
     ///
     /// Downloads the ruleset from its configured URL, validates it, and stores

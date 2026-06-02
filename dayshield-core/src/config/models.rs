@@ -621,22 +621,6 @@ pub fn is_valid_vlan_id(vlan_id: u16) -> bool {
     (1..=4094).contains(&vlan_id)
 }
 
-/// Return `true` for any [`Action`] value.
-///
-/// All variants of the typed enum are valid; this helper exists so callers
-/// have a uniform `is_valid_*` surface alongside the other validators.
-pub fn is_valid_action(_action: &Action) -> bool {
-    true
-}
-
-/// Return `true` for any [`Protocol`] value.
-///
-/// All variants of the typed enum are valid; this helper exists so callers
-/// have a uniform `is_valid_*` surface alongside the other validators.
-pub fn is_valid_protocol(_protocol: &Protocol) -> bool {
-    true
-}
-
 /// Return `true` if `port` is a non-zero port number (1–65 535).
 ///
 /// Port 0 is reserved and not meaningful as an explicit filter criterion.
@@ -2285,14 +2269,6 @@ pub fn validate_directory_url(url: &str) -> bool {
     validate_url(url)
 }
 
-/// Return `true` for any [`AcmeChallengeType`] value.
-///
-/// All variants are valid; this helper provides a uniform `validate_*`
-/// surface alongside the other ACME validators.
-pub fn validate_challenge_type(_t: &AcmeChallengeType) -> bool {
-    true
-}
-
 /// Return `Ok(())` if `config` is a valid [`AcmeConfig`], or `Err` with a
 /// descriptive message describing the first validation failure.
 pub fn validate_acme_config(config: &AcmeConfig) -> Result<(), String> {
@@ -2764,11 +2740,6 @@ pub fn validate_wg_key(key: &str) -> bool {
     body.chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/')
         && last == "="
-}
-
-/// Return `true` if `port` is a valid non-zero port number (1–65535).
-pub fn validate_port(port: u16) -> bool {
-    port > 0
 }
 
 /// Return `true` if `cidr` is a valid IPv4 or IPv6 CIDR string.
@@ -3302,9 +3273,6 @@ impl Default for DynamicDnsConfig {
     }
 }
 
-pub fn validate_dynamic_dns_config(config: &DynamicDnsConfig) -> Result<(), String> {
-    validate_dynamic_dns_config_with_ipv6(config, false)
-}
 
 pub fn validate_dynamic_dns_config_with_ipv6(
     config: &DynamicDnsConfig,
@@ -3547,10 +3515,6 @@ pub struct CaptivePortalSession {
     pub voucher_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
-}
-
-pub fn validate_captive_portal_config(config: &CaptivePortalConfig) -> Result<(), String> {
-    validate_captive_portal_config_with_ipv6(config, false)
 }
 
 pub fn validate_captive_portal_config_with_ipv6(

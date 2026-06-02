@@ -49,6 +49,11 @@
 //! it just flips `saved_entry`/`fallback_entry` and reboots.  Recovery is
 //! ~instant because the standby slot already contains a known-good rootfs.
 
+// Re-enable the dead-code and unused-import lints that `main.rs` allows
+// crate-wide so unused rootfs-update code is caught rather than silently
+// accumulating.
+#![warn(dead_code, unused_imports)]
+
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
@@ -72,7 +77,6 @@ const SLOTS_FILE: &str = "/var/lib/dayshield/rootfs-update/slots.json";
 const RECOVERED_MARKER: &str = "/var/lib/dayshield/rootfs-update/recovered";
 const BOOT_SUCCESS_MARKER: &str = "/var/lib/dayshield/rootfs-update/boot-success";
 
-const BOOT_PARTITION_MOUNT: &str = "/boot";
 const BOOT_DAYSHIELD_DIR: &str = "/boot/dayshield";
 const GRUBENV_FILE: &str = "/boot/grub/grubenv";
 
@@ -400,16 +404,6 @@ pub async fn reboot_state() -> RootfsRebootState {
     }
 }
 
-pub fn reboot_state_sync() -> bool {
-    // Best-effort sync probe — used from synchronous contexts.
-    let runtime = tokio::runtime::Handle::try_current();
-    if let Ok(rt) = runtime {
-        rt.block_on(async { grubenv_get("boot_state").await.as_deref() == Some("trying") })
-    } else {
-        false
-    }
-}
-
 // ---------------------------------------------------------------------------
 // grubenv helpers
 // ---------------------------------------------------------------------------
@@ -444,17 +438,6 @@ async fn grubenv_set(key: &str, value: &str) -> Result<()> {
     if !status.success() {
         anyhow::bail!("grub-editenv set {key}={value} failed");
     }
-    Ok(())
-}
-
-async fn grubenv_unset(key: &str) -> Result<()> {
-    // unset is allowed to fail (key may not exist) — swallow the error.
-    let _ = Command::new(GRUB_EDITENV_BIN)
-        .arg(GRUBENV_FILE)
-        .arg("unset")
-        .arg(key)
-        .status()
-        .await;
     Ok(())
 }
 
@@ -678,6 +661,11 @@ pub async fn apply_staged_image(
 
     // Remove any stale recovered marker (a successful apply supersedes it).
     let _ = std::fs::remove_file(RECOVERED_MARKER);
+
+    // Reclaim staged squashfs images now that the image has been written to the
+    // slot.  Without this, every rootfs update leaves a hundreds-of-MB squashfs
+    // behind in the staging dir indefinitely.
+    cleanup_staging_images();
 
     info!(
         slot = target_slot.as_str(),
@@ -1216,6 +1204,24 @@ pub async fn apply_update() -> Result<RootfsActionResult> {
     }
 
     apply_staged_image(&staged, &version).await
+}
+
+/// Best-effort removal of every staged `*.squashfs` in the rootfs staging dir.
+/// Called after a successful slot write — the staged image has already been
+/// unsquashfs'd into the target slot, so retaining it only wastes disk.
+fn cleanup_staging_images() {
+    let staging = Path::new(ROOTFS_UPDATE_STAGING_DIR);
+    let Ok(entries) = std::fs::read_dir(staging) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("squashfs") {
+            if let Err(err) = std::fs::remove_file(&path) {
+                warn!(error = %err, path = %path.display(), "rootfs: failed to remove staged image");
+            }
+        }
+    }
 }
 
 pub async fn stage_update() -> Result<RootfsActionResult> {

@@ -1,10 +1,9 @@
 //! Utility helpers shared across the crate.
 //!
-//! Covers four areas:
+//! Covers three areas:
 //!
 //! - **CIDR / IP address** – parsing and validation helpers for IPv4, IPv6,
 //!   and MAC addresses (see the top-level functions and [`cidr`] module).
-//! - **Process management** – spawn, signal, and wait helpers (see [`process`]).
 //! - **File-system helpers** – atomic write, backup, and checksum (see [`fs`]).
 //! - **Shell-quoting** – safe argument construction (see [`shell`]).
 
@@ -195,93 +194,6 @@ pub mod fs {
         let digest = Sha256::digest(&data);
         let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
         Ok(hex)
-    }
-}
-
-// ── Process management helpers ───────────────────────────────────────────────
-
-/// Helpers for spawning, signalling, and waiting on child processes.
-///
-/// All functions are `async` and built on [`tokio::process::Command`].
-pub mod process {
-    use anyhow::{Context, Result};
-    use std::process::Output;
-    use tokio::process::Command;
-
-    /// Spawn `program` with `args`, wait for it to finish, and return its
-    /// combined output.
-    ///
-    /// Returns an error if the command cannot be spawned or exits with a
-    /// non-zero status code.
-    pub async fn spawn_and_wait(program: &str, args: &[&str]) -> Result<Output> {
-        let output = Command::new(program)
-            .args(args)
-            .output()
-            .await
-            .with_context(|| format!("Failed to spawn `{program}`"))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!(
-                "`{}` exited with status {}: {}",
-                program,
-                output.status,
-                stderr.trim()
-            );
-        }
-        Ok(output)
-    }
-
-    /// Send UNIX signal `signal_name` (e.g. `"TERM"`, `"HUP"`, `"KILL"`) to
-    /// the process identified by `pid`.
-    ///
-    /// Internally invokes the system `kill` command so no unsafe code or extra
-    /// crate dependencies are required.
-    pub async fn signal(pid: u32, signal_name: &str) -> Result<()> {
-        let sig_arg = format!("-{}", signal_name);
-        let pid_str = pid.to_string();
-        Command::new("kill")
-            .args([sig_arg.as_str(), pid_str.as_str()])
-            .output()
-            .await
-            .with_context(|| format!("Failed to send SIG{signal_name} to PID {pid}"))?;
-        Ok(())
-    }
-
-    /// Return `true` if a process with the given `pid` is currently running.
-    ///
-    /// On Linux this checks for the existence of `/proc/<pid>`.
-    /// On non-Linux platforms the function always returns `false`.
-    #[cfg(target_os = "linux")]
-    pub fn is_running(pid: u32) -> bool {
-        std::path::Path::new(&format!("/proc/{pid}")).exists()
-    }
-
-    /// Return `true` if a process with the given `pid` is currently running.
-    ///
-    /// On Linux this checks for the existence of `/proc/<pid>`.
-    /// On non-Linux platforms the function always returns `false`.
-    #[cfg(not(target_os = "linux"))]
-    pub fn is_running(_pid: u32) -> bool {
-        false
-    }
-
-    /// Wait for the process identified by `pid` to exit, polling every
-    /// `interval_ms` milliseconds until either the process is gone or
-    /// `timeout_ms` has elapsed.
-    ///
-    /// Returns `Ok(())` when the process has exited, or an error if the
-    /// timeout is reached before the process terminates.
-    pub async fn wait_for_exit(pid: u32, timeout_ms: u64, interval_ms: u64) -> Result<()> {
-        let mut elapsed = 0u64;
-        while is_running(pid) {
-            if elapsed >= timeout_ms {
-                anyhow::bail!("Timed out waiting for PID {pid} to exit after {timeout_ms} ms");
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
-            elapsed = elapsed.saturating_add(interval_ms);
-        }
-        Ok(())
     }
 }
 

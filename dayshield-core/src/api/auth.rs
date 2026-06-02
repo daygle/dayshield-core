@@ -57,7 +57,6 @@ impl From<AuthError> for AuthApiError {
     fn from(e: AuthError) -> Self {
         match e {
             AuthError::InvalidCredentials => AuthApiError::InvalidCredentials,
-            AuthError::Unauthorized => AuthApiError::Unauthorized,
             AuthError::TokenExpired => AuthApiError::TokenExpired,
             AuthError::TokenInvalid => AuthApiError::TokenInvalid,
             AuthError::StorageError(s) => AuthApiError::StorageError(s),

@@ -601,34 +601,6 @@ fn stable_system_rule_id(
     Uuid::from_bytes(bytes)
 }
 
-/// Generate a complete nftables ruleset with optional captive portal gates.
-pub fn generate_ruleset_with_captive(
-    rules: &[FirewallRule],
-    nat_config: Option<&NatConfig>,
-    aliases: &[FirewallAlias],
-    firewall_settings: Option<&FirewallSettings>,
-    resolved_url_tables: &HashMap<String, Vec<String>>,
-    ipv6_enabled: bool,
-    captive_portal: Option<&CaptivePortalConfig>,
-    captive_sessions: &[CaptivePortalSession],
-    dns_port: Option<u16>,
-) -> String {
-    generate_ruleset_with_captive_and_interfaces(
-        rules,
-        nat_config,
-        aliases,
-        firewall_settings,
-        None,
-        resolved_url_tables,
-        ipv6_enabled,
-        captive_portal,
-        captive_sessions,
-        &[],
-        dns_port,
-        None,
-    )
-}
-
 pub fn generate_ruleset_with_captive_and_interfaces(
     rules: &[FirewallRule],
     nat_config: Option<&NatConfig>,

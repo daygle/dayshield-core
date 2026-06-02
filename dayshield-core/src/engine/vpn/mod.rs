@@ -288,21 +288,6 @@ pub async fn generate_keypair() -> Result<(String, String)> {
 }
 
 // ---------------------------------------------------------------------------
-// Legacy stub - kept for backward compatibility
-// ---------------------------------------------------------------------------
-
-/// Apply the provided VPN tunnel configuration (legacy stub).
-pub async fn apply_tunnel(tunnel: &VpnTunnel) -> Result<()> {
-    info!(
-        name = %tunnel.name,
-        enabled = tunnel.enabled,
-        peers = tunnel.peers.len(),
-        "vpn: apply_tunnel called (legacy stub)"
-    );
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
 

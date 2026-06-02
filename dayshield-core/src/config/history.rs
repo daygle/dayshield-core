@@ -34,10 +34,6 @@ use super::storage::write_restricted;
 /// Name of the subdirectory (under the config directory) holding revisions.
 pub(crate) const HISTORY_SUBDIR: &str = "history";
 
-/// Maximum number of revisions retained on disk. Older revisions beyond this
-/// count are pruned (oldest first) after each new revision is written.
-pub(crate) const MAX_HISTORY_REVISIONS: usize = 50;
-
 /// Metadata describing a single archived configuration revision.
 ///
 /// This is the public, serialisable view returned by listing APIs; it

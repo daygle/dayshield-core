@@ -1029,8 +1029,8 @@ fn build_dashboard_cards(inputs: DashboardCardInputs<'_>) -> Vec<DashboardCard> 
         vec![
             metric("Auto check", yes_no(update_settings.auto_check_enabled)),
             metric(
-                "Signed commits",
-                yes_no(update_settings.require_signed_commits),
+                "Verify signatures",
+                yes_no(update_settings.verify_artifact_signatures),
             ),
             metric(
                 "Runtime deploy",

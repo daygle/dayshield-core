@@ -9,6 +9,15 @@
 //!
 //! When `enabled` is `false`, both daemons are stopped and their config files
 //! are left untouched (only the service unit is stopped).
+//!
+//! # Serving NTP to LAN clients
+//!
+//! chrony cannot bind its server socket to more than one named device, so the
+//! set of interfaces a client may reach is controlled with source-subnet
+//! `allow` rules instead. For every selected interface DayShield resolves the
+//! live IP networks (via [`crate::engine::interfaces`]) and emits one
+//! `allow <network>` line each. chrony denies all clients by default, so this
+//! serves time only to the selected LAN subnets and never to the WAN.
 
 use std::path::Path;
 
@@ -83,14 +92,19 @@ pub async fn apply_ntp_config(cfg: &NtpConfig) -> Result<(), NtpError> {
 
 const TIMESYNCD_CONF: &str = "/etc/systemd/timesyncd.conf";
 
-async fn apply_timesyncd(cfg: &NtpConfig) -> Result<(), NtpError> {
+/// Render the contents of `/etc/systemd/timesyncd.conf` for `cfg`.
+fn render_timesyncd_conf(cfg: &NtpConfig) -> String {
     let servers = cfg.upstream_servers.join(" ");
-    let content = format!(
+    format!(
         "# Managed by DayShield - do not edit manually\n\
          [Time]\n\
          NTP={servers}\n\
          FallbackNTP=\n"
-    );
+    )
+}
+
+async fn apply_timesyncd(cfg: &NtpConfig) -> Result<(), NtpError> {
+    let content = render_timesyncd_conf(cfg);
 
     info!(path = TIMESYNCD_CONF, "Writing systemd-timesyncd config");
     tokio::fs::write(TIMESYNCD_CONF, content)
@@ -119,11 +133,13 @@ async fn apply_timesyncd(cfg: &NtpConfig) -> Result<(), NtpError> {
 
 const CHRONY_CONF: &str = "/etc/chrony/chrony.conf";
 
-async fn apply_chrony(
-    cfg: &NtpConfig,
-    chrony_unit: &'static str,
-    serve_clients: bool,
-) -> Result<(), NtpError> {
+/// Render the contents of `/etc/chrony/chrony.conf`.
+///
+/// When `serve_clients` is `true`, one `allow <subnet>` line is emitted for
+/// each entry in `allow_subnets`, restricting served clients to those source
+/// networks. When `serve_clients` is `false` (or no subnets could be
+/// resolved), chrony runs client-only with the server port disabled.
+fn render_chrony_conf(cfg: &NtpConfig, serve_clients: bool, allow_subnets: &[String]) -> String {
     let mut lines: Vec<String> = vec![
         "# Managed by DayShield - do not edit manually".into(),
         String::new(),
@@ -141,17 +157,14 @@ async fn apply_chrony(
     lines.push("rtcsync".into());
     lines.push(String::new());
 
-    if serve_clients {
-        if !cfg.listen_interfaces.is_empty() {
-            lines.push("# Listen interfaces for LAN clients".into());
-            for iface in &cfg.listen_interfaces {
-                lines.push(format!("binddevice {iface}"));
-            }
-            lines.push(String::new());
+    if serve_clients && !allow_subnets.is_empty() {
+        // chrony denies all clients by default; only the listed source subnets
+        // (derived from the selected LAN interfaces) are served. The WAN is
+        // never included, so no `allow 0/0` is ever written.
+        lines.push("# Serve NTP only to the selected LAN subnets".into());
+        for subnet in allow_subnets {
+            lines.push(format!("allow {subnet}"));
         }
-
-        lines.push("# Allow NTP queries from all LAN clients".into());
-        lines.push("allow 0/0".into());
         lines.push(String::new());
     } else {
         lines.push("# Client-only mode (do not serve NTP to network clients)".into());
@@ -161,7 +174,91 @@ async fn apply_chrony(
     lines.push("# Logging".into());
     lines.push("logdir /var/log/chrony".into());
 
-    let content = lines.join("\n") + "\n";
+    lines.join("\n") + "\n"
+}
+
+/// Compute the chrony `allow` network for a CIDR address from the kernel.
+///
+/// Masks the host bits so that `192.168.1.10/24` becomes `192.168.1.0/24`.
+/// Returns `None` for malformed input.
+fn chrony_allow_subnet(cidr: &str) -> Option<String> {
+    let (addr_str, prefix_str) = cidr.split_once('/')?;
+    let prefix: u8 = prefix_str.parse().ok()?;
+    match addr_str.parse::<std::net::IpAddr>().ok()? {
+        std::net::IpAddr::V4(v4) => {
+            if prefix > 32 {
+                return None;
+            }
+            let bits = u32::from(v4);
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix)
+            };
+            Some(format!("{}/{}", std::net::Ipv4Addr::from(bits & mask), prefix))
+        }
+        std::net::IpAddr::V6(v6) => {
+            if prefix > 128 {
+                return None;
+            }
+            let bits = u128::from(v6);
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix)
+            };
+            Some(format!("{}/{}", std::net::Ipv6Addr::from(bits & mask), prefix))
+        }
+    }
+}
+
+/// Resolve the live IP networks behind a set of interface names so chrony can
+/// be told exactly which LAN subnets to serve.
+async fn resolve_listen_subnets(interfaces: &[String]) -> Vec<String> {
+    let kernel = match crate::engine::interfaces::list_kernel_interfaces().await {
+        Ok(k) => k,
+        Err(e) => {
+            warn!(error = %e, "NTP: failed to query interface addresses for chrony allow rules");
+            return Vec::new();
+        }
+    };
+
+    let mut subnets: Vec<String> = Vec::new();
+    for name in interfaces {
+        let Some(iface) = kernel.iter().find(|k| &k.name == name) else {
+            warn!(interface = %name, "NTP: selected interface not found in kernel; skipping");
+            continue;
+        };
+        for cidr in &iface.addresses {
+            if let Some(subnet) = chrony_allow_subnet(cidr) {
+                if !subnets.contains(&subnet) {
+                    subnets.push(subnet);
+                }
+            }
+        }
+    }
+    subnets
+}
+
+async fn apply_chrony(
+    cfg: &NtpConfig,
+    chrony_unit: &'static str,
+    serve_clients: bool,
+) -> Result<(), NtpError> {
+    let allow_subnets = if serve_clients {
+        let subnets = resolve_listen_subnets(&cfg.listen_interfaces).await;
+        if subnets.is_empty() {
+            warn!(
+                "NTP: serve_clients requested but no LAN subnets could be resolved \
+                 from the selected interfaces; chrony will run client-only"
+            );
+        }
+        subnets
+    } else {
+        Vec::new()
+    };
+
+    let content = render_chrony_conf(cfg, serve_clients, &allow_subnets);
 
     info!(path = CHRONY_CONF, "Writing chrony config");
     // Ensure the parent directory exists.
@@ -288,33 +385,83 @@ mod tests {
             serve_clients: false,
             listen_interfaces: vec![],
         };
-        let servers = cfg.upstream_servers.join(" ");
-        let content = format!(
-            "# Managed by DayShield - do not edit manually\n\
-             [Time]\n\
-             NTP={servers}\n\
-             FallbackNTP=\n"
-        );
+        let content = render_timesyncd_conf(&cfg);
         assert!(content.contains("NTP=0.pool.ntp.org 1.pool.ntp.org"));
+        assert!(content.contains("FallbackNTP="));
     }
 
     #[test]
-    fn chrony_conf_contains_servers() {
+    fn chrony_conf_contains_servers_and_allow_subnets() {
+        let cfg = NtpConfig {
+            enabled: true,
+            upstream_servers: vec!["192.0.2.1".into()],
+            serve_clients: true,
+            listen_interfaces: vec!["eth1".into(), "eth2".into()],
+        };
+        // Two interfaces -> two distinct allow lines (the old single-binddevice
+        // behaviour silently dropped all but the last interface).
+        let content = render_chrony_conf(
+            &cfg,
+            true,
+            &["192.168.1.0/24".into(), "10.0.0.0/8".into()],
+        );
+        assert!(content.contains("server 192.0.2.1 iburst"));
+        assert!(content.contains("allow 192.168.1.0/24"));
+        assert!(content.contains("allow 10.0.0.0/8"));
+        // The WAN-exposing wildcard must never be emitted.
+        assert!(!content.contains("allow 0/0"));
+        assert!(!content.contains("binddevice"));
+    }
+
+    #[test]
+    fn chrony_conf_client_only_when_no_subnets() {
         let cfg = NtpConfig {
             enabled: true,
             upstream_servers: vec!["192.0.2.1".into()],
             serve_clients: true,
             listen_interfaces: vec!["eth1".into()],
         };
-        let mut lines: Vec<String> = vec!["# header".into()];
-        for s in &cfg.upstream_servers {
-            lines.push(format!("server {s} iburst"));
-        }
-        for iface in &cfg.listen_interfaces {
-            lines.push(format!("binddevice {iface}"));
-        }
-        let content = lines.join("\n");
-        assert!(content.contains("server 192.0.2.1 iburst"));
-        assert!(content.contains("binddevice eth1"));
+        // serve_clients requested but no resolvable subnets -> fail safe to
+        // client-only rather than opening the server to everyone.
+        let content = render_chrony_conf(&cfg, true, &[]);
+        assert!(content.contains("port 0"));
+        assert!(!content.contains("allow"));
+    }
+
+    #[test]
+    fn chrony_conf_client_only_mode() {
+        let cfg = NtpConfig {
+            enabled: true,
+            upstream_servers: vec!["192.0.2.1".into()],
+            serve_clients: false,
+            listen_interfaces: vec![],
+        };
+        let content = render_chrony_conf(&cfg, false, &[]);
+        assert!(content.contains("port 0"));
+        assert!(!content.contains("allow"));
+    }
+
+    #[test]
+    fn allow_subnet_masks_host_bits() {
+        assert_eq!(
+            chrony_allow_subnet("192.168.1.10/24").as_deref(),
+            Some("192.168.1.0/24")
+        );
+        assert_eq!(
+            chrony_allow_subnet("10.20.30.40/8").as_deref(),
+            Some("10.0.0.0/8")
+        );
+        assert_eq!(
+            chrony_allow_subnet("2001:db8:abcd:1::5/64").as_deref(),
+            Some("2001:db8:abcd:1::/64")
+        );
+    }
+
+    #[test]
+    fn allow_subnet_rejects_malformed() {
+        assert_eq!(chrony_allow_subnet("not-a-cidr"), None);
+        assert_eq!(chrony_allow_subnet("192.168.1.0"), None);
+        assert_eq!(chrony_allow_subnet("192.168.1.0/33"), None);
+        assert_eq!(chrony_allow_subnet("2001:db8::/129"), None);
     }
 }

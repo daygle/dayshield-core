@@ -131,8 +131,10 @@ pub async fn get_status() -> Json<NtpStatus> {
 /// Trigger an immediate NTP time step resynchronisation.
 ///
 /// Tries `chronyc makestep` first (chrony); falls back to restarting
-/// `systemd-timesyncd` if chrony is not available.
-pub async fn resync() -> impl IntoResponse {
+/// `systemd-timesyncd` if chrony is not available. Returns HTTP 502 when no
+/// resync path succeeds so the client surfaces a real failure instead of
+/// treating an empty body as success.
+pub async fn resync() -> Response {
     let chrony = tokio::process::Command::new("chronyc")
         .arg("makestep")
         .output()
@@ -141,36 +143,38 @@ pub async fn resync() -> impl IntoResponse {
     if let Ok(out) = chrony {
         if out.status.success() {
             return Json(serde_json::json!({
-                "success": true,
-                "data": { "message": "NTP resync triggered via chronyc" }
-            }));
+                "message": "NTP resync triggered via chronyc"
+            }))
+            .into_response();
         }
     }
 
     async fn restart_unit(unit: &str) -> bool {
-        match tokio::process::Command::new("systemctl")
-            .args(["restart", unit])
-            .output()
-            .await
-        {
-            Ok(out) if out.status.success() => true,
-            _ => false,
-        }
+        matches!(
+            tokio::process::Command::new("systemctl")
+                .args(["restart", unit])
+                .output()
+                .await,
+            Ok(out) if out.status.success()
+        )
     }
 
     for unit in ["chronyd", "chrony", "systemd-timesyncd"] {
         if restart_unit(unit).await {
             return Json(serde_json::json!({
-                "success": true,
-                "data": { "message": format!("NTP resync triggered via systemctl restart {unit}") }
-            }));
+                "message": format!("NTP resync triggered via systemctl restart {unit}")
+            }))
+            .into_response();
         }
     }
 
-    Json(serde_json::json!({
-        "success": false,
-        "error": "NTP resync failed: no available NTP daemon restart path succeeded"
-    }))
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(serde_json::json!({
+            "error": "NTP resync failed: no available NTP daemon restart path succeeded"
+        })),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------

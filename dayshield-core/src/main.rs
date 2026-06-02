@@ -194,6 +194,11 @@ async fn main() -> anyhow::Result<()> {
     // the distro config mirrors before those services are expected healthy.
     reconcile_dhcp_runtime(&app_state.config_store).await;
 
+    // Reapply the persisted NTP config. The chrony/timesyncd config files live
+    // under /etc and are replaced by the squashfs on a rootfs update, so they
+    // must be regenerated and the daemon re-enabled at startup.
+    reconcile_ntp_runtime(&app_state.config_store).await;
+
     if let Err(err) = captive_portal::apply_current_ruleset_nft(&app_state.config_store).await {
         warn!("failed to reconcile nftables runtime config: {err:#}");
     }
@@ -486,6 +491,17 @@ async fn reconcile_dhcp_runtime(config_store: &config::ConfigStore) {
             }
         }
         Err(err) => warn!("failed to load DHCPv6 config for startup reconcile: {err:#}"),
+    }
+}
+
+async fn reconcile_ntp_runtime(config_store: &config::ConfigStore) {
+    match ntp::config::load(config_store) {
+        Ok(cfg) => {
+            if let Err(err) = ntp::apply::apply_ntp_config(&cfg).await {
+                warn!("failed to reconcile NTP runtime config: {err:#}");
+            }
+        }
+        Err(err) => warn!("failed to load NTP config for startup reconcile: {err:#}"),
     }
 }
 

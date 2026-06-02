@@ -5,7 +5,7 @@
 //! only import from `ntp::model`, and defines the transient [`NtpStatus`]
 //! type that is never persisted.
 
-pub use crate::config::models::{validate_ntp_config, NtpConfig};
+pub use crate::config::models::NtpConfig;
 
 use serde::{Deserialize, Serialize};
 

@@ -1637,6 +1637,86 @@ pub fn validate_qos_config(config: &QosConfig) -> Result<(), String> {
 // DNS (Unbound)
 // ---------------------------------------------------------------------------
 
+fn default_dns_cache_min_ttl_seconds() -> u32 {
+    3600
+}
+
+fn default_dns_cache_max_ttl_seconds() -> u32 {
+    86_400
+}
+
+fn default_dns_prefetch() -> bool {
+    true
+}
+
+fn default_dns_serve_expired_ttl_seconds() -> u32 {
+    86_400
+}
+
+fn default_resolver_mode() -> DnsResolverMode {
+    DnsResolverMode::Recursive
+}
+
+fn default_client_acl_preset() -> DnsClientAclPreset {
+    DnsClientAclPreset::PrivateRanges
+}
+
+/// How Unbound should resolve names outside local overrides.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DnsResolverMode {
+    /// Use full recursive resolution from the root servers.
+    Recursive,
+    /// Forward recursive queries to the configured upstream resolvers.
+    Forwarded,
+}
+
+/// Preset access-control policies for DNS clients.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DnsClientAclPreset {
+    /// Allow loopback, RFC1918, CGNAT, link-local, and IPv6 ULA/link-local clients.
+    PrivateRanges,
+    /// Allow loopback clients only.
+    LocalhostOnly,
+    /// Allow clients from any source. Use only when firewall policy scopes access.
+    AllowAll,
+    /// Allow loopback plus the configured custom CIDR list.
+    Custom,
+}
+
+/// Advanced Unbound cache controls.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DnsCacheConfig {
+    /// Minimum TTL, in seconds, retained in cache.
+    #[serde(default = "default_dns_cache_min_ttl_seconds")]
+    pub min_ttl_seconds: u32,
+    /// Maximum TTL, in seconds, retained in cache.
+    #[serde(default = "default_dns_cache_max_ttl_seconds")]
+    pub max_ttl_seconds: u32,
+    /// Enable Unbound prefetch for popular records near expiry.
+    #[serde(default = "default_dns_prefetch")]
+    pub prefetch: bool,
+    /// Serve expired records while refreshing upstream answers.
+    #[serde(default)]
+    pub serve_expired: bool,
+    /// TTL, in seconds, assigned to expired answers when serve-expired is active.
+    #[serde(default = "default_dns_serve_expired_ttl_seconds")]
+    pub serve_expired_ttl_seconds: u32,
+}
+
+impl Default for DnsCacheConfig {
+    fn default() -> Self {
+        Self {
+            min_ttl_seconds: default_dns_cache_min_ttl_seconds(),
+            max_ttl_seconds: default_dns_cache_max_ttl_seconds(),
+            prefetch: default_dns_prefetch(),
+            serve_expired: false,
+            serve_expired_ttl_seconds: default_dns_serve_expired_ttl_seconds(),
+        }
+    }
+}
+
 /// Configuration for the Unbound recursive resolver.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnsConfig {
@@ -1646,10 +1726,23 @@ pub struct DnsConfig {
     pub listen_addresses: Vec<String>,
     /// UDP/TCP port (default 53).
     pub port: u16,
-    /// Upstream forwarders; empty means full recursion.
+    /// Resolver mode: full recursion or forwarding to upstream resolvers.
+    #[serde(default = "default_resolver_mode")]
+    pub resolver_mode: DnsResolverMode,
+    /// Upstream forwarders used when `resolver_mode` is `forwarded`.
+    #[serde(default)]
     pub forwarders: Vec<String>,
     /// Enable DNSSEC validation.
     pub dnssec: bool,
+    /// DNS client ACL preset.
+    #[serde(default = "default_client_acl_preset")]
+    pub client_acl_preset: DnsClientAclPreset,
+    /// Custom CIDRs allowed when `client_acl_preset` is `custom`.
+    #[serde(default)]
+    pub client_acl_custom_cidrs: Vec<String>,
+    /// Advanced cache behavior.
+    #[serde(default)]
+    pub cache: DnsCacheConfig,
     /// Local DNS overrides: hostname → IP address.
     pub local_records: Vec<DnsLocalRecord>,
     /// Per-interface DNS blocklist sources.
@@ -1672,13 +1765,33 @@ impl Default for DnsConfig {
             enabled: true,
             listen_addresses: vec![],
             port: 53,
+            resolver_mode: DnsResolverMode::Recursive,
             forwarders: vec![],
             dnssec: true,
+            client_acl_preset: DnsClientAclPreset::PrivateRanges,
+            client_acl_custom_cidrs: vec![],
+            cache: DnsCacheConfig::default(),
             local_records: vec![],
             interface_blocklists: vec![],
             manage_firewall: true,
         }
     }
+}
+
+pub fn validate_dns_cache_config(cache: &DnsCacheConfig) -> Result<(), String> {
+    if cache.min_ttl_seconds > cache.max_ttl_seconds {
+        return Err("DNS cache min_ttl_seconds must be <= max_ttl_seconds".into());
+    }
+    if cache.max_ttl_seconds > 604_800 {
+        return Err("DNS cache max_ttl_seconds must be <= 604800".into());
+    }
+    if cache.serve_expired && cache.serve_expired_ttl_seconds == 0 {
+        return Err("DNS cache serve_expired_ttl_seconds must be non-zero".into());
+    }
+    if cache.serve_expired_ttl_seconds > 604_800 {
+        return Err("DNS cache serve_expired_ttl_seconds must be <= 604800".into());
+    }
+    Ok(())
 }
 
 /// A set of DNS blocklist URLs scoped to one interface.

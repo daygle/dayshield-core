@@ -35,11 +35,12 @@ use tracing::{debug, info, warn};
 
 use super::history;
 use super::models::{
-    validate_dns_local_record, AcmeConfig, AdminSecuritySettings, AiEngineConfig, CaddyConfig,
-    CaptivePortalConfig, CloudflaredConfig, ConfigHistorySettings, CrowdSecConfig, Dhcp6Config,
-    DhcpConfig, DnsConfig, DnsDomainOverride, DnsHostOverride, DotConfig, DynamicDnsConfig,
-    FirewallAlias, FirewallRule, FirewallSettings, Gateway, HoneypotConfig, Interface, NatConfig,
-    NotifyConfig, NtpConfig, QosConfig, SuricataConfig, SystemConfig, WireGuardInterface,
+    validate_dns_cache_config, validate_dns_local_record, AcmeConfig, AdminSecuritySettings,
+    AiEngineConfig, CaddyConfig, CaptivePortalConfig, CloudflaredConfig, ConfigHistorySettings,
+    CrowdSecConfig, Dhcp6Config, DhcpConfig, DnsClientAclPreset, DnsConfig, DnsDomainOverride,
+    DnsHostOverride, DnsResolverMode, DotConfig, DynamicDnsConfig, FirewallAlias, FirewallRule,
+    FirewallSettings, Gateway, HoneypotConfig, Interface, NatConfig, NotifyConfig, NtpConfig,
+    QosConfig, SuricataConfig, SystemConfig, WireGuardInterface,
 };
 
 /// Default path to the configuration directory.
@@ -104,7 +105,7 @@ pub(crate) fn write_restricted(path: &Path, data: &[u8]) -> Result<()> {
 /// Increment this constant whenever the [`SystemConfig`] format changes in a
 /// backwards-incompatible way, and add a corresponding arm to
 /// [`migrate_config`].
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 /// On-disk envelope that carries a schema version alongside the config.
 ///
@@ -152,6 +153,26 @@ fn migrate_config(mut config: SystemConfig, from_version: u32) -> Result<SystemC
                     config.config_history = Some(ConfigHistorySettings::default());
                 }
                 version = 2;
+            }
+            2 => {
+                // Migration v2 -> v3: DNS resolver mode became explicit. Older
+                // configs used "forwarders present" to mean forwarded mode.
+                if let Some(dns) = config.dns.as_mut() {
+                    if !dns.forwarders.is_empty() {
+                        debug!("Migrating DNS config to forwarded resolver mode");
+                        dns.resolver_mode = DnsResolverMode::Forwarded;
+                    }
+                    if config
+                        .dot
+                        .as_ref()
+                        .map(|dot| dot.enabled && !dot.lan_only)
+                        .unwrap_or(false)
+                    {
+                        debug!("Migrating public DoT config to allow-all client ACL");
+                        dns.client_acl_preset = DnsClientAclPreset::AllowAll;
+                    }
+                }
+                version = 3;
             }
             other => {
                 anyhow::bail!(
@@ -598,6 +619,10 @@ impl ConfigStore {
             if dns.port == 0 {
                 anyhow::bail!("DNS port must be non-zero");
             }
+            if matches!(dns.resolver_mode, DnsResolverMode::Forwarded) && dns.forwarders.is_empty()
+            {
+                anyhow::bail!("DNS forwarded resolver mode requires at least one forwarder");
+            }
             for fwd in &dns.forwarders {
                 if !is_valid_ip(fwd) {
                     anyhow::bail!("DNS forwarder {:?} is not a valid IP address", fwd);
@@ -605,6 +630,22 @@ impl ConfigStore {
                 if let Err(msg) = ensure_ipv6_allowed(fwd, ipv6_enabled, "DNS forwarder") {
                     anyhow::bail!("{msg}");
                 }
+            }
+            if matches!(dns.client_acl_preset, DnsClientAclPreset::Custom)
+                && dns.client_acl_custom_cidrs.is_empty()
+            {
+                anyhow::bail!("DNS custom client ACL requires at least one CIDR");
+            }
+            for cidr in &dns.client_acl_custom_cidrs {
+                if !is_valid_cidr(cidr) {
+                    anyhow::bail!("DNS client ACL CIDR {:?} is not a valid CIDR", cidr);
+                }
+                if let Err(msg) = ensure_ipv6_allowed(cidr, ipv6_enabled, "DNS client ACL CIDR") {
+                    anyhow::bail!("{msg}");
+                }
+            }
+            if let Err(msg) = validate_dns_cache_config(&dns.cache) {
+                anyhow::bail!("{msg}");
             }
             for rec in &dns.local_records {
                 if let Err(msg) = validate_dns_local_record(rec, ipv6_enabled) {
@@ -2762,13 +2803,19 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn make_dns_config() -> crate::config::models::DnsConfig {
-        use crate::config::models::DnsConfig;
+        use crate::config::models::{
+            DnsCacheConfig, DnsClientAclPreset, DnsConfig, DnsResolverMode,
+        };
         DnsConfig {
             enabled: true,
             listen_addresses: vec!["127.0.0.1".into()],
             port: 53,
+            resolver_mode: DnsResolverMode::Forwarded,
             forwarders: vec!["1.1.1.1".into()],
             dnssec: false,
+            client_acl_preset: DnsClientAclPreset::PrivateRanges,
+            client_acl_custom_cidrs: vec![],
+            cache: DnsCacheConfig::default(),
             local_records: vec![],
             interface_blocklists: vec![],
             manage_firewall: true,
@@ -2993,8 +3040,12 @@ mod tests {
             enabled: true,
             listen_addresses: vec![],
             port: 53,
+            resolver_mode: crate::config::models::DnsResolverMode::Forwarded,
             forwarders: vec!["not-an-ip".into()],
             dnssec: false,
+            client_acl_preset: crate::config::models::DnsClientAclPreset::PrivateRanges,
+            client_acl_custom_cidrs: vec![],
+            cache: crate::config::models::DnsCacheConfig::default(),
             local_records: vec![],
             interface_blocklists: vec![],
             manage_firewall: true,
@@ -3341,7 +3392,22 @@ mod tests {
     }
 
     #[test]
-    fn load_migrates_v1_file_to_v2_and_populates_history() {
+    fn migrate_v2_to_v3_preserves_forwarded_dns_behavior() {
+        let mut cfg = SystemConfig::default();
+        let mut dns = crate::config::models::DnsConfig::default();
+        dns.forwarders = vec!["1.1.1.1".into()];
+        cfg.dns = Some(dns);
+
+        let migrated = migrate_config(cfg, 2).unwrap();
+        let dns = migrated.dns.expect("DNS config should survive migration");
+        assert_eq!(
+            dns.resolver_mode,
+            crate::config::models::DnsResolverMode::Forwarded
+        );
+    }
+
+    #[test]
+    fn load_migrates_v1_file_to_current_and_populates_history() {
         let dir = temp_dir();
         let store = ConfigStore::with_dir(&dir);
 
@@ -3358,7 +3424,10 @@ mod tests {
 
         let saved: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(store.config_path()).unwrap()).unwrap();
-        assert_eq!(saved["schema_version"].as_u64(), Some(2));
+        assert_eq!(
+            saved["schema_version"].as_u64(),
+            Some(CURRENT_SCHEMA_VERSION as u64)
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -11,7 +11,12 @@
 //! persists it, and triggers the DNS engine to regenerate and apply the Unbound
 //! configuration.
 
-use std::sync::Arc;
+use std::{
+    io::ErrorKind,
+    path::PathBuf,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use axum::{
     extract::{Path, State},
@@ -19,16 +24,21 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use serde::{Deserialize, Serialize};
+use tokio::process::Command;
 use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
     config::models::{
-        ensure_ipv6_allowed, is_valid_interface_name, is_valid_ip, validate_dns_local_record,
-        validate_dot_config, DnsBlocklistEntry, DnsConfig, DnsInterfaceBlocklists, DnsLocalRecord,
-        DotConfig,
+        ensure_ipv6_allowed, is_valid_cidr, is_valid_interface_name, is_valid_ip,
+        validate_dns_cache_config, validate_dns_local_record, validate_dot_config,
+        DnsBlocklistEntry, DnsCacheConfig, DnsClientAclPreset, DnsConfig, DnsDomainOverride,
+        DnsInterfaceBlocklists, DnsLocalRecord, DnsResolverMode, DotConfig,
     },
-    engine::dns::apply_config_with_overrides,
+    engine::dns::{
+        apply_config_with_overrides, generate_config_with_overrides, DNSSEC_ROOT_KEY_PATH,
+    },
     state::AppState,
 };
 
@@ -73,13 +83,21 @@ impl IntoResponse for DnsError {
 // ---------------------------------------------------------------------------
 
 /// Request body for `POST /dns/config`.
-#[derive(serde::Deserialize)]
+#[derive(Deserialize)]
 pub struct UpdateDnsConfigRequest {
     pub enabled: bool,
     pub listen_addresses: Vec<String>,
     pub port: u16,
+    #[serde(default)]
+    pub resolver_mode: Option<DnsResolverMode>,
     pub forwarders: Vec<String>,
     pub dnssec: bool,
+    #[serde(default)]
+    pub client_acl_preset: Option<DnsClientAclPreset>,
+    #[serde(default)]
+    pub client_acl_custom_cidrs: Option<Vec<String>>,
+    #[serde(default)]
+    pub cache: Option<DnsCacheConfig>,
     pub local_records: Vec<DnsLocalRecord>,
     #[serde(default)]
     pub interface_blocklists: Option<Vec<DnsInterfaceBlocklists>>,
@@ -107,8 +125,62 @@ fn default_manage_firewall() -> bool {
     true
 }
 
+#[derive(Serialize)]
+pub struct DnsStatusResponse {
+    pub enabled: bool,
+    pub resolver_mode: DnsResolverMode,
+    pub forwarders: Vec<String>,
+    pub domain_forwarding: Vec<DnsDomainOverride>,
+    pub dnssec: DnssecStatus,
+    pub client_acl_preset: DnsClientAclPreset,
+    pub client_acl_custom_cidrs: Vec<String>,
+    pub cache: DnsCacheConfig,
+    pub plain_dns_firewall_managed: bool,
+    pub dot: DotExposureStatus,
+    pub unbound: UnboundServiceStatus,
+    pub config_validation: UnboundConfigValidationStatus,
+}
+
+#[derive(Serialize)]
+pub struct DnssecStatus {
+    pub enabled: bool,
+    pub root_anchor_path: String,
+    pub root_anchor_present: bool,
+    pub root_anchor_readable: bool,
+    pub root_anchor_size_bytes: Option<u64>,
+    pub health: String,
+    pub message: String,
+}
+
+#[derive(Serialize)]
+pub struct DotExposureStatus {
+    pub enabled: bool,
+    pub port: u16,
+    pub exposure: String,
+    pub firewall_rule_expected: bool,
+    pub firewall_scope: String,
+}
+
+#[derive(Serialize)]
+pub struct UnboundServiceStatus {
+    pub systemctl_available: bool,
+    pub active: Option<bool>,
+    pub enabled: Option<bool>,
+    pub active_state: Option<String>,
+    pub enabled_state: Option<String>,
+    pub message: String,
+}
+
+#[derive(Serialize)]
+pub struct UnboundConfigValidationStatus {
+    pub checkconf_available: bool,
+    pub valid: Option<bool>,
+    pub status: String,
+    pub message: String,
+}
+
 /// Request body for creating a per-interface DNS blocklist URL.
-#[derive(serde::Deserialize)]
+#[derive(Deserialize)]
 pub struct CreateDnsBlocklistRequest {
     pub url: String,
     pub name: Option<String>,
@@ -148,6 +220,201 @@ fn is_wan_interface(state: &Arc<AppState>, interface_name: &str) -> Result<bool,
     }))
 }
 
+fn dnssec_status(enabled: bool) -> DnssecStatus {
+    if !enabled {
+        return DnssecStatus {
+            enabled,
+            root_anchor_path: DNSSEC_ROOT_KEY_PATH.to_string(),
+            root_anchor_present: false,
+            root_anchor_readable: false,
+            root_anchor_size_bytes: None,
+            health: "disabled".to_string(),
+            message: "DNSSEC validation is disabled".to_string(),
+        };
+    }
+
+    match std::fs::metadata(DNSSEC_ROOT_KEY_PATH) {
+        Ok(metadata) => {
+            let size = metadata.len();
+            DnssecStatus {
+                enabled,
+                root_anchor_path: DNSSEC_ROOT_KEY_PATH.to_string(),
+                root_anchor_present: true,
+                root_anchor_readable: true,
+                root_anchor_size_bytes: Some(size),
+                health: if size == 0 { "empty" } else { "ok" }.to_string(),
+                message: if size == 0 {
+                    "DNSSEC root anchor exists but is empty".to_string()
+                } else {
+                    "DNSSEC root anchor is present".to_string()
+                },
+            }
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => DnssecStatus {
+            enabled,
+            root_anchor_path: DNSSEC_ROOT_KEY_PATH.to_string(),
+            root_anchor_present: false,
+            root_anchor_readable: false,
+            root_anchor_size_bytes: None,
+            health: "missing".to_string(),
+            message: "DNSSEC root anchor is missing; apply DNS config to create it".to_string(),
+        },
+        Err(err) => DnssecStatus {
+            enabled,
+            root_anchor_path: DNSSEC_ROOT_KEY_PATH.to_string(),
+            root_anchor_present: true,
+            root_anchor_readable: false,
+            root_anchor_size_bytes: None,
+            health: "unreadable".to_string(),
+            message: format!("DNSSEC root anchor could not be read: {err}"),
+        },
+    }
+}
+
+fn dot_exposure_status(dot: &DotConfig) -> DotExposureStatus {
+    let (exposure, firewall_rule_expected, firewall_scope) = if !dot.enabled {
+        ("disabled", false, "none")
+    } else if dot.lan_only {
+        ("lan", true, "LAN input allow rule")
+    } else {
+        ("public", true, "public TCP input allow rule")
+    };
+
+    DotExposureStatus {
+        enabled: dot.enabled,
+        port: dot.port,
+        exposure: exposure.to_string(),
+        firewall_rule_expected,
+        firewall_scope: firewall_scope.to_string(),
+    }
+}
+
+async fn unbound_service_status() -> UnboundServiceStatus {
+    let active_probe = systemctl_probe(&["is-active", "unbound"]).await;
+    let enabled_probe = systemctl_probe(&["is-enabled", "unbound"]).await;
+
+    if !active_probe.available || !enabled_probe.available {
+        return UnboundServiceStatus {
+            systemctl_available: false,
+            active: None,
+            enabled: None,
+            active_state: None,
+            enabled_state: None,
+            message: "systemctl is not available on this host".to_string(),
+        };
+    }
+
+    let active_state = active_probe.output.trim().to_string();
+    let enabled_state = enabled_probe.output.trim().to_string();
+    UnboundServiceStatus {
+        systemctl_available: true,
+        active: Some(active_state == "active"),
+        enabled: Some(enabled_state == "enabled"),
+        active_state: Some(active_state),
+        enabled_state: Some(enabled_state),
+        message: "systemctl status probes completed".to_string(),
+    }
+}
+
+struct CommandProbe {
+    available: bool,
+    output: String,
+}
+
+async fn systemctl_probe(args: &[&str]) -> CommandProbe {
+    match Command::new("systemctl").args(args).output().await {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            CommandProbe {
+                available: true,
+                output: if stdout.is_empty() { stderr } else { stdout },
+            }
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => CommandProbe {
+            available: false,
+            output: String::new(),
+        },
+        Err(err) => CommandProbe {
+            available: true,
+            output: err.to_string(),
+        },
+    }
+}
+
+async fn validate_generated_unbound_config(config_text: &str) -> UnboundConfigValidationStatus {
+    let temp_path = temporary_unbound_config_path();
+    if let Err(err) = std::fs::write(&temp_path, config_text) {
+        return UnboundConfigValidationStatus {
+            checkconf_available: false,
+            valid: None,
+            status: "error".to_string(),
+            message: format!(
+                "failed to write temporary Unbound config {}: {err}",
+                temp_path.display()
+            ),
+        };
+    }
+
+    let result = match Command::new("unbound-checkconf")
+        .arg(&temp_path)
+        .output()
+        .await
+    {
+        Ok(out) if out.status.success() => UnboundConfigValidationStatus {
+            checkconf_available: true,
+            valid: Some(true),
+            status: "valid".to_string(),
+            message: "generated Unbound config passed validation".to_string(),
+        },
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            UnboundConfigValidationStatus {
+                checkconf_available: true,
+                valid: Some(false),
+                status: "invalid".to_string(),
+                message: join_command_output(stdout, stderr),
+            }
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => UnboundConfigValidationStatus {
+            checkconf_available: false,
+            valid: None,
+            status: "skipped".to_string(),
+            message: "unbound-checkconf is not installed".to_string(),
+        },
+        Err(err) => UnboundConfigValidationStatus {
+            checkconf_available: true,
+            valid: None,
+            status: "error".to_string(),
+            message: format!("failed to run unbound-checkconf: {err}"),
+        },
+    };
+
+    let _ = std::fs::remove_file(&temp_path);
+    result
+}
+
+fn temporary_unbound_config_path() -> PathBuf {
+    let since_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!(
+        "dayshield-unbound-check-{}-{since_epoch}.conf",
+        std::process::id()
+    ))
+}
+
+fn join_command_output(stdout: String, stderr: String) -> String {
+    match (stdout.is_empty(), stderr.is_empty()) {
+        (true, true) => "unbound-checkconf failed without output".to_string(),
+        (false, true) => stdout,
+        (true, false) => stderr,
+        (false, false) => format!("{stdout}\n{stderr}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -168,6 +435,10 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> Result<impl IntoR
         .load_dot_config()
         .map_err(DnsError::StorageError)?
         .unwrap_or_default();
+    let (_host_overrides, domain_overrides) = state
+        .config_store
+        .load_dns_overrides()
+        .map_err(DnsError::StorageError)?;
 
     info!(enabled = cfg.enabled, "dns: loaded config");
 
@@ -177,10 +448,16 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> Result<impl IntoR
             "enabled": cfg.enabled,
             "listen_addresses": cfg.listen_addresses,
             "port": cfg.port,
+            "resolver_mode": cfg.resolver_mode,
             "forwarders": cfg.forwarders,
             "dnssec": cfg.dnssec,
+            "client_acl_preset": cfg.client_acl_preset,
+            "client_acl_custom_cidrs": cfg.client_acl_custom_cidrs,
+            "cache": cfg.cache,
             "local_records": cfg.local_records,
             "interface_blocklists": cfg.interface_blocklists,
+            "manage_firewall": cfg.manage_firewall,
+            "domain_forwarding": domain_overrides,
             "dot_enabled": dot_cfg.enabled,
             "dot_port": dot_cfg.port,
             "dot_lan_only": dot_cfg.lan_only,
@@ -188,6 +465,56 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> Result<impl IntoR
             "dot_private_key": dot_cfg.key_pem,
             "dot_acme_domain": dot_cfg.acme_domain,
             "dot_acme_cert_storage_path": dot_cfg.acme_cert_storage_path,
+        }
+    })))
+}
+
+/// Handler: return DNS runtime and validation status for a settings panel.
+pub async fn get_status(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, DnsError> {
+    let cfg = state
+        .config_store
+        .load_dns_config()
+        .map_err(DnsError::StorageError)?
+        .unwrap_or_default();
+    let dot_cfg = state
+        .config_store
+        .load_dot_config()
+        .map_err(DnsError::StorageError)?
+        .unwrap_or_default();
+    let ipv6_enabled = ipv6_enabled(&state)?;
+    let (host_overrides, domain_overrides) = state
+        .config_store
+        .load_dns_overrides()
+        .map_err(DnsError::StorageError)?;
+
+    let generated = generate_config_with_overrides(
+        &cfg,
+        Some(&dot_cfg),
+        ipv6_enabled,
+        &host_overrides,
+        &domain_overrides,
+    );
+
+    let dnssec = dnssec_status(cfg.dnssec);
+    let dot = dot_exposure_status(&dot_cfg);
+    let unbound = unbound_service_status().await;
+    let config_validation = validate_generated_unbound_config(&generated).await;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": DnsStatusResponse {
+            enabled: cfg.enabled,
+            resolver_mode: cfg.resolver_mode,
+            forwarders: cfg.forwarders,
+            domain_forwarding: domain_overrides,
+            dnssec,
+            client_acl_preset: cfg.client_acl_preset,
+            client_acl_custom_cidrs: cfg.client_acl_custom_cidrs,
+            cache: cfg.cache,
+            plain_dns_firewall_managed: cfg.manage_firewall,
+            dot,
+            unbound,
+            config_validation,
         }
     })))
 }
@@ -216,6 +543,32 @@ pub async fn update_config(
         ));
     }
 
+    let resolver_mode = req.resolver_mode.unwrap_or_else(|| {
+        if req.forwarders == existing.forwarders {
+            existing.resolver_mode
+        } else if req.forwarders.is_empty() {
+            DnsResolverMode::Recursive
+        } else {
+            DnsResolverMode::Forwarded
+        }
+    });
+    let client_acl_preset = req.client_acl_preset.unwrap_or(existing.client_acl_preset);
+    let client_acl_custom_cidrs = req
+        .client_acl_custom_cidrs
+        .clone()
+        .unwrap_or_else(|| existing.client_acl_custom_cidrs.clone())
+        .into_iter()
+        .map(|cidr| cidr.trim().to_string())
+        .filter(|cidr| !cidr.is_empty())
+        .collect::<Vec<_>>();
+    let cache = req.cache.clone().unwrap_or_else(|| existing.cache.clone());
+
+    if matches!(resolver_mode, DnsResolverMode::Forwarded) && req.forwarders.is_empty() {
+        return Err(DnsError::ValidationFailed(
+            "forwarded resolver mode requires at least one forwarder".into(),
+        ));
+    }
+
     for addr in &req.listen_addresses {
         // Accept plain IPs or interface names (e.g. "eth0").
         if !is_valid_ip(addr) && !is_valid_interface_name(addr) {
@@ -241,6 +594,27 @@ pub async fn update_config(
         if let Err(msg) = ensure_ipv6_allowed(fwd, ipv6_enabled, "DNS forwarder") {
             return Err(DnsError::ValidationFailed(msg));
         }
+    }
+
+    if matches!(client_acl_preset, DnsClientAclPreset::Custom) && client_acl_custom_cidrs.is_empty()
+    {
+        return Err(DnsError::ValidationFailed(
+            "custom client ACL requires at least one CIDR".into(),
+        ));
+    }
+    for cidr in &client_acl_custom_cidrs {
+        if !is_valid_cidr(cidr) {
+            return Err(DnsError::ValidationFailed(format!(
+                "invalid client ACL CIDR: {cidr}"
+            )));
+        }
+        if let Err(msg) = ensure_ipv6_allowed(cidr, ipv6_enabled, "DNS client ACL CIDR") {
+            return Err(DnsError::ValidationFailed(msg));
+        }
+    }
+
+    if let Err(msg) = validate_dns_cache_config(&cache) {
+        return Err(DnsError::ValidationFailed(msg));
     }
 
     for rec in &req.local_records {
@@ -272,8 +646,12 @@ pub async fn update_config(
         enabled: req.enabled,
         listen_addresses: req.listen_addresses,
         port: req.port,
+        resolver_mode,
         forwarders: req.forwarders,
         dnssec: req.dnssec,
+        client_acl_preset,
+        client_acl_custom_cidrs,
+        cache,
         local_records: req.local_records,
         interface_blocklists: req
             .interface_blocklists

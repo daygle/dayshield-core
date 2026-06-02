@@ -19,15 +19,15 @@ use tokio::process::Command;
 use tracing::{info, warn};
 
 use crate::config::models::{
-    AcmeChallengeType, AcmeConfig, AcmeDnsProvider, AcmeProvider, DnsConfig, DnsDomainOverride,
-    DnsHostOverride, DnsLocalRecord, DotConfig,
+    AcmeChallengeType, AcmeConfig, AcmeDnsProvider, AcmeProvider, DnsClientAclPreset, DnsConfig,
+    DnsDomainOverride, DnsHostOverride, DnsLocalRecord, DnsResolverMode, DotConfig,
 };
 
 /// Path where Unbound's configuration file is written.  Persisted under
 /// `/var/lib` so DNS settings survive rootfs A/B updates.  The base
 /// /etc/unbound/unbound.conf includes from this path.
 const UNBOUND_CONF_PATH: &str = "/var/lib/dayshield/unbound/dayshield.conf";
-const DNSSEC_ROOT_KEY_PATH: &str = "/var/lib/unbound/root.key";
+pub const DNSSEC_ROOT_KEY_PATH: &str = "/var/lib/unbound/root.key";
 
 /// Directory where DoT TLS certificate and key are stored.
 const DOT_CERTS_DIR: &str = "/var/lib/dayshield/certs";
@@ -50,8 +50,8 @@ pub const DOT_KEY_PATH: &str = "/var/lib/dayshield/certs/dot.key";
 ///   additional `interface: 0.0.0.0@<port>` stanza so Unbound accepts both
 ///   plain DNS (port 53) and DoT (port 853) connections.
 /// - `local-data:` entries for every [`DnsLocalRecord`] in `config`.
-/// - `forward-zone:` block for each forwarder IP when `config.forwarders` is
-///   non-empty (falls back to full recursion when the list is empty).
+/// - `forward-zone:` block for each forwarder IP when resolver mode is
+///   `forwarded` and `config.forwarders` is non-empty.
 pub fn generate_config(config: &DnsConfig, dot: Option<&DotConfig>) -> String {
     generate_config_with_overrides(config, dot, false, &[], &[])
 }
@@ -103,7 +103,7 @@ pub fn generate_config_with_overrides(
     ));
     out.push_str("    do-udp: yes\n");
     out.push_str("    do-tcp: yes\n");
-    append_access_controls(&mut out, dot, ipv6_enabled);
+    append_access_controls(&mut out, config, dot, ipv6_enabled);
 
     // Privacy / hardening.
     out.push_str("    hide-identity: yes\n");
@@ -117,9 +117,28 @@ pub fn generate_config_with_overrides(
         out.push_str("    harden-dnssec-stripped: no\n");
         out.push_str("    module-config: \"iterator\"\n");
     }
-    out.push_str("    cache-min-ttl: 3600\n");
-    out.push_str("    cache-max-ttl: 86400\n");
-    out.push_str("    prefetch: yes\n");
+    out.push_str(&format!(
+        "    cache-min-ttl: {}\n",
+        config.cache.min_ttl_seconds
+    ));
+    out.push_str(&format!(
+        "    cache-max-ttl: {}\n",
+        config.cache.max_ttl_seconds
+    ));
+    out.push_str(&format!(
+        "    prefetch: {}\n",
+        yes_no(config.cache.prefetch)
+    ));
+    out.push_str(&format!(
+        "    serve-expired: {}\n",
+        yes_no(config.cache.serve_expired)
+    ));
+    if config.cache.serve_expired {
+        out.push_str(&format!(
+            "    serve-expired-ttl: {}\n",
+            config.cache.serve_expired_ttl_seconds
+        ));
+    }
 
     // DNSSEC.
     if config.dnssec {
@@ -185,8 +204,8 @@ pub fn generate_config_with_overrides(
         out.push_str(&format!("    forward-addr: {}\n\n", ov.forward_to));
     }
 
-    // Forward zone - use the forwarder list when non-empty.
-    if !config.forwarders.is_empty() {
+    // Forward zone - use the forwarder list only in forwarded mode.
+    if matches!(config.resolver_mode, DnsResolverMode::Forwarded) && !config.forwarders.is_empty() {
         out.push_str("forward-zone:\n");
         out.push_str("    name: \".\"\n");
         for fwd in &config.forwarders {
@@ -287,13 +306,26 @@ pub async fn apply_config_with_overrides(
 // Private helpers
 // ---------------------------------------------------------------------------
 
-fn append_access_controls(out: &mut String, dot: Option<&DotConfig>, ipv6_enabled: bool) {
+fn yes_no(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
+fn append_access_controls(
+    out: &mut String,
+    config: &DnsConfig,
+    dot: Option<&DotConfig>,
+    ipv6_enabled: bool,
+) {
     let public_dot = dot
         .filter(|dot| dot.enabled)
         .map(|dot| !dot.lan_only)
         .unwrap_or(false);
 
-    if public_dot {
+    if public_dot || matches!(config.client_acl_preset, DnsClientAclPreset::AllowAll) {
         out.push_str("    access-control: 0.0.0.0/0 allow\n");
         if ipv6_enabled {
             out.push_str("    access-control: ::0/0 allow\n");
@@ -303,16 +335,42 @@ fn append_access_controls(out: &mut String, dot: Option<&DotConfig>, ipv6_enable
 
     out.push_str("    access-control: 0.0.0.0/0 refuse\n");
     out.push_str("    access-control: 127.0.0.0/8 allow\n");
-    out.push_str("    access-control: 10.0.0.0/8 allow\n");
-    out.push_str("    access-control: 172.16.0.0/12 allow\n");
-    out.push_str("    access-control: 192.168.0.0/16 allow\n");
-    out.push_str("    access-control: 100.64.0.0/10 allow\n");
-    out.push_str("    access-control: 169.254.0.0/16 allow\n");
+
+    match config.client_acl_preset {
+        DnsClientAclPreset::PrivateRanges => {
+            out.push_str("    access-control: 10.0.0.0/8 allow\n");
+            out.push_str("    access-control: 172.16.0.0/12 allow\n");
+            out.push_str("    access-control: 192.168.0.0/16 allow\n");
+            out.push_str("    access-control: 100.64.0.0/10 allow\n");
+            out.push_str("    access-control: 169.254.0.0/16 allow\n");
+        }
+        DnsClientAclPreset::Custom => {
+            for cidr in &config.client_acl_custom_cidrs {
+                if !cidr.contains(':') {
+                    out.push_str(&format!("    access-control: {} allow\n", cidr.trim()));
+                }
+            }
+        }
+        DnsClientAclPreset::LocalhostOnly | DnsClientAclPreset::AllowAll => {}
+    }
+
     if ipv6_enabled {
         out.push_str("    access-control: ::0/0 refuse\n");
         out.push_str("    access-control: ::1/128 allow\n");
-        out.push_str("    access-control: fc00::/7 allow\n");
-        out.push_str("    access-control: fe80::/10 allow\n");
+        match config.client_acl_preset {
+            DnsClientAclPreset::PrivateRanges => {
+                out.push_str("    access-control: fc00::/7 allow\n");
+                out.push_str("    access-control: fe80::/10 allow\n");
+            }
+            DnsClientAclPreset::Custom => {
+                for cidr in &config.client_acl_custom_cidrs {
+                    if cidr.contains(':') {
+                        out.push_str(&format!("    access-control: {} allow\n", cidr.trim()));
+                    }
+                }
+            }
+            DnsClientAclPreset::LocalhostOnly | DnsClientAclPreset::AllowAll => {}
+        }
     }
 }
 
@@ -620,15 +678,19 @@ async fn apply_unbound_runtime(restart: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::models::DnsLocalRecord;
+    use crate::config::models::{DnsCacheConfig, DnsLocalRecord};
 
     fn base_config() -> DnsConfig {
         DnsConfig {
             enabled: true,
             listen_addresses: vec!["127.0.0.1".into()],
             port: 53,
+            resolver_mode: DnsResolverMode::Forwarded,
             forwarders: vec!["1.1.1.1".into(), "8.8.8.8".into()],
             dnssec: false,
+            client_acl_preset: DnsClientAclPreset::PrivateRanges,
+            client_acl_custom_cidrs: vec![],
+            cache: DnsCacheConfig::default(),
             local_records: vec![],
             interface_blocklists: vec![],
             manage_firewall: true,
@@ -695,6 +757,47 @@ mod tests {
             !out.contains("forward-zone:"),
             "full recursion: no forward-zone expected"
         );
+    }
+
+    #[test]
+    fn generate_config_recursive_mode_ignores_saved_forwarders() {
+        let mut cfg = base_config();
+        cfg.resolver_mode = DnsResolverMode::Recursive;
+        let out = generate_config(&cfg, None);
+        assert!(
+            !out.contains("forward-zone:"),
+            "recursive mode should not render global forwarders"
+        );
+    }
+
+    #[test]
+    fn generate_config_custom_client_acl() {
+        let mut cfg = base_config();
+        cfg.client_acl_preset = DnsClientAclPreset::Custom;
+        cfg.client_acl_custom_cidrs = vec!["192.0.2.0/24".into(), "fd00:1234::/64".into()];
+        let out = generate_config_with_ipv6(&cfg, None, true);
+        assert!(out.contains("access-control: 0.0.0.0/0 refuse"));
+        assert!(out.contains("access-control: 192.0.2.0/24 allow"));
+        assert!(out.contains("access-control: fd00:1234::/64 allow"));
+        assert!(!out.contains("access-control: 10.0.0.0/8 allow"));
+    }
+
+    #[test]
+    fn generate_config_renders_cache_controls() {
+        let mut cfg = base_config();
+        cfg.cache = DnsCacheConfig {
+            min_ttl_seconds: 60,
+            max_ttl_seconds: 7200,
+            prefetch: false,
+            serve_expired: true,
+            serve_expired_ttl_seconds: 900,
+        };
+        let out = generate_config(&cfg, None);
+        assert!(out.contains("cache-min-ttl: 60"));
+        assert!(out.contains("cache-max-ttl: 7200"));
+        assert!(out.contains("prefetch: no"));
+        assert!(out.contains("serve-expired: yes"));
+        assert!(out.contains("serve-expired-ttl: 900"));
     }
 
     #[test]

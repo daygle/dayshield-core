@@ -871,6 +871,7 @@ impl AiRuntime {
             &captive_sessions,
             &config.interfaces,
             crate::captive_portal::effective_dns_port(config.dns.as_ref()),
+            config.dot.as_ref(),
         )
         .await
         .context("failed to apply AI-enforced temporary block rules")?;

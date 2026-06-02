@@ -16,7 +16,7 @@ use tracing::info;
 
 use crate::{
     config::models::{validate_dot_config, DotConfig},
-    engine::dns::apply_config_with_ipv6,
+    engine::dns::apply_config_with_overrides,
     state::AppState,
 };
 
@@ -190,11 +190,28 @@ pub async fn update_config(
         .map_err(DotError::StorageError)?
         .ipv6_enabled;
 
-    apply_config_with_ipv6(&dns_cfg, Some(&cfg), ipv6_enabled)
-        .await
-        .map_err(|e| DotError::EngineError(e.to_string()))?;
+    let (host_overrides, domain_overrides) = state
+        .config_store
+        .load_dns_overrides()
+        .map_err(DotError::StorageError)?;
+
+    apply_config_with_overrides(
+        &dns_cfg,
+        Some(&cfg),
+        ipv6_enabled,
+        &host_overrides,
+        &domain_overrides,
+    )
+    .await
+    .map_err(|e| DotError::EngineError(e.to_string()))?;
 
     info!("dot: engine apply complete");
+
+    crate::captive_portal::apply_current_ruleset_nft(&state.config_store)
+        .await
+        .map_err(|e| DotError::EngineError(format!("firewall re-apply failed: {e}")))?;
+
+    info!("dot: firewall ruleset updated for DoT access setting");
 
     Ok(Json(serde_json::json!({ "success": true, "data": cfg })))
 }

@@ -1706,6 +1706,87 @@ pub struct DnsLocalRecord {
     pub value: String,
 }
 
+/// Validate a local DNS record before it is rendered into Unbound config.
+pub fn validate_dns_local_record(rec: &DnsLocalRecord, ipv6_enabled: bool) -> Result<(), String> {
+    let name = rec.name.trim();
+    if name.is_empty() {
+        return Err("DNS local record name must not be empty".into());
+    }
+    if !is_valid_domain(name) {
+        return Err(format!(
+            "DNS local record name {:?} must be a valid DNS name",
+            rec.name
+        ));
+    }
+
+    let record_type = rec.record_type.trim().to_uppercase();
+    match record_type.as_str() {
+        "A" => {
+            if !is_valid_ipv4_addr(&rec.value) {
+                return Err(format!(
+                    "A record {:?} value must be an IPv4 address, got {:?}",
+                    rec.name, rec.value
+                ));
+            }
+        }
+        "AAAA" => {
+            if !ipv6_enabled {
+                return Err(format!(
+                    "AAAA record {:?} requires system ipv6Enabled to be true",
+                    rec.name
+                ));
+            }
+            if !is_valid_ipv6_addr(&rec.value) {
+                return Err(format!(
+                    "AAAA record {:?} value must be an IPv6 address, got {:?}",
+                    rec.name, rec.value
+                ));
+            }
+        }
+        "CNAME" | "PTR" => {
+            if !is_valid_domain(&rec.value) {
+                return Err(format!(
+                    "{} record {:?} value must be a valid DNS name, got {:?}",
+                    record_type, rec.name, rec.value
+                ));
+            }
+        }
+        "MX" => {
+            let mut parts = rec.value.split_whitespace();
+            let priority = parts.next();
+            let exchange = parts.next();
+            let valid = priority.and_then(|p| p.parse::<u16>().ok()).is_some()
+                && exchange.map(is_valid_domain).unwrap_or(false)
+                && parts.next().is_none();
+            if !valid {
+                return Err(format!(
+                    "MX record {:?} value must be \"<priority> <domain>\", got {:?}",
+                    rec.name, rec.value
+                ));
+            }
+        }
+        "TXT" => {
+            if rec.value.is_empty() {
+                return Err(format!("TXT record {:?} value must not be empty", rec.name));
+            }
+            if rec.value.contains('\n') || rec.value.contains('\r') {
+                return Err(format!(
+                    "TXT record {:?} value must not contain line breaks",
+                    rec.name
+                ));
+            }
+        }
+        _ => {
+            return Err(format!(
+                "unsupported DNS record type: {} (supported: A, AAAA, CNAME, PTR, MX, TXT)",
+                rec.record_type
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // DNS-over-TLS (DoT)
 // ---------------------------------------------------------------------------

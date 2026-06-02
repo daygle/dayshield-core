@@ -24,11 +24,11 @@ use uuid::Uuid;
 
 use crate::{
     config::models::{
-        ensure_ipv6_allowed, is_valid_domain, is_valid_interface_name, is_valid_ip,
+        ensure_ipv6_allowed, is_valid_interface_name, is_valid_ip, validate_dns_local_record,
         validate_dot_config, DnsBlocklistEntry, DnsConfig, DnsInterfaceBlocklists, DnsLocalRecord,
         DotConfig,
     },
-    engine::dns::apply_config_with_ipv6,
+    engine::dns::apply_config_with_overrides,
     state::AppState,
 };
 
@@ -244,71 +244,8 @@ pub async fn update_config(
     }
 
     for rec in &req.local_records {
-        if rec.name.is_empty() {
-            return Err(DnsError::ValidationFailed(
-                "local record name must not be empty".into(),
-            ));
-        }
-        let rtype = rec.record_type.to_uppercase();
-        match rtype.as_str() {
-            "A" => {
-                if rec.value.parse::<std::net::Ipv4Addr>().is_err() {
-                    return Err(DnsError::ValidationFailed(format!(
-                        "A record {:?} value must be an IPv4 address, got: {}",
-                        rec.name, rec.value
-                    )));
-                }
-            }
-            "AAAA" => {
-                if !ipv6_enabled {
-                    return Err(DnsError::ValidationFailed(format!(
-                        "AAAA record {:?} requires system ipv6Enabled",
-                        rec.name
-                    )));
-                }
-                if rec.value.parse::<std::net::Ipv6Addr>().is_err() {
-                    return Err(DnsError::ValidationFailed(format!(
-                        "AAAA record {:?} value must be an IPv6 address, got: {}",
-                        rec.name, rec.value
-                    )));
-                }
-            }
-            "CNAME" | "PTR" => {
-                if !is_valid_domain(&rec.value) {
-                    return Err(DnsError::ValidationFailed(format!(
-                        "{} record {:?} value must be a valid domain name, got: {}",
-                        rtype, rec.name, rec.value
-                    )));
-                }
-            }
-            "MX" => {
-                // MX value: "<priority> <domain>" e.g. "10 mail.example.com"
-                let parts: Vec<&str> = rec.value.splitn(2, ' ').collect();
-                let valid = parts.len() == 2
-                    && parts[0].parse::<u16>().is_ok()
-                    && is_valid_domain(parts[1]);
-                if !valid {
-                    return Err(DnsError::ValidationFailed(format!(
-                        "MX record {:?} value must be \"<priority> <domain>\", got: {}",
-                        rec.name, rec.value
-                    )));
-                }
-            }
-            "TXT" => {
-                // TXT records are freeform; only check non-empty.
-                if rec.value.is_empty() {
-                    return Err(DnsError::ValidationFailed(format!(
-                        "TXT record {:?} value must not be empty",
-                        rec.name
-                    )));
-                }
-            }
-            _ => {
-                return Err(DnsError::ValidationFailed(format!(
-                    "unsupported DNS record type: {} (supported: A, AAAA, CNAME, PTR, MX, TXT)",
-                    rec.record_type
-                )));
-            }
+        if let Err(msg) = validate_dns_local_record(rec, ipv6_enabled) {
+            return Err(DnsError::ValidationFailed(msg));
         }
     }
 
@@ -406,10 +343,20 @@ pub async fn update_config(
         .config_store
         .load_dot_config()
         .map_err(DnsError::StorageError)?;
+    let (host_overrides, domain_overrides) = state
+        .config_store
+        .load_dns_overrides()
+        .map_err(DnsError::StorageError)?;
 
-    apply_config_with_ipv6(&cfg, dot.as_ref(), ipv6_enabled)
-        .await
-        .map_err(|e| DnsError::EngineError(e.to_string()))?;
+    apply_config_with_overrides(
+        &cfg,
+        dot.as_ref(),
+        ipv6_enabled,
+        &host_overrides,
+        &domain_overrides,
+    )
+    .await
+    .map_err(|e| DnsError::EngineError(e.to_string()))?;
 
     info!("dns: engine apply complete");
 
@@ -525,10 +472,20 @@ pub async fn create_interface_blocklist(
         .config_store
         .load_dot_config()
         .map_err(DnsError::StorageError)?;
+    let (host_overrides, domain_overrides) = state
+        .config_store
+        .load_dns_overrides()
+        .map_err(DnsError::StorageError)?;
 
-    apply_config_with_ipv6(&cfg, dot.as_ref(), ipv6_enabled(&state)?)
-        .await
-        .map_err(|e| DnsError::EngineError(e.to_string()))?;
+    apply_config_with_overrides(
+        &cfg,
+        dot.as_ref(),
+        ipv6_enabled(&state)?,
+        &host_overrides,
+        &domain_overrides,
+    )
+    .await
+    .map_err(|e| DnsError::EngineError(e.to_string()))?;
 
     Ok((
         StatusCode::CREATED,
@@ -592,10 +549,20 @@ pub async fn delete_interface_blocklist(
         .config_store
         .load_dot_config()
         .map_err(DnsError::StorageError)?;
+    let (host_overrides, domain_overrides) = state
+        .config_store
+        .load_dns_overrides()
+        .map_err(DnsError::StorageError)?;
 
-    apply_config_with_ipv6(&cfg, dot.as_ref(), ipv6_enabled(&state)?)
-        .await
-        .map_err(|e| DnsError::EngineError(e.to_string()))?;
+    apply_config_with_overrides(
+        &cfg,
+        dot.as_ref(),
+        ipv6_enabled(&state)?,
+        &host_overrides,
+        &domain_overrides,
+    )
+    .await
+    .map_err(|e| DnsError::EngineError(e.to_string()))?;
 
     Ok(StatusCode::NO_CONTENT)
 }

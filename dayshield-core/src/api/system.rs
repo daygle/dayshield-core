@@ -40,8 +40,8 @@ use crate::{
     auth::model::AuthenticatedUser,
     config::models::SystemSettings,
     engine::{
-        dns::apply_config_with_ipv6 as apply_dns_config, interfaces::refresh_router_advertisements,
-        ipv6::apply_ipv6_setting, kea,
+        dns::apply_config_with_overrides as apply_dns_config,
+        interfaces::refresh_router_advertisements, ipv6::apply_ipv6_setting, kea,
     },
     rootfs_update,
     state::{
@@ -804,11 +804,17 @@ pub async fn update_config(
             })?;
 
         if let Some(dns) = full_cfg.dns.as_ref() {
-            apply_dns_config(dns, full_cfg.dot.as_ref(), settings.ipv6_enabled)
-                .await
-                .map_err(|e| {
-                    SystemApiError::CommandError(format!("failed to reapply DNS config: {e:#}"))
-                })?;
+            apply_dns_config(
+                dns,
+                full_cfg.dot.as_ref(),
+                settings.ipv6_enabled,
+                &full_cfg.dns_host_overrides,
+                &full_cfg.dns_domain_overrides,
+            )
+            .await
+            .map_err(|e| {
+                SystemApiError::CommandError(format!("failed to reapply DNS config: {e:#}"))
+            })?;
         }
 
         refresh_router_advertisements(&full_cfg.interfaces, settings.ipv6_enabled).await;

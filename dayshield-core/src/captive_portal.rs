@@ -671,6 +671,7 @@ pub async fn apply_current_ruleset_nft(config_store: &ConfigStore) -> Result<(),
         &active_sessions,
         &cfg.interfaces,
         effective_dns_port(cfg.dns.as_ref()),
+        cfg.dot.as_ref(),
     )
     .await
 }

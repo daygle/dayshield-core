@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use crate::config::models::{
     effective_management_ports, is_valid_cidr, is_valid_ip, Action, AddressFamily, AliasType,
-    CaptivePortalConfig, CaptivePortalSession, FirewallAddressFamily, FirewallAlias,
+    CaptivePortalConfig, CaptivePortalSession, DotConfig, FirewallAddressFamily, FirewallAlias,
     FirewallChainPolicy, FirewallDirection, FirewallRule, FirewallSchedule, FirewallSettings,
     FirewallStateLimits, Interface, LogPosition, NatConfig, NatProtocol, NatRuleType, OutboundMode,
     Protocol, SystemSettings,
@@ -214,6 +214,7 @@ pub fn generate_ruleset_with_ipv6_and_system_settings(
         &[],
         &[],
         Some(53),
+        None,
     )
 }
 
@@ -229,6 +230,7 @@ pub fn system_firewall_rules(
     firewall_settings: &FirewallSettings,
     system_settings: Option<&SystemSettings>,
     dns_port: Option<u16>,
+    dot_config: Option<&DotConfig>,
     ipv6_enabled: bool,
 ) -> Vec<FirewallRule> {
     let mut rules = Vec::new();
@@ -290,7 +292,15 @@ pub fn system_firewall_rules(
         .iter()
         .filter(|iface| iface.enabled && !is_wan_interface(iface))
     {
-        rules.extend(system_lan_service_rules(iface, dns_port, ipv6_enabled));
+        rules.extend(system_lan_service_rules(
+            iface,
+            dns_port,
+            dot_config.filter(|dot| dot.enabled && dot.lan_only),
+            ipv6_enabled,
+        ));
+    }
+    if let Some(dot) = dot_config.filter(|dot| dot.enabled && !dot.lan_only) {
+        rules.push(system_public_dot_rule(dot.port, ipv6_enabled));
     }
     let management_ports = effective_management_ports(firewall_settings, system_settings);
     if firewall_settings.management_anti_lockout && !management_ports.is_empty() {
@@ -307,6 +317,7 @@ pub fn system_firewall_rules(
 fn system_lan_service_rules(
     iface: &Interface,
     dns_port: Option<u16>,
+    dot_config: Option<&DotConfig>,
     ipv6_enabled: bool,
 ) -> Vec<FirewallRule> {
     let mut rules = vec![system_lan_service_rule(
@@ -336,6 +347,18 @@ fn system_lan_service_rules(
             Some(Protocol::Tcp),
             None,
             Some(port),
+            FirewallAddressFamily::Ipv4Ipv6,
+        ));
+    }
+
+    if let Some(dot) = dot_config {
+        rules.push(system_lan_service_rule(
+            iface,
+            "dot",
+            "Allow DNS-over-TLS from LAN clients",
+            Some(Protocol::Tcp),
+            None,
+            Some(dot.port),
             FirewallAddressFamily::Ipv4Ipv6,
         ));
     }
@@ -382,6 +405,36 @@ fn system_lan_service_rule(
         action: Action::Accept,
         direction: FirewallDirection::Input,
         interface: Some(iface.name.clone()),
+        log: false,
+        enabled: true,
+        schedule: None,
+        state_limits: FirewallStateLimits::default(),
+    }
+}
+
+fn system_public_dot_rule(port: u16, ipv6_enabled: bool) -> FirewallRule {
+    FirewallRule {
+        id: stable_system_rule_id(
+            "system",
+            "public-service",
+            &format!("dot-{port}"),
+            &FirewallDirection::Input,
+        ),
+        description: Some(format!("Allow public DNS-over-TLS (port {port})")),
+        priority: -174,
+        source: None,
+        destination: None,
+        protocol: Some(Protocol::Tcp),
+        source_port: None,
+        destination_port: Some(port),
+        ip_family: if ipv6_enabled {
+            FirewallAddressFamily::Ipv4Ipv6
+        } else {
+            FirewallAddressFamily::Ipv4
+        },
+        action: Action::Accept,
+        direction: FirewallDirection::Input,
+        interface: None,
         log: false,
         enabled: true,
         schedule: None,
@@ -572,6 +625,7 @@ pub fn generate_ruleset_with_captive(
         captive_sessions,
         &[],
         dns_port,
+        None,
     )
 }
 
@@ -587,6 +641,7 @@ pub fn generate_ruleset_with_captive_and_interfaces(
     captive_sessions: &[CaptivePortalSession],
     interfaces: &[Interface],
     dns_port: Option<u16>,
+    dot_config: Option<&DotConfig>,
 ) -> String {
     let settings = firewall_settings.cloned().unwrap_or_default();
     let system_rules = system_firewall_rules(
@@ -594,6 +649,7 @@ pub fn generate_ruleset_with_captive_and_interfaces(
         &settings,
         system_settings,
         dns_port,
+        dot_config,
         ipv6_enabled,
     );
     // Only emit rules that are enabled and whose schedule (if any) is currently active.
@@ -896,6 +952,7 @@ pub async fn apply_rules(
         &[],
         &[],
         Some(53),
+        None,
     )
     .await
 }
@@ -915,6 +972,7 @@ pub async fn apply_rules_with_captive(
     captive_sessions: &[CaptivePortalSession],
     interfaces: &[Interface],
     dns_port: Option<u16>,
+    dot_config: Option<&DotConfig>,
 ) -> Result<(), NftError> {
     // Resolve URL-table aliases (fetch + cache).
     let resolved_url_tables = resolve_url_tables(aliases).await;
@@ -931,6 +989,7 @@ pub async fn apply_rules_with_captive(
         captive_sessions,
         interfaces,
         dns_port,
+        dot_config,
     );
 
     if nat_requires_ipv4_forwarding(nat_config) {
@@ -2426,12 +2485,75 @@ mod tests {
             &[],
             &interfaces,
             Some(53),
+            None,
         );
 
         assert!(rs.contains("iifname \"lan0\" meta nfproto ipv4 udp sport 68 udp dport 67"));
         assert!(rs.contains("iifname \"lan0\" udp dport 53"));
         assert!(rs.contains("iifname \"lan0\" tcp dport 53"));
         assert!(!rs.contains("iifname \"wan0\" udp dport 53"));
+    }
+
+    #[test]
+    fn lan_only_dot_allows_lan_interface_only() {
+        let interfaces = vec![test_interface("lan0", false), test_interface("wan0", true)];
+        let dot = DotConfig {
+            enabled: true,
+            port: 853,
+            lan_only: true,
+            cert_pem: None,
+            key_pem: None,
+            acme_domain: None,
+            acme_cert_storage_path: None,
+        };
+        let rs = generate_ruleset_with_captive_and_interfaces(
+            &[],
+            None,
+            &[],
+            None,
+            None,
+            &HashMap::new(),
+            false,
+            None,
+            &[],
+            &interfaces,
+            Some(53),
+            Some(&dot),
+        );
+
+        assert!(rs.contains("iifname \"lan0\" tcp dport 853"));
+        assert!(!rs.contains("iifname \"wan0\" tcp dport 853"));
+    }
+
+    #[test]
+    fn public_dot_allows_any_input_interface() {
+        let interfaces = vec![test_interface("lan0", false), test_interface("wan0", true)];
+        let dot = DotConfig {
+            enabled: true,
+            port: 8853,
+            lan_only: false,
+            cert_pem: None,
+            key_pem: None,
+            acme_domain: None,
+            acme_cert_storage_path: None,
+        };
+        let rs = generate_ruleset_with_captive_and_interfaces(
+            &[],
+            None,
+            &[],
+            None,
+            None,
+            &HashMap::new(),
+            false,
+            None,
+            &[],
+            &interfaces,
+            Some(53),
+            Some(&dot),
+        );
+
+        assert!(rs.contains("tcp dport 8853"));
+        assert!(!rs.contains("iifname \"lan0\" tcp dport 8853"));
     }
 
     #[test]
@@ -2449,6 +2571,7 @@ mod tests {
             &[],
             &interfaces,
             Some(53),
+            None,
         );
 
         assert!(rs.contains("iifname \"lan0\" meta nfproto ipv6 udp sport 546 udp dport 547"));

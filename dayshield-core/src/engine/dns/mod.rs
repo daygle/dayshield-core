@@ -12,21 +12,22 @@
 //! | [`generate_config`] | Build a complete `unbound.conf` string.             |
 //! | [`apply_config`]    | Write `unbound.conf` to disk and reload Unbound.    |
 
-use std::path::Path;
+use std::{io::ErrorKind, net::IpAddr, path::Path};
 
 use anyhow::{Context, Result};
 use tokio::process::Command;
 use tracing::{info, warn};
 
 use crate::config::models::{
-    AcmeChallengeType, AcmeConfig, AcmeDnsProvider, AcmeProvider, DnsConfig, DnsLocalRecord,
-    DotConfig,
+    AcmeChallengeType, AcmeConfig, AcmeDnsProvider, AcmeProvider, DnsConfig, DnsDomainOverride,
+    DnsHostOverride, DnsLocalRecord, DotConfig,
 };
 
 /// Path where Unbound's configuration file is written.  Persisted under
 /// `/var/lib` so DNS settings survive rootfs A/B updates.  The base
 /// /etc/unbound/unbound.conf includes from this path.
 const UNBOUND_CONF_PATH: &str = "/var/lib/dayshield/unbound/dayshield.conf";
+const DNSSEC_ROOT_KEY_PATH: &str = "/var/lib/unbound/root.key";
 
 /// Directory where DoT TLS certificate and key are stored.
 const DOT_CERTS_DIR: &str = "/var/lib/dayshield/certs";
@@ -45,14 +46,14 @@ pub const DOT_KEY_PATH: &str = "/var/lib/dayshield/certs/dot.key";
 /// - `server:` block with listen interfaces/addresses, port, DNSSEC, and
 ///   privacy/hardening settings.
 /// - Optional DoT TLS settings when `dot` is `Some` and `dot.enabled` is
-///   `true`: `ssl-port`, `ssl-service-key`, `ssl-service-pem`, and an
+///   `true`: `tls-port`, `tls-service-key`, `tls-service-pem`, and an
 ///   additional `interface: 0.0.0.0@<port>` stanza so Unbound accepts both
 ///   plain DNS (port 53) and DoT (port 853) connections.
 /// - `local-data:` entries for every [`DnsLocalRecord`] in `config`.
 /// - `forward-zone:` block for each forwarder IP when `config.forwarders` is
 ///   non-empty (falls back to full recursion when the list is empty).
 pub fn generate_config(config: &DnsConfig, dot: Option<&DotConfig>) -> String {
-    generate_config_with_ipv6(config, dot, false)
+    generate_config_with_overrides(config, dot, false, &[], &[])
 }
 
 /// Generate a complete Unbound configuration file for the current IPv6 mode.
@@ -60,6 +61,17 @@ pub fn generate_config_with_ipv6(
     config: &DnsConfig,
     dot: Option<&DotConfig>,
     ipv6_enabled: bool,
+) -> String {
+    generate_config_with_overrides(config, dot, ipv6_enabled, &[], &[])
+}
+
+/// Generate a complete Unbound configuration file for the full DNS runtime.
+pub fn generate_config_with_overrides(
+    config: &DnsConfig,
+    dot: Option<&DotConfig>,
+    ipv6_enabled: bool,
+    host_overrides: &[DnsHostOverride],
+    domain_overrides: &[DnsDomainOverride],
 ) -> String {
     let mut out = String::new();
 
@@ -91,21 +103,29 @@ pub fn generate_config_with_ipv6(
     ));
     out.push_str("    do-udp: yes\n");
     out.push_str("    do-tcp: yes\n");
+    append_access_controls(&mut out, dot, ipv6_enabled);
 
     // Privacy / hardening.
     out.push_str("    hide-identity: yes\n");
     out.push_str("    hide-version: yes\n");
     out.push_str("    harden-glue: yes\n");
-    out.push_str("    harden-dnssec-stripped: yes\n");
     out.push_str("    use-caps-for-id: yes\n");
-    out.push_str("    module-config: \"validator iterator\"\n");
+    if config.dnssec {
+        out.push_str("    harden-dnssec-stripped: yes\n");
+        out.push_str("    module-config: \"validator iterator\"\n");
+    } else {
+        out.push_str("    harden-dnssec-stripped: no\n");
+        out.push_str("    module-config: \"iterator\"\n");
+    }
     out.push_str("    cache-min-ttl: 3600\n");
     out.push_str("    cache-max-ttl: 86400\n");
     out.push_str("    prefetch: yes\n");
 
     // DNSSEC.
     if config.dnssec {
-        out.push_str("    auto-trust-anchor-file: \"/var/lib/unbound/root.key\"\n");
+        out.push_str(&format!(
+            "    auto-trust-anchor-file: \"{DNSSEC_ROOT_KEY_PATH}\"\n"
+        ));
     } else {
         out.push_str("    # DNSSEC disabled\n");
     }
@@ -113,10 +133,10 @@ pub fn generate_config_with_ipv6(
     // DNS-over-TLS settings.
     if let Some(dot) = dot {
         if dot.enabled {
-            out.push_str(&format!("\n    # DNS-over-TLS (DoT)\n"));
-            out.push_str(&format!("    ssl-port: {}\n", dot.port));
-            out.push_str(&format!("    ssl-service-key: \"{DOT_KEY_PATH}\"\n"));
-            out.push_str(&format!("    ssl-service-pem: \"{DOT_CERT_PATH}\"\n"));
+            out.push_str("\n    # DNS-over-TLS (DoT)\n");
+            out.push_str(&format!("    tls-port: {}\n", dot.port));
+            out.push_str(&format!("    tls-service-key: \"{DOT_KEY_PATH}\"\n"));
+            out.push_str(&format!("    tls-service-pem: \"{DOT_CERT_PATH}\"\n"));
             // Bind the DoT port on all interfaces so that both LAN and external
             // clients can connect.  Restrict access at the firewall layer if
             // finer-grained control is needed.
@@ -136,9 +156,33 @@ pub fn generate_config_with_ipv6(
             out.push_str(&format!("    local-data: \"{l}\"\n"));
         }
     }
+    for ov in host_overrides {
+        let record_type = match ov.address.parse::<IpAddr>() {
+            Ok(IpAddr::V4(_)) => "A",
+            Ok(IpAddr::V6(_)) => "AAAA",
+            Err(_) => {
+                warn!(
+                    hostname = %ov.hostname,
+                    address = %ov.address,
+                    "dns: invalid host override address; skipping"
+                );
+                continue;
+            }
+        };
+        out.push_str(&format!(
+            "    local-data: \"{} IN {} {}\"\n",
+            ov.hostname, record_type, ov.address
+        ));
+    }
 
-    if !config.local_records.is_empty() {
+    if !config.local_records.is_empty() || !host_overrides.is_empty() {
         out.push('\n');
+    }
+
+    for ov in domain_overrides {
+        out.push_str("forward-zone:\n");
+        out.push_str(&format!("    name: \"{}\"\n", ov.domain));
+        out.push_str(&format!("    forward-addr: {}\n\n", ov.forward_to));
     }
 
     // Forward zone - use the forwarder list when non-empty.
@@ -161,10 +205,9 @@ pub fn generate_config_with_ipv6(
 ///    to [`DOT_CERT_PATH`] / [`DOT_KEY_PATH`] before generating the config.
 /// 2. Generate `unbound.conf` via [`generate_config`].
 /// 3. Write the file atomically to [`UNBOUND_CONF_PATH`].
-/// 4. Apply the change with `systemctl reload-or-restart unbound`, which
-///    reloads Unbound when it is already running (re-reading the config
-///    without dropping the cache, via the unit's `ExecReload` SIGHUP) and
-///    starts it when it is not.
+/// 4. Validate the generated config with `unbound-checkconf` when available.
+/// 5. Apply the change with `systemctl reload-or-restart unbound`, or with a
+///    full restart when the requested change cannot be safely reloaded.
 ///
 /// # Errors
 ///
@@ -172,7 +215,7 @@ pub fn generate_config_with_ipv6(
 /// configuration file cannot be written, or if the reload / start command
 /// fails.
 pub async fn apply_config(config: &DnsConfig, dot: Option<&DotConfig>) -> Result<()> {
-    apply_config_with_ipv6(config, dot, false).await
+    apply_config_with_overrides(config, dot, false, &[], &[]).await
 }
 
 /// Apply the provided DNS configuration using the current IPv6 mode.
@@ -181,11 +224,24 @@ pub async fn apply_config_with_ipv6(
     dot: Option<&DotConfig>,
     ipv6_enabled: bool,
 ) -> Result<()> {
+    apply_config_with_overrides(config, dot, ipv6_enabled, &[], &[]).await
+}
+
+/// Apply the provided DNS configuration, including persisted host/domain overrides.
+pub async fn apply_config_with_overrides(
+    config: &DnsConfig,
+    dot: Option<&DotConfig>,
+    ipv6_enabled: bool,
+    host_overrides: &[DnsHostOverride],
+    domain_overrides: &[DnsDomainOverride],
+) -> Result<()> {
     info!(
         enabled = config.enabled,
         forwarders = config.forwarders.len(),
         dnssec = config.dnssec,
         ipv6_enabled,
+        host_overrides = host_overrides.len(),
+        domain_overrides = domain_overrides.len(),
         "dns: applying config"
     );
 
@@ -205,22 +261,24 @@ pub async fn apply_config_with_ipv6(
         }
     }
 
-    let conf_str = generate_config_with_ipv6(config, dot, ipv6_enabled);
+    if config.dnssec {
+        ensure_dnssec_root_anchor().await?;
+    }
+
+    let conf_str =
+        generate_config_with_overrides(config, dot, ipv6_enabled, host_overrides, domain_overrides);
     write_config_atomic(UNBOUND_CONF_PATH, &conf_str)
         .with_context(|| {
             format!(
-                "failed to write {} (check dayshield.service sandbox: ReadWritePaths should include /etc/unbound)",
+                "failed to write {} (check dayshield.service sandbox: ReadWritePaths should include /var/lib/dayshield/unbound)",
                 UNBOUND_CONF_PATH
             )
         })?;
 
     info!(path = UNBOUND_CONF_PATH, "dns: unbound.conf written");
 
-    // Apply the change. `reload-or-restart` sends a reload (SIGHUP, see the
-    // unbound.service `ExecReload`) when Unbound is already running - which
-    // re-reads unbound.conf and our included dayshield.conf without dropping
-    // the cache - and starts the service when it is not yet running.
-    reload_or_start_unbound().await?;
+    check_unbound_config().await?;
+    apply_unbound_runtime(needs_unbound_restart(config, dot)).await?;
 
     Ok(())
 }
@@ -228,6 +286,35 @@ pub async fn apply_config_with_ipv6(
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
+
+fn append_access_controls(out: &mut String, dot: Option<&DotConfig>, ipv6_enabled: bool) {
+    let public_dot = dot
+        .filter(|dot| dot.enabled)
+        .map(|dot| !dot.lan_only)
+        .unwrap_or(false);
+
+    if public_dot {
+        out.push_str("    access-control: 0.0.0.0/0 allow\n");
+        if ipv6_enabled {
+            out.push_str("    access-control: ::0/0 allow\n");
+        }
+        return;
+    }
+
+    out.push_str("    access-control: 0.0.0.0/0 refuse\n");
+    out.push_str("    access-control: 127.0.0.0/8 allow\n");
+    out.push_str("    access-control: 10.0.0.0/8 allow\n");
+    out.push_str("    access-control: 172.16.0.0/12 allow\n");
+    out.push_str("    access-control: 192.168.0.0/16 allow\n");
+    out.push_str("    access-control: 100.64.0.0/10 allow\n");
+    out.push_str("    access-control: 169.254.0.0/16 allow\n");
+    if ipv6_enabled {
+        out.push_str("    access-control: ::0/0 refuse\n");
+        out.push_str("    access-control: ::1/128 allow\n");
+        out.push_str("    access-control: fc00::/7 allow\n");
+        out.push_str("    access-control: fe80::/10 allow\n");
+    }
+}
 
 /// Write the DoT TLS certificate and private key to their well-known paths.
 ///
@@ -332,9 +419,7 @@ fn write_cert_file(path: &str, data: &[u8]) -> Result<()> {
 /// Write `data` to `path` with mode `0o600` on Unix, or a plain write on
 /// other platforms.
 ///
-/// Uses a write-then-rename for atomicity on the same filesystem.  Each call
-/// operates on a uniquely suffixed `.tmp` file so concurrent callers do not
-/// interfere with each other's temporary files.
+/// Uses a write-then-rename for atomicity on the same filesystem.
 #[cfg(unix)]
 fn write_key_restricted(path: &str, data: &[u8]) -> Result<()> {
     use std::io::Write;
@@ -369,7 +454,12 @@ fn build_local_data_line(rec: &DnsLocalRecord) -> Option<String> {
     let rtype = rec.record_type.to_uppercase();
     match rtype.as_str() {
         "A" | "AAAA" | "CNAME" | "PTR" | "MX" | "TXT" => {
-            Some(format!("{} IN {} {}", rec.name, rtype, rec.value))
+            let value = if rtype == "TXT" {
+                format!("\\\"{}\\\"", escape_unbound_txt(&rec.value))
+            } else {
+                rec.value.clone()
+            };
+            Some(format!("{} IN {} {}", rec.name, rtype, value))
         }
         _ => {
             warn!(
@@ -380,6 +470,10 @@ fn build_local_data_line(rec: &DnsLocalRecord) -> Option<String> {
             None
         }
     }
+}
+
+fn escape_unbound_txt(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Write `content` to `path` using an atomic rename.
@@ -400,24 +494,122 @@ fn write_config_atomic(path: &str, content: &str) -> Result<()> {
     Ok(())
 }
 
-/// Reload the Unbound service if it is running, or start it otherwise.
+async fn ensure_dnssec_root_anchor() -> Result<()> {
+    let path = Path::new(DNSSEC_ROOT_KEY_PATH);
+    if path.exists() && std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > 0 {
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+    }
+
+    let out = match Command::new("unbound-anchor")
+        .args(["-a", DNSSEC_ROOT_KEY_PATH])
+        .output()
+        .await
+    {
+        Ok(out) => out,
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            anyhow::bail!(
+                "DNSSEC root anchor {} is missing and unbound-anchor is not installed",
+                DNSSEC_ROOT_KEY_PATH
+            );
+        }
+        Err(err) => return Err(err).context("failed to spawn unbound-anchor"),
+    };
+
+    let anchor_exists = path.exists() && std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > 0;
+    if out.status.success() || (out.status.code() == Some(1) && anchor_exists) {
+        info!(path = DNSSEC_ROOT_KEY_PATH, "dns: DNSSEC root anchor ready");
+        return Ok(());
+    }
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    anyhow::bail!(
+        "unbound-anchor failed while creating {}: {}{}{}",
+        DNSSEC_ROOT_KEY_PATH,
+        stdout.trim(),
+        if stdout.trim().is_empty() || stderr.trim().is_empty() {
+            ""
+        } else {
+            "\n"
+        },
+        stderr.trim()
+    );
+}
+
+async fn check_unbound_config() -> Result<()> {
+    run_unbound_checkconf(Some(UNBOUND_CONF_PATH)).await?;
+    run_unbound_checkconf(None).await
+}
+
+async fn run_unbound_checkconf(config_path: Option<&str>) -> Result<()> {
+    let mut cmd = Command::new("unbound-checkconf");
+    if let Some(config_path) = config_path {
+        cmd.arg(config_path);
+    }
+
+    let out = match cmd.output().await {
+        Ok(out) => out,
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            warn!("dns: unbound-checkconf not found; skipping preflight config validation");
+            return Ok(());
+        }
+        Err(err) => return Err(err).context("failed to spawn unbound-checkconf"),
+    };
+
+    if !out.status.success() {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let target = config_path.unwrap_or("system default config");
+        anyhow::bail!(
+            "unbound-checkconf failed for {target}: {}{}{}",
+            stdout.trim(),
+            if stdout.trim().is_empty() || stderr.trim().is_empty() {
+                ""
+            } else {
+                "\n"
+            },
+            stderr.trim()
+        );
+    }
+
+    Ok(())
+}
+
+fn needs_unbound_restart(config: &DnsConfig, dot: Option<&DotConfig>) -> bool {
+    dot.is_some()
+        || config
+            .listen_addresses
+            .iter()
+            .any(|addr| addr.parse::<IpAddr>().is_err())
+}
+
+/// Apply the Unbound service change.
 ///
-/// Uses `systemctl reload-or-restart`, which dispatches to the unit's
-/// `ExecReload` (a SIGHUP that makes Unbound re-read its configuration) when
-/// the service is active, and starts it when it is not.
-async fn reload_or_start_unbound() -> Result<()> {
+/// Plain DNS config can be reloaded to preserve cache. TLS listener changes
+/// and interface-name listener changes require a full restart in Unbound.
+async fn apply_unbound_runtime(restart: bool) -> Result<()> {
+    let action = if restart {
+        "restart"
+    } else {
+        "reload-or-restart"
+    };
     let out = Command::new("systemctl")
-        .args(["reload-or-restart", "unbound"])
+        .args([action, "unbound"])
         .output()
         .await
         .context("failed to spawn systemctl")?;
 
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        anyhow::bail!("systemctl reload-or-restart unbound failed: {stderr}");
+        anyhow::bail!("systemctl {action} unbound failed: {stderr}");
     }
 
-    info!("dns: unbound reloaded via systemctl");
+    info!(action, "dns: unbound reconciled via systemctl");
     Ok(())
 }
 
@@ -477,6 +669,15 @@ mod tests {
     }
 
     #[test]
+    fn generate_config_contains_resolver_access_controls() {
+        let cfg = base_config();
+        let out = generate_config(&cfg, None);
+        assert!(out.contains("access-control: 0.0.0.0/0 refuse"));
+        assert!(out.contains("access-control: 127.0.0.0/8 allow"));
+        assert!(out.contains("access-control: 192.168.0.0/16 allow"));
+    }
+
+    #[test]
     fn generate_config_forward_zone() {
         let cfg = base_config();
         let out = generate_config(&cfg, None);
@@ -502,6 +703,16 @@ mod tests {
         cfg.dnssec = true;
         let out = generate_config(&cfg, None);
         assert!(out.contains("auto-trust-anchor-file"));
+        assert!(out.contains("module-config: \"validator iterator\""));
+    }
+
+    #[test]
+    fn generate_config_dnssec_disabled_uses_iterator_only() {
+        let cfg = base_config();
+        let out = generate_config(&cfg, None);
+        assert!(out.contains("harden-dnssec-stripped: no"));
+        assert!(out.contains("module-config: \"iterator\""));
+        assert!(!out.contains("auto-trust-anchor-file"));
     }
 
     #[test]
@@ -514,6 +725,43 @@ mod tests {
         });
         let out = generate_config(&cfg, None);
         assert!(out.contains("local-data: \"host.local. IN A 192.168.1.10\""));
+    }
+
+    #[test]
+    fn generate_config_quotes_txt_records() {
+        let mut cfg = base_config();
+        cfg.local_records.push(DnsLocalRecord {
+            name: "txt.local.".into(),
+            record_type: "TXT".into(),
+            value: "hello \"day\" shield".into(),
+        });
+        let out = generate_config(&cfg, None);
+        assert!(out.contains(r#"local-data: "txt.local. IN TXT \"hello \"day\" shield\"""#));
+    }
+
+    #[test]
+    fn generate_config_renders_dns_overrides() {
+        let cfg = base_config();
+        let host_overrides = vec![
+            DnsHostOverride {
+                hostname: "host.local.".into(),
+                address: "192.168.1.20".into(),
+            },
+            DnsHostOverride {
+                hostname: "v6.local.".into(),
+                address: "fd00::20".into(),
+            },
+        ];
+        let domain_overrides = vec![DnsDomainOverride {
+            domain: "corp.local.".into(),
+            forward_to: "10.0.0.53".into(),
+        }];
+        let out =
+            generate_config_with_overrides(&cfg, None, true, &host_overrides, &domain_overrides);
+        assert!(out.contains("local-data: \"host.local. IN A 192.168.1.20\""));
+        assert!(out.contains("local-data: \"v6.local. IN AAAA fd00::20\""));
+        assert!(out.contains("name: \"corp.local.\""));
+        assert!(out.contains("forward-addr: 10.0.0.53"));
     }
 
     #[test]
@@ -552,7 +800,7 @@ mod tests {
         let cfg = base_config();
         let dot = dot_config();
         let out = generate_config(&cfg, Some(&dot));
-        assert!(out.contains("ssl-port: 853"), "should contain ssl-port");
+        assert!(out.contains("tls-port: 853"), "should contain tls-port");
         assert!(out.contains(DOT_KEY_PATH), "should reference key path");
         assert!(out.contains(DOT_CERT_PATH), "should reference cert path");
         assert!(
@@ -562,14 +810,25 @@ mod tests {
     }
 
     #[test]
+    fn generate_config_public_dot_allows_public_clients() {
+        let cfg = base_config();
+        let mut dot = dot_config();
+        dot.lan_only = false;
+        let out = generate_config_with_ipv6(&cfg, Some(&dot), true);
+        assert!(out.contains("access-control: 0.0.0.0/0 allow"));
+        assert!(out.contains("access-control: ::0/0 allow"));
+        assert!(!out.contains("access-control: 0.0.0.0/0 refuse"));
+    }
+
+    #[test]
     fn generate_config_dot_disabled() {
         let cfg = base_config();
         let mut dot = dot_config();
         dot.enabled = false;
         let out = generate_config(&cfg, Some(&dot));
         assert!(
-            !out.contains("ssl-port:"),
-            "disabled DoT should not add ssl-port"
+            !out.contains("tls-port:"),
+            "disabled DoT should not add tls-port"
         );
     }
 
@@ -578,8 +837,8 @@ mod tests {
         let cfg = base_config();
         let out = generate_config(&cfg, None);
         assert!(
-            !out.contains("ssl-port:"),
-            "no DoT config should not add ssl-port"
+            !out.contains("tls-port:"),
+            "no DoT config should not add tls-port"
         );
     }
 
@@ -589,7 +848,7 @@ mod tests {
         let mut dot = dot_config();
         dot.port = 8853;
         let out = generate_config(&cfg, Some(&dot));
-        assert!(out.contains("ssl-port: 8853"));
+        assert!(out.contains("tls-port: 8853"));
         assert!(out.contains("interface: 0.0.0.0@8853"));
     }
 
@@ -598,8 +857,21 @@ mod tests {
         let cfg = base_config();
         let dot = dot_config();
         let out = generate_config_with_ipv6(&cfg, Some(&dot), true);
-        assert!(out.contains("ssl-port: 853"));
+        assert!(out.contains("tls-port: 853"));
         assert!(out.contains("interface: 0.0.0.0@853"));
         assert!(out.contains("interface: ::0@853"));
+    }
+
+    #[test]
+    fn unbound_restart_needed_for_dot_or_interface_names() {
+        let cfg = base_config();
+        assert!(!needs_unbound_restart(&cfg, None));
+
+        let dot = dot_config();
+        assert!(needs_unbound_restart(&cfg, Some(&dot)));
+
+        let mut iface_cfg = base_config();
+        iface_cfg.listen_addresses = vec!["eth1".into()];
+        assert!(needs_unbound_restart(&iface_cfg, None));
     }
 }

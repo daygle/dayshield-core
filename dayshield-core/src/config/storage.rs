@@ -35,13 +35,11 @@ use tracing::{debug, info, warn};
 
 use super::history;
 use super::models::{
-    AcmeConfig, AdminSecuritySettings, AiEngineConfig, CaddyConfig, CaptivePortalConfig,
-    CloudflaredConfig,
-    ConfigHistorySettings,
-    CrowdSecConfig, Dhcp6Config, DhcpConfig, DnsConfig, DnsDomainOverride, DnsHostOverride,
-    DotConfig, DynamicDnsConfig, FirewallAlias, FirewallRule, FirewallSettings, Gateway,
-    HoneypotConfig, Interface, NatConfig, NotifyConfig, NtpConfig, QosConfig, SuricataConfig,
-    SystemConfig, WireGuardInterface,
+    validate_dns_local_record, AcmeConfig, AdminSecuritySettings, AiEngineConfig, CaddyConfig,
+    CaptivePortalConfig, CloudflaredConfig, ConfigHistorySettings, CrowdSecConfig, Dhcp6Config,
+    DhcpConfig, DnsConfig, DnsDomainOverride, DnsHostOverride, DotConfig, DynamicDnsConfig,
+    FirewallAlias, FirewallRule, FirewallSettings, Gateway, HoneypotConfig, Interface, NatConfig,
+    NotifyConfig, NtpConfig, QosConfig, SuricataConfig, SystemConfig, WireGuardInterface,
 };
 
 /// Default path to the configuration directory.
@@ -584,11 +582,17 @@ impl ConfigStore {
         // DNS config validation.
         if let Some(dns) = &config.dns {
             for addr in &dns.listen_addresses {
-                if !is_valid_ip(addr) {
-                    anyhow::bail!("DNS listen address {:?} is not a valid IP address", addr);
+                if !is_valid_ip(addr) && !is_valid_interface_name(addr) {
+                    anyhow::bail!(
+                        "DNS listen address {:?} is not a valid IP address or interface name",
+                        addr
+                    );
                 }
-                if let Err(msg) = ensure_ipv6_allowed(addr, ipv6_enabled, "DNS listen address") {
-                    anyhow::bail!("{msg}");
+                if is_valid_ip(addr) {
+                    if let Err(msg) = ensure_ipv6_allowed(addr, ipv6_enabled, "DNS listen address")
+                    {
+                        anyhow::bail!("{msg}");
+                    }
                 }
             }
             if dns.port == 0 {
@@ -603,19 +607,8 @@ impl ConfigStore {
                 }
             }
             for rec in &dns.local_records {
-                if rec.name.is_empty() {
-                    anyhow::bail!("DNS local record has an empty name");
-                }
-                if rec.record_type.eq_ignore_ascii_case("AAAA") && !ipv6_enabled {
-                    anyhow::bail!(
-                        "DNS local record {:?} is AAAA but system ipv6Enabled is false",
-                        rec.name
-                    );
-                }
-                if let Err(msg) =
-                    ensure_ipv6_allowed(&rec.value, ipv6_enabled, "DNS local record value")
-                {
-                    anyhow::bail!("{msg}");
+                if let Err(msg) = validate_dns_local_record(rec, ipv6_enabled) {
+                    anyhow::bail!("DNS local record {:?} is invalid: {msg}", rec.name);
                 }
             }
         }
@@ -864,22 +857,6 @@ impl ConfigStore {
                             );
                         }
                     }
-                }
-            }
-        }
-
-        // DNS local record type validation.
-        if let Some(dns) = &config.dns {
-            for rec in &dns.local_records {
-                if !matches!(
-                    rec.record_type.to_uppercase().as_str(),
-                    "A" | "AAAA" | "CNAME" | "PTR" | "MX" | "TXT"
-                ) {
-                    anyhow::bail!(
-                        "DNS local record {:?} has unsupported record type {:?}",
-                        rec.name,
-                        rec.record_type
-                    );
                 }
             }
         }
@@ -1302,7 +1279,10 @@ impl ConfigStore {
     pub fn save_acme_config(&self, acme: AcmeConfig) -> Result<()> {
         let mut config = self.load()?;
         config.acme = Some(acme);
-        self.save_with_rollback_described(&config, Some("Updated ACME/TLS certificate configuration"))
+        self.save_with_rollback_described(
+            &config,
+            Some("Updated ACME/TLS certificate configuration"),
+        )
     }
 
     /// Return the CrowdSec configuration from the persisted config.
@@ -1587,7 +1567,10 @@ impl ConfigStore {
     pub fn save_caddy_config(&self, caddy: CaddyConfig) -> Result<()> {
         let mut config = self.load()?;
         config.caddy = Some(caddy);
-        self.save_with_rollback_described(&config, Some("Updated Caddy reverse proxy configuration"))
+        self.save_with_rollback_described(
+            &config,
+            Some("Updated Caddy reverse proxy configuration"),
+        )
     }
 
     /// Return the Captive Portal configuration from the persisted config.

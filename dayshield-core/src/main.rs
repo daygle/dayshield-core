@@ -507,7 +507,23 @@ async fn reconcile_dns_runtime(config_store: &config::ConfigStore, ipv6_enabled:
         }
     };
 
-    if let Err(err) = engine::dns::apply_config_with_ipv6(&cfg, dot.as_ref(), ipv6_enabled).await {
+    let (host_overrides, domain_overrides) = match config_store.load_dns_overrides() {
+        Ok(overrides) => overrides,
+        Err(err) => {
+            warn!("failed to load DNS overrides for startup reconcile: {err:#}");
+            (vec![], vec![])
+        }
+    };
+
+    if let Err(err) = engine::dns::apply_config_with_overrides(
+        &cfg,
+        dot.as_ref(),
+        ipv6_enabled,
+        &host_overrides,
+        &domain_overrides,
+    )
+    .await
+    {
         warn!("failed to reconcile DNS runtime config: {err:#}");
     }
 }

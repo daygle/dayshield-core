@@ -20,7 +20,7 @@ use crate::{
         ensure_ipv6_allowed, is_valid_ip, validate_dns_domain, validate_dns_hostname,
         DnsDomainOverride, DnsHostOverride,
     },
-    engine::dns::apply_config_with_ipv6,
+    engine::dns::apply_config_with_overrides,
     state::AppState,
 };
 
@@ -229,7 +229,7 @@ pub async fn create_override(
 
     state
         .config_store
-        .save_dns_overrides(host_overrides, domain_overrides)
+        .save_dns_overrides(host_overrides.clone(), domain_overrides.clone())
         .map_err(DnsOverrideError::StorageError)?;
 
     info!("dns_overrides: persisted");
@@ -245,9 +245,15 @@ pub async fn create_override(
             .config_store
             .load_dot_config()
             .map_err(DnsOverrideError::StorageError)?;
-        apply_config_with_ipv6(&dns_cfg, dot.as_ref(), ipv6_enabled)
-            .await
-            .map_err(|e| DnsOverrideError::EngineError(e.to_string()))?;
+        apply_config_with_overrides(
+            &dns_cfg,
+            dot.as_ref(),
+            ipv6_enabled,
+            &host_overrides,
+            &domain_overrides,
+        )
+        .await
+        .map_err(|e| DnsOverrideError::EngineError(e.to_string()))?;
         info!("dns_overrides: dns engine apply complete");
     }
 
@@ -279,7 +285,7 @@ pub async fn delete_override(
 
     state
         .config_store
-        .save_dns_overrides(host_overrides, domain_overrides)
+        .save_dns_overrides(host_overrides.clone(), domain_overrides.clone())
         .map_err(DnsOverrideError::StorageError)?;
 
     info!(name = %name, "dns_overrides: deleted override");
@@ -299,9 +305,15 @@ pub async fn delete_override(
             .load_system_settings()
             .map_err(DnsOverrideError::StorageError)?
             .ipv6_enabled;
-        apply_config_with_ipv6(&dns_cfg, dot.as_ref(), ipv6_enabled)
-            .await
-            .map_err(|e| DnsOverrideError::EngineError(e.to_string()))?;
+        apply_config_with_overrides(
+            &dns_cfg,
+            dot.as_ref(),
+            ipv6_enabled,
+            &host_overrides,
+            &domain_overrides,
+        )
+        .await
+        .map_err(|e| DnsOverrideError::EngineError(e.to_string()))?;
         info!("dns_overrides: dns engine apply complete after delete");
     }
 

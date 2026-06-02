@@ -1,14 +1,14 @@
-//! WebSocket handler that merges the three live-log streams into a single
+//! WebSocket handler that merges the live-log streams into a single
 //! connection.
 //!
 //! [`logs_websocket`] is called by the Axum WebSocket upgrade handler.  It:
 //!
 //! 1. Creates a shared [`mpsc`] channel (the *merge channel*).
-//! 2. Spawns three tasks - one per log source - each of which writes to the
-//!    merge channel.
+//! 2. Spawns one task per log source (Suricata, firewall, system, UI), each of
+//!    which writes to the merge channel.
 //! 3. Reads from the merge channel in a loop, serialising each [`LogEvent`] to
 //!    JSON and sending it as a WebSocket text frame.
-//! 4. On client disconnect (send returns an error) all three source tasks are
+//! 4. On client disconnect (send returns an error) all source tasks are
 //!    aborted via their [`JoinHandle`]s.
 
 use axum::extract::ws::{Message, WebSocket};
@@ -26,7 +26,7 @@ const MERGE_CHANNEL_CAPACITY: usize = 512;
 
 /// Handle an upgraded WebSocket connection for the live-logs endpoint.
 ///
-/// Spawns the three log-source tasks, merges their output, and forwards every
+/// Spawns the log-source tasks, merges their output, and forwards every
 /// event as a JSON text frame until the client disconnects.
 pub async fn logs_websocket(mut ws: WebSocket) {
     info!("logs/ws: client connected");
@@ -54,7 +54,7 @@ pub async fn logs_websocket(mut ws: WebSocket) {
         async move { stream_ui(tx).await }
     });
 
-    // Drop the original sender so the channel closes when all three tasks
+    // Drop the original sender so the channel closes when all source tasks
     // have finished (which in practice only happens if we abort them).
     drop(tx);
 

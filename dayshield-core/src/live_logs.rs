@@ -1,12 +1,15 @@
 //! Live Logs subsystem.
 //!
-//! This module provides real-time streaming of log events from three sources:
+//! This module provides real-time streaming of log events from several sources:
 //! - **Suricata** (`/var/log/suricata/eve.json`) - IDS/IPS alerts.
 //! - **Firewall** (journald, `SYSLOG_IDENTIFIER=nftables`) - nftables events.
 //! - **System** (journald, `PRIORITY<=6`) - system events through info level.
+//!   System events are further classified into fine-grained sources (DNS, DHCP,
+//!   VPN, updates, …) by [`classify_system_source`].
+//! - **UI** (`/var/log/dayshield/ui.log`) - browser/management-interface events.
 //!
-//! All three streams are merged and forwarded to connected WebSocket clients
-//! via [`websocket::logs_websocket`].
+//! All streams are merged and forwarded to connected WebSocket clients via
+//! [`websocket::logs_websocket`].
 
 pub mod firewall;
 pub mod suricata;
@@ -372,6 +375,7 @@ pub(crate) fn classify_system_source(unit: &str, message: &str) -> &'static str 
         "ntp"
     } else if hay.contains("unbound")
         || hay.contains("resolver")
+        || hay.contains("systemd-resolved")
         || hay.contains("dns ")
         || hay.contains("dns:")
     {
@@ -409,7 +413,7 @@ pub(crate) fn classify_system_source(unit: &str, message: &str) -> &'static str 
         "updates"
     } else if hay.contains("cloudflared") {
         "cloudflared"
-    } else if hay.contains("acme") || hay.contains("cert") || hay.contains("letsencrypt") {
+    } else if hay.contains("acme") || hay.contains("certificate") || hay.contains("letsencrypt") {
         "acme"
     } else {
         "system"
@@ -627,6 +631,37 @@ mod tests {
         };
         let payload = event.to_client_payload();
         assert_eq!(payload["source"], "updates");
+    }
+
+    #[test]
+    fn systemd_resolved_logs_classify_as_dns() {
+        let event = LogEvent::SystemEvent {
+            timestamp: "2026-05-23T02:03:04Z".into(),
+            unit: "systemd-resolved.service".into(),
+            priority: Some(6),
+            message: "Using degraded feature set UDP instead of TCP".into(),
+        };
+        let payload = event.to_client_payload();
+        assert_eq!(payload["source"], "dns");
+    }
+
+    #[test]
+    fn certificate_messages_classify_as_acme_but_uncertain_does_not() {
+        let cert = LogEvent::SystemEvent {
+            timestamp: "2026-05-23T02:03:04Z".into(),
+            unit: "caddy.service".into(),
+            priority: Some(6),
+            message: "certificate obtained successfully".into(),
+        };
+        assert_eq!(cert.to_client_payload()["source"], "acme");
+
+        let uncertain = LogEvent::SystemEvent {
+            timestamp: "2026-05-23T02:03:04Z".into(),
+            unit: "dayshield-core.service".into(),
+            priority: Some(6),
+            message: "link state uncertain, retrying".into(),
+        };
+        assert_eq!(uncertain.to_client_payload()["source"], "system");
     }
 
     #[test]

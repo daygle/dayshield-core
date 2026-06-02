@@ -40,11 +40,11 @@ pub const DOT_KEY_PATH: &str = "/var/lib/dayshield/certs/dot.key";
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Generate a complete Unbound configuration file as a `String`.
+/// Generate the DayShield-managed Unbound include fragment as a `String`.
 ///
 /// The generated file covers:
-/// - `server:` block with listen interfaces/addresses, port, DNSSEC, and
-///   privacy/hardening settings.
+/// - `server:` block contents with listen interfaces/addresses, port, DNSSEC,
+///   and privacy/hardening settings.
 /// - Optional DoT TLS settings when `dot` is `Some` and `dot.enabled` is
 ///   `true`: `tls-port`, `tls-service-key`, `tls-service-pem`, and an
 ///   additional `interface: 0.0.0.0@<port>` stanza so Unbound accepts both
@@ -52,11 +52,15 @@ pub const DOT_KEY_PATH: &str = "/var/lib/dayshield/certs/dot.key";
 /// - `local-data:` entries for every [`DnsLocalRecord`] in `config`.
 /// - `forward-zone:` block for each forwarder IP when resolver mode is
 ///   `forwarded` and `config.forwarders` is non-empty.
+///
+/// The base DayShield rootfs includes this file from inside the primary
+/// `server:` block, so the fragment must not declare another top-level
+/// `server:` stanza.
 pub fn generate_config(config: &DnsConfig, dot: Option<&DotConfig>) -> String {
     generate_config_with_overrides(config, dot, false, &[], &[])
 }
 
-/// Generate a complete Unbound configuration file for the current IPv6 mode.
+/// Generate the DayShield-managed Unbound include fragment for the current IPv6 mode.
 pub fn generate_config_with_ipv6(
     config: &DnsConfig,
     dot: Option<&DotConfig>,
@@ -65,7 +69,7 @@ pub fn generate_config_with_ipv6(
     generate_config_with_overrides(config, dot, ipv6_enabled, &[], &[])
 }
 
-/// Generate a complete Unbound configuration file for the full DNS runtime.
+/// Generate the DayShield-managed Unbound include fragment for the full DNS runtime.
 pub fn generate_config_with_overrides(
     config: &DnsConfig,
     dot: Option<&DotConfig>,
@@ -75,9 +79,8 @@ pub fn generate_config_with_overrides(
 ) -> String {
     let mut out = String::new();
 
-    out.push_str("# DayShield - Unbound configuration (auto-generated; do not edit by hand)\n\n");
+    out.push_str("# DayShield - Unbound configuration fragment (auto-generated; do not edit by hand)\n\n");
 
-    out.push_str("server:\n");
     out.push_str("    verbosity: 1\n");
     out.push_str("    statistics-interval: 0\n");
     out.push_str("    statistics-cumulative: no\n");
@@ -586,7 +589,7 @@ async fn ensure_dnssec_root_anchor() -> Result<()> {
 }
 
 async fn check_unbound_config() -> Result<()> {
-    run_unbound_checkconf(Some(UNBOUND_CONF_PATH)).await?;
+    run_unbound_checkconf_fragment(UNBOUND_CONF_PATH).await?;
     run_unbound_checkconf(None).await
 }
 
@@ -622,6 +625,20 @@ async fn run_unbound_checkconf(config_path: Option<&str>) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn run_unbound_checkconf_fragment(fragment_path: &str) -> Result<()> {
+    let wrapper_path = format!("{fragment_path}.checkconf");
+    let wrapper = format!(
+        "server:\n    include: \"{fragment_path}\"\n"
+    );
+
+    std::fs::write(&wrapper_path, wrapper)
+        .with_context(|| format!("failed to write temporary file {wrapper_path}"))?;
+
+    let result = run_unbound_checkconf(Some(&wrapper_path)).await;
+    let _ = std::fs::remove_file(&wrapper_path);
+    result
 }
 
 fn needs_unbound_restart(config: &DnsConfig, dot: Option<&DotConfig>) -> bool {
@@ -706,6 +723,10 @@ mod tests {
         assert!(
             out.contains("interface: 127.0.0.1"),
             "should contain listen address"
+        );
+        assert!(
+            !out.contains("\nserver:\n"),
+            "managed include should not add a nested server block"
         );
     }
 

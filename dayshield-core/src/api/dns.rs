@@ -344,6 +344,7 @@ async fn systemctl_probe(args: &[&str]) -> CommandProbe {
 
 async fn validate_generated_unbound_config(config_text: &str) -> UnboundConfigValidationStatus {
     let temp_path = temporary_unbound_config_path();
+    let wrapper_path = temp_path.with_extension("wrapper.conf");
     if let Err(err) = std::fs::write(&temp_path, config_text) {
         return UnboundConfigValidationStatus {
             checkconf_available: false,
@@ -356,8 +357,25 @@ async fn validate_generated_unbound_config(config_text: &str) -> UnboundConfigVa
         };
     }
 
+    let wrapper = format!(
+        "server:\n    include: \"{}\"\n",
+        temp_path.display()
+    );
+    if let Err(err) = std::fs::write(&wrapper_path, wrapper) {
+        let _ = std::fs::remove_file(&temp_path);
+        return UnboundConfigValidationStatus {
+            checkconf_available: false,
+            valid: None,
+            status: "error".to_string(),
+            message: format!(
+                "failed to write temporary Unbound wrapper config {}: {err}",
+                wrapper_path.display()
+            ),
+        };
+    }
+
     let result = match Command::new("unbound-checkconf")
-        .arg(&temp_path)
+        .arg(&wrapper_path)
         .output()
         .await
     {
@@ -392,6 +410,7 @@ async fn validate_generated_unbound_config(config_text: &str) -> UnboundConfigVa
     };
 
     let _ = std::fs::remove_file(&temp_path);
+    let _ = std::fs::remove_file(&wrapper_path);
     result
 }
 

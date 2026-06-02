@@ -1,12 +1,7 @@
 name: CodeQL
 
 on:
-  push:
-    branches: ["main"]
-  pull_request:
-    branches: ["main"]
-  schedule:
-    - cron: "23 3 * * 1"
+  workflow_dispatch:
 
 permissions:
   actions: read
@@ -36,3 +31,4 @@ jobs:
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@v3
+        

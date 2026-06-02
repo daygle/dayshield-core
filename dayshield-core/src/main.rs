@@ -4,9 +4,11 @@
 //! Axum router and starts the HTTP server on IPv4 by default, or IPv4/IPv6
 //! when the global IPv6 setting is enabled.
 //
-// Suppress dead-code warnings for the many placeholder engine functions and
-// config types that are defined here as stubs and will be wired up in future
-// work.  This is intentional for an initial scaffold.
+// Many engine/config functions are intentional scaffold that will be wired up
+// in future work, so dead-code and unused-import warnings are allowed
+// crate-wide.  The `update` and `rootfs_update` modules opt back into both
+// lints (`#![warn(dead_code, unused_imports)]` at the top of each) so the
+// update subsystem stays free of unused code.
 #![allow(dead_code)]
 #![allow(unused_imports)]
 

@@ -1364,29 +1364,6 @@ pub async fn rollback_rootfs_update(
         .into_response()
 }
 
-async fn rootfs_action_error_response(
-    operation: &str,
-    err: anyhow::Error,
-) -> axum::response::Response {
-    let status = rootfs_update::status().await;
-    let code = if status.supported {
-        StatusCode::INTERNAL_SERVER_ERROR
-    } else {
-        StatusCode::NOT_IMPLEMENTED
-    };
-    (
-        code,
-        Json(serde_json::json!({
-            "operation": operation,
-            "success": false,
-            "message": format!("failed to {operation} rootfs update: {err:#}"),
-            "details": [],
-            "status": status
-        })),
-    )
-        .into_response()
-}
-
 /// Policy hook for rootfs operations that can mutate the boot image.
 fn authorize_sensitive_rootfs_operation(
     operation: &str,

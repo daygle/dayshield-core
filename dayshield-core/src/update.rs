@@ -1,3 +1,8 @@
+// The update subsystem is held to a stricter standard than the rest of the
+// crate: re-enable the dead-code and unused-import lints that `main.rs` allows
+// crate-wide so unused update code is caught instead of silently accumulating.
+#![warn(dead_code, unused_imports)]
+
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
@@ -29,7 +34,6 @@ pub const UPDATE_STATE_FILE_PATH: &str = "/var/lib/dayshield/config/updates_stat
 const DEFAULT_CORE_URL: &str = "https://github.com/daygle/dayshield-core";
 const DEFAULT_UI_URL: &str = "https://github.com/daygle/dayshield-ui";
 const DEFAULT_ROOTFS_URL: &str = "https://github.com/daygle/dayshield-rootfs";
-const RUNTIME_MARKER_DIR: &str = "/var/lib/dayshield/update";
 const RUNTIME_ROLLBACK_DIR: &str = "/var/lib/dayshield/update/rollback";
 const DEFAULT_TRUSTED_SIGNERS_FILE: &str = "/var/lib/dayshield/update_trusted_signers";
 const ARTIFACT_STAGING_DIR: &str = "/var/lib/dayshield/update-staging";
@@ -44,18 +48,6 @@ const ALL_REPO_COMPONENTS: [RepoComponent; 3] = [
 /// Artifacts are attached to releases as: core-v1.2.3.tar.zst, ui-v1.2.3.tar.zst, etc.
 const DEFAULT_REGISTRY_URL: &str = "https://api.github.com/repos/daygle/dayshield-core";
 
-fn default_core_repo_path() -> String {
-    env::var("DAYSHIELD_UPDATE_CORE_PATH").unwrap_or_else(|_| "/opt/dayshield-core".to_string())
-}
-
-fn default_ui_repo_path() -> String {
-    env::var("DAYSHIELD_UPDATE_UI_PATH").unwrap_or_else(|_| "/opt/dayshield-ui".to_string())
-}
-
-fn default_rootfs_repo_path() -> String {
-    env::var("DAYSHIELD_UPDATE_ROOTFS_PATH").unwrap_or_else(|_| "/opt/dayshield-rootfs".to_string())
-}
-
 fn default_core_repo_url() -> String {
     env::var("DAYSHIELD_UPDATE_CORE_URL").unwrap_or_else(|_| DEFAULT_CORE_URL.to_string())
 }
@@ -66,10 +58,6 @@ fn default_ui_repo_url() -> String {
 
 fn default_rootfs_repo_url() -> String {
     env::var("DAYSHIELD_UPDATE_ROOTFS_URL").unwrap_or_else(|_| DEFAULT_ROOTFS_URL.to_string())
-}
-
-fn default_branch() -> String {
-    "main".to_string()
 }
 
 fn default_auto_check_enabled() -> bool {
@@ -92,20 +80,8 @@ fn default_deploy_runtime_after_apply() -> bool {
     true
 }
 
-fn default_require_signed_commits() -> bool {
-    false
-}
-
-fn default_verify_rootfs_metadata() -> bool {
-    true
-}
-
 fn default_trusted_signers_file() -> String {
     DEFAULT_TRUSTED_SIGNERS_FILE.to_string()
-}
-
-fn default_bootstrap_missing_rootfs_repo() -> bool {
-    true
 }
 
 fn default_registry_url() -> String {
@@ -251,33 +227,15 @@ pub struct UpdateSettings {
     pub reboot_required_after_apply: bool,
     #[serde(default = "default_deploy_runtime_after_apply")]
     pub deploy_runtime_after_apply: bool,
-    #[serde(default = "default_require_signed_commits")]
-    pub require_signed_commits: bool,
-    #[serde(default = "default_verify_rootfs_metadata")]
-    pub verify_rootfs_metadata: bool,
     #[serde(default = "default_trusted_signers_file")]
     pub trusted_signers_file: String,
-    #[serde(default = "default_bootstrap_missing_rootfs_repo")]
-    pub bootstrap_missing_rootfs_repo: bool,
-    #[serde(default = "default_core_repo_path")]
-    pub core_repo_path: String,
-    #[serde(default = "default_ui_repo_path")]
-    pub ui_repo_path: String,
-    #[serde(default = "default_rootfs_repo_path")]
-    pub rootfs_repo_path: String,
     #[serde(default = "default_core_repo_url")]
     pub core_repo_url: String,
     #[serde(default = "default_ui_repo_url")]
     pub ui_repo_url: String,
     #[serde(default = "default_rootfs_repo_url")]
     pub rootfs_repo_url: String,
-    #[serde(default = "default_branch")]
-    pub core_branch: String,
-    #[serde(default = "default_branch")]
-    pub ui_branch: String,
-    #[serde(default = "default_branch")]
-    pub rootfs_branch: String,
-    // New registry-based update settings
+    // Registry-based update settings
     #[serde(default = "default_registry_url")]
     pub registry_url: String,
     #[serde(default = "default_verify_artifact_signatures")]
@@ -298,19 +256,10 @@ impl Default for UpdateSettings {
             auto_reboot_after_apply: default_auto_reboot_after_apply(),
             reboot_required_after_apply: default_reboot_required_after_apply(),
             deploy_runtime_after_apply: default_deploy_runtime_after_apply(),
-            require_signed_commits: default_require_signed_commits(),
-            verify_rootfs_metadata: default_verify_rootfs_metadata(),
             trusted_signers_file: default_trusted_signers_file(),
-            bootstrap_missing_rootfs_repo: default_bootstrap_missing_rootfs_repo(),
-            core_repo_path: default_core_repo_path(),
-            ui_repo_path: default_ui_repo_path(),
-            rootfs_repo_path: default_rootfs_repo_path(),
             core_repo_url: default_core_repo_url(),
             ui_repo_url: default_ui_repo_url(),
             rootfs_repo_url: default_rootfs_repo_url(),
-            core_branch: default_branch(),
-            ui_branch: default_branch(),
-            rootfs_branch: default_branch(),
             registry_url: default_registry_url(),
             verify_artifact_signatures: default_verify_artifact_signatures(),
             encrypt_update_config_backups: default_encrypt_update_config_backups(),
@@ -409,12 +358,9 @@ fn ensure_registry_updatable_selection(_selected_components: &[RepoComponent]) -
 #[serde(rename_all = "camelCase")]
 pub struct ComponentState {
     pub component: String,
-    pub rollback_commit: Option<String>,
     pub rollback_version: Option<String>,
-    pub last_applied_commit: Option<String>,
-    pub deployed_commit: Option<String>,
     pub last_error: Option<String>,
-    // New: Version tracking for artifact-based updates
+    // Version tracking for artifact-based updates.
     pub current_version: Option<String>,
     pub last_applied_version: Option<String>,
     pub remote_version: Option<String>,
@@ -494,18 +440,10 @@ pub struct UpdateOperationProgress {
 #[serde(rename_all = "camelCase")]
 pub struct ComponentUpdateStatus {
     pub component: String,
-    pub repo_path: String,
-    pub branch: String,
-    pub valid_repo: bool,
-    pub dirty_worktree: bool,
-    pub current_commit: Option<String>,
-    pub remote_commit: Option<String>,
     pub current_version: Option<String>,
     pub remote_version: Option<String>,
     pub update_available: bool,
-    pub rollback_commit: Option<String>,
     pub rollback_version: Option<String>,
-    pub last_applied_commit: Option<String>,
     pub last_applied_version: Option<String>,
     pub last_error: Option<String>,
 }
@@ -692,26 +630,13 @@ fn find_component_state<'a>(
         .find(|c| c.component == component.as_str())
 }
 
-fn component_config(
-    settings: &UpdateSettings,
-    component: RepoComponent,
-) -> (String, String, String) {
+/// Repository URL for a component, used to locate its GitHub release feed when
+/// the primary registry manifest doesn't cover it.
+fn component_repo_url(settings: &UpdateSettings, component: RepoComponent) -> String {
     match component {
-        RepoComponent::Core => (
-            settings.core_repo_path.clone(),
-            settings.core_repo_url.clone(),
-            settings.core_branch.clone(),
-        ),
-        RepoComponent::Ui => (
-            settings.ui_repo_path.clone(),
-            settings.ui_repo_url.clone(),
-            settings.ui_branch.clone(),
-        ),
-        RepoComponent::Rootfs => (
-            settings.rootfs_repo_path.clone(),
-            settings.rootfs_repo_url.clone(),
-            settings.rootfs_branch.clone(),
-        ),
+        RepoComponent::Core => settings.core_repo_url.clone(),
+        RepoComponent::Ui => settings.ui_repo_url.clone(),
+        RepoComponent::Rootfs => settings.rootfs_repo_url.clone(),
     }
 }
 
@@ -730,10 +655,6 @@ fn current_version_baseline(saved: Option<&ComponentState>) -> Option<String> {
         .and_then(|s| s.current_version.clone())
         .or_else(|| saved.and_then(|s| s.last_applied_version.clone()))
         .or_else(|| Some(built_appliance_version()))
-}
-
-fn runtime_marker_path(component: RepoComponent) -> PathBuf {
-    Path::new(RUNTIME_MARKER_DIR).join(format!("{}_deployed_commit", component.as_str()))
 }
 
 fn update_backup_key_path(state: &AppState) -> PathBuf {
@@ -900,14 +821,6 @@ fn restore_runtime_from_snapshot(component: RepoComponent) -> Result<()> {
         RepoComponent::Ui => install_dir_atomic(&snapshot, &target),
         RepoComponent::Rootfs => Ok(()),
     }
-}
-
-fn load_runtime_marker(component: RepoComponent) -> Option<String> {
-    let marker = runtime_marker_path(component);
-    std::fs::read_to_string(&marker)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
 }
 
 async fn ensure_command_available(program: &str) -> Result<()> {
@@ -1173,15 +1086,6 @@ pub fn save_settings(state: &AppState, settings: &UpdateSettings) -> Result<()> 
     let mut value = settings.clone();
     value.auto_check_time = normalize_auto_check_time(&value.auto_check_time);
     value.auto_check_month_days = normalize_auto_check_month_days(value.auto_check_month_days);
-    if value.core_branch.trim().is_empty() {
-        value.core_branch = default_branch();
-    }
-    if value.ui_branch.trim().is_empty() {
-        value.ui_branch = default_branch();
-    }
-    if value.rootfs_branch.trim().is_empty() {
-        value.rootfs_branch = default_branch();
-    }
     if value.trusted_signers_file.trim().is_empty() {
         value.trusted_signers_file = default_trusted_signers_file();
     }
@@ -1585,7 +1489,7 @@ async fn query_registry_with_component_fallbacks(
             continue;
         }
 
-        let (_, repo_url, _) = component_config(settings, component);
+        let repo_url = component_repo_url(settings, component);
         let Some(api_url) = github_repo_api_url(&repo_url) else {
             warn!(
                 component = component.as_str(),
@@ -2184,27 +2088,18 @@ async fn extract_and_deploy_artifact(
 }
 
 async fn build_component_status(
-    settings: &UpdateSettings,
+    _settings: &UpdateSettings,
     state_file: &UpdateStateFile,
     component: RepoComponent,
 ) -> ComponentUpdateStatus {
-    let (repo_path, _remote_url, branch) = component_config(settings, component);
     let saved = find_component_state(state_file, component);
 
     ComponentUpdateStatus {
         component: component.as_str().to_string(),
-        repo_path,
-        branch,
-        valid_repo: true,
-        dirty_worktree: false,
-        current_commit: None,
-        remote_commit: None,
         current_version: current_version_baseline(saved),
         remote_version: saved.and_then(|s| s.remote_version.clone()),
         update_available: saved.map(|s| s.update_available).unwrap_or(false),
-        rollback_commit: saved.and_then(|s| s.rollback_commit.clone()),
         rollback_version: saved.and_then(|s| s.rollback_version.clone()),
-        last_applied_commit: None,
         last_applied_version: saved.and_then(|s| s.last_applied_version.clone()),
         last_error: saved.and_then(|s| s.last_error.clone()),
     }
@@ -3431,115 +3326,35 @@ pub async fn validate_updates(
             continue;
         }
 
-        if !comp.valid_repo {
-            success = false;
-            details.push(format!("{}: repository is not valid", comp.component));
-            continue;
-        }
-
-        // Registry mode: validate using versions (current_commit is None)
-        if comp.current_commit.is_none() && comp.current_version.is_some() {
-            match (&comp.current_version, &comp.last_applied_version) {
-                (Some(current), Some(applied)) if current == applied => {
-                    details.push(format!(
-                        "{}: registry validation ok ({})",
-                        comp.component, current
-                    ));
-                }
-                (Some(current), Some(applied)) => {
-                    success = false;
-                    details.push(format!(
-                        "{}: version mismatch (current {}, expected {})",
-                        comp.component, current, applied
-                    ));
-                }
-                (Some(current), None) => {
-                    warning_count += 1;
-                    details.push(format!(
-                        "{}: no applied baseline, current version {}",
-                        comp.component, current
-                    ));
-                }
-                _ => {
-                    success = false;
-                    details.push(format!(
-                        "{}: unable to determine current version",
-                        comp.component
-                    ));
-                }
+        // Registry mode: validate the deployed version against the last applied
+        // version baseline.
+        match (&comp.current_version, &comp.last_applied_version) {
+            (Some(current), Some(applied)) if current == applied => {
+                details.push(format!(
+                    "{}: registry validation ok ({})",
+                    comp.component, current
+                ));
             }
-        } else {
-            // Git mode: validate using commits
-            match (&comp.current_commit, &comp.last_applied_commit) {
-                (Some(current), Some(applied)) if current == applied => {
-                    details.push(format!(
-                        "{}: git validation ok ({})",
-                        comp.component,
-                        short_sha(current)
-                    ));
-                }
-                (Some(current), Some(applied)) => {
-                    success = false;
-                    details.push(format!(
-                        "{}: validation mismatch (current {}, expected {})",
-                        comp.component,
-                        short_sha(current),
-                        short_sha(applied)
-                    ));
-                }
-                (Some(current), None) => {
-                    warning_count += 1;
-                    details.push(format!(
-                        "{}: no applied baseline, current {}",
-                        comp.component,
-                        short_sha(current)
-                    ));
-                }
-                _ => {
-                    success = false;
-                    details.push(format!("{}: unable to read current commit", comp.component));
-                }
+            (Some(current), Some(applied)) => {
+                success = false;
+                details.push(format!(
+                    "{}: version mismatch (current {}, expected {})",
+                    comp.component, current, applied
+                ));
             }
-        }
-
-        let repo_component = match comp.component.as_str() {
-            "core" => Some(RepoComponent::Core),
-            "ui" => Some(RepoComponent::Ui),
-            _ => None,
-        };
-
-        if let Some(repo_component) = repo_component {
-            if !component_supports_runtime_deploy(repo_component) {
-                continue;
+            (Some(current), None) => {
+                warning_count += 1;
+                details.push(format!(
+                    "{}: no applied baseline, current version {}",
+                    comp.component, current
+                ));
             }
-
-            let marker = load_runtime_marker(repo_component);
-            match (&comp.current_commit, marker) {
-                (Some(current), Some(deployed)) if current == &deployed => {
-                    details.push(format!(
-                        "{}: runtime validation ok ({})",
-                        comp.component,
-                        short_sha(current)
-                    ));
-                }
-                (Some(current), Some(deployed)) => {
-                    success = false;
-                    details.push(format!(
-                        "{}: runtime mismatch (deployed {}, expected {})",
-                        comp.component,
-                        short_sha(&deployed),
-                        short_sha(current)
-                    ));
-                }
-                (Some(current), None) => {
-                    warning_count += 1;
-                    details.push(format!(
-                        "{}: runtime marker missing (expected {})",
-                        comp.component,
-                        short_sha(current)
-                    ));
-                }
-                _ => {}
+            _ => {
+                success = false;
+                details.push(format!(
+                    "{}: unable to determine current version",
+                    comp.component
+                ));
             }
         }
     }
@@ -3593,10 +3408,6 @@ pub async fn validate_updates(
         details,
         status,
     })
-}
-
-fn short_sha(commit: &str) -> String {
-    commit.chars().take(8).collect()
 }
 
 fn component_update_available(status: &UpdatesStatus, component: &str) -> bool {

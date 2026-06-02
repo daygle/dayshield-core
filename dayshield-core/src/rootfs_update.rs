@@ -49,6 +49,11 @@
 //! it just flips `saved_entry`/`fallback_entry` and reboots.  Recovery is
 //! ~instant because the standby slot already contains a known-good rootfs.
 
+// Re-enable the dead-code and unused-import lints that `main.rs` allows
+// crate-wide so unused rootfs-update code is caught rather than silently
+// accumulating.
+#![warn(dead_code, unused_imports)]
+
 use std::{
     path::{Path, PathBuf},
     process::Stdio,

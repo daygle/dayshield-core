@@ -677,12 +677,38 @@ pub async fn update_config(
         None
     };
 
+    // Load any previously-stored DoT material. The general DNS settings form
+    // does not round-trip the certificate/private key (the key is never sent
+    // back to the browser), so preserve the stored values when the request
+    // omits them; otherwise saving unrelated DNS settings would wipe an
+    // existing manually-provided certificate and fail validation.
+    let existing_dot = state
+        .config_store
+        .load_dot_config()
+        .map_err(DnsError::StorageError)?
+        .unwrap_or_default();
+
+    // When an ACME domain is selected it supplies the certificate, so any
+    // stored manual PEM material is intentionally dropped.
+    let using_acme = dot_acme_domain.is_some();
     let dot_cfg = DotConfig {
         enabled: req.dot_enabled.unwrap_or(false),
         port: req.dot_port.unwrap_or(853),
         lan_only: req.dot_lan_only.unwrap_or(true),
-        cert_pem: req.dot_certificate.filter(|s| !s.trim().is_empty()),
-        key_pem: req.dot_private_key.filter(|s| !s.trim().is_empty()),
+        cert_pem: if using_acme {
+            None
+        } else {
+            req.dot_certificate
+                .filter(|s| !s.trim().is_empty())
+                .or(existing_dot.cert_pem)
+        },
+        key_pem: if using_acme {
+            None
+        } else {
+            req.dot_private_key
+                .filter(|s| !s.trim().is_empty())
+                .or(existing_dot.key_pem)
+        },
         acme_domain: dot_acme_domain,
         acme_cert_storage_path: dot_acme_cert_storage_path,
     };

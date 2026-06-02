@@ -24,7 +24,7 @@
 use std::path::Path;
 
 use tokio::process::Command;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::ntp::model::NtpConfig;
 
@@ -329,13 +329,23 @@ async fn stop_chrony_services() {
 // ---------------------------------------------------------------------------
 
 /// Attempt to stop a service unit, logging a warning on failure.
+///
+/// Stopping a unit that isn't installed (e.g. `systemd-timesyncd` on an image
+/// that ships only chrony) makes `systemctl` exit with code 5 ("Unit ... not
+/// loaded"). That is a no-op for us, not a problem, so it is logged at debug
+/// rather than as a warning to avoid noise on a healthy fresh install.
 async fn stop_service(unit: &str) {
+    const EXIT_UNIT_NOT_LOADED: i32 = 5;
+
     let status = Command::new("systemctl")
         .args(["stop", unit])
         .status()
         .await;
     match status {
         Ok(s) if s.success() => {}
+        Ok(s) if s.code() == Some(EXIT_UNIT_NOT_LOADED) => {
+            debug!(unit, "systemctl stop: unit not loaded; nothing to stop");
+        }
         Ok(s) => warn!(unit, exit_code = ?s.code(), "systemctl stop returned non-zero"),
         Err(e) => warn!(unit, error = %e, "Failed to invoke systemctl stop"),
     }

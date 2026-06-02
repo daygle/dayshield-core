@@ -1202,6 +1202,10 @@ pub enum NatRuleType {
     /// Destination NAT / port forward - rewrites the destination IP and/or port.
     Dnat,
     /// One-to-one NAT - maps an entire IP address to another IP address.
+    ///
+    /// Serialized as `one_to_one` to match the management UI. The legacy
+    /// `onetoone` spelling is still accepted on read for backward compatibility.
+    #[serde(rename = "one_to_one", alias = "onetoone")]
     OneToOne,
 }
 

@@ -18,6 +18,45 @@ mod tests {
     use uuid::Uuid;
 
     // -------------------------------------------------------------------
+    // Serialized tag compatibility with the management UI
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn rule_type_tags_match_ui_contract() {
+        // The UI sends and filters on these exact lowercase / snake_case tags.
+        assert_eq!(
+            serde_json::to_string(&NatRuleType::Masquerade).unwrap(),
+            "\"masquerade\""
+        );
+        assert_eq!(
+            serde_json::to_string(&NatRuleType::Snat).unwrap(),
+            "\"snat\""
+        );
+        assert_eq!(
+            serde_json::to_string(&NatRuleType::Dnat).unwrap(),
+            "\"dnat\""
+        );
+        assert_eq!(
+            serde_json::to_string(&NatRuleType::OneToOne).unwrap(),
+            "\"one_to_one\""
+        );
+    }
+
+    #[test]
+    fn one_to_one_accepts_legacy_and_current_tags() {
+        // Current UI spelling.
+        assert_eq!(
+            serde_json::from_str::<NatRuleType>("\"one_to_one\"").unwrap(),
+            NatRuleType::OneToOne
+        );
+        // Legacy persisted spelling stays loadable.
+        assert_eq!(
+            serde_json::from_str::<NatRuleType>("\"onetoone\"").unwrap(),
+            NatRuleType::OneToOne
+        );
+    }
+
+    // -------------------------------------------------------------------
     // IPv4 helpers
     // -------------------------------------------------------------------
 

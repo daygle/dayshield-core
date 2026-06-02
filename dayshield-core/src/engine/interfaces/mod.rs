@@ -512,21 +512,6 @@ pub async fn apply_interface_with_ipv6(
     Ok(())
 }
 
-/// Reconcile the desired interface configuration against the live kernel state.
-///
-/// For each configured interface the function:
-/// 1. Locates the matching kernel interface (by name).
-/// 2. Calls [`apply_interface`] to ensure the desired state is reached.
-/// 3. If the interface is enabled and not using DHCP, removes any IP addresses
-///    present in the kernel but absent from the desired config.
-///
-/// # Errors
-///
-/// Returns on the first error encountered; partial application may have
-/// occurred.
-pub async fn sync_interfaces(configured: &[Interface]) -> Result<(), InterfaceError> {
-    sync_interfaces_with_ipv6(configured, false).await
-}
 
 /// Reconcile interface configuration using the current IPv6 mode.
 pub async fn sync_interfaces_with_ipv6(

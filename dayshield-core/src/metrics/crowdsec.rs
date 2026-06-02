@@ -77,11 +77,6 @@ pub fn parse_crowdsec_timestamp(ts: &str) -> u64 {
 // Top-level collector
 // ---------------------------------------------------------------------------
 
-/// Default CrowdSec LAPI base URL.
-const DEFAULT_LAPI_URL: &str = "http://127.0.0.1:8080";
-/// Default CrowdSec bouncer API key (empty - must be configured).
-const DEFAULT_API_KEY: &str = "";
-
 /// Collect [`CrowdSecMetrics`] by querying the CrowdSec LAPI.
 ///
 /// `lapi_url` should be something like `"http://127.0.0.1:8080"`.
@@ -126,14 +121,6 @@ pub async fn collect_crowdsec(lapi_url: &str, api_key: &str, now_secs: u64) -> C
         decisions_last_minute: last_minute,
         decisions_last_5min: last_5min,
     }
-}
-
-/// Collect CrowdSec metrics using the default LAPI URL and empty API key.
-///
-/// This is a convenience wrapper used by the background collector when no
-/// config is provided.
-pub async fn collect_crowdsec_default(now_secs: u64) -> CrowdSecMetrics {
-    collect_crowdsec(DEFAULT_LAPI_URL, DEFAULT_API_KEY, now_secs).await
 }
 
 // ---------------------------------------------------------------------------

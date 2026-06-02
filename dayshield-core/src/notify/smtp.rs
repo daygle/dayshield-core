@@ -83,18 +83,6 @@ fn build_transport(cfg: &NotifyConfig, ipv6_enabled: bool) -> Result<SmtpTranspo
     Ok(transport)
 }
 
-/// Send a single email using the given [`NotifyConfig`].
-///
-/// Retries once on transient failure.
-///
-/// # Errors
-///
-/// Returns [`NotifyError::ConfigError`] when the from/to addresses cannot be
-/// parsed, or [`NotifyError::SmtpError`] on transport failures.
-pub async fn send_email(cfg: &NotifyConfig, subject: &str, body: &str) -> Result<(), NotifyError> {
-    send_email_with_ipv6(cfg, subject, body, false).await
-}
-
 /// Send a single email using the current IPv6 mode.
 pub async fn send_email_with_ipv6(
     cfg: &NotifyConfig,

@@ -62,9 +62,6 @@ pub enum AuthError {
     #[error("invalid credentials")]
     InvalidCredentials,
 
-    #[error("unauthorized")]
-    Unauthorized,
-
     #[error("token expired")]
     TokenExpired,
 

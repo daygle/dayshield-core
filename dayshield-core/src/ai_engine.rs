@@ -884,30 +884,6 @@ pub async fn start_background_tasks(state: Arc<AppState>) {
     state.ai_runtime.start_background_tasks(Arc::clone(&state));
 }
 
-pub async fn submit_flow_risk(
-    state: &Arc<AppState>,
-    flow: FlowMetadata,
-    risk_score: f64,
-    reasons: Vec<String>,
-) -> Result<ThreatEvent> {
-    state
-        .ai_runtime
-        .submit_risk_assessment(state, flow, risk_score, reasons, None, None)
-        .await
-}
-
-pub fn get_recent_threat_events(state: &Arc<AppState>, limit: usize) -> Result<Vec<ThreatEvent>> {
-    state.ai_runtime.recent_threat_events(limit)
-}
-
-pub fn get_threat_event_by_id(state: &Arc<AppState>, id: &str) -> Result<Option<ThreatEvent>> {
-    state.ai_runtime.get_threat_event(id)
-}
-
-pub async fn unblock_ip(state: &Arc<AppState>, ip: IpAddr) -> Result<bool> {
-    state.ai_runtime.unblock_ip(state, ip).await
-}
-
 pub fn compute_escalated_block(
     events_in_window: usize,
     policy: &AiEngineConfig,

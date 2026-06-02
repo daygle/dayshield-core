@@ -353,7 +353,6 @@ impl SyslogLayer {
 mod syslog_severity {
     pub const ERR: u8 = 3;
     pub const WARNING: u8 = 4;
-    pub const NOTICE: u8 = 5;
     pub const INFO: u8 = 6;
     pub const DEBUG: u8 = 7;
 }

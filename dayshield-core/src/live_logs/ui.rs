@@ -62,12 +62,6 @@ impl UiLogRecord {
             details,
         }
     }
-
-    pub fn parse_line(line: &str) -> Option<LogEvent> {
-        serde_json::from_str::<UiLogRecord>(line)
-            .ok()
-            .map(UiLogRecord::into_event)
-    }
 }
 
 pub fn subscribe() -> broadcast::Receiver<LogEvent> {

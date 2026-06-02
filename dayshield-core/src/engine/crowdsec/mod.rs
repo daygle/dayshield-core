@@ -125,9 +125,6 @@ impl CrowdSecClient {
 // nftables ban-set management
 // ---------------------------------------------------------------------------
 
-/// nftables table name used exclusively for CrowdSec ban sets.
-const CROWDSEC_TABLE: &str = "inet dayshield_crowdsec";
-
 /// Generate an nftables script that defines and populates named ban sets.
 ///
 /// Two sets are created inside a dedicated `dayshield_crowdsec` table:

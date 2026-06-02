@@ -30,7 +30,6 @@ mod honeypot;
 mod live_logs;
 mod logging;
 mod metrics;
-mod nat;
 mod notify;
 mod ntp;
 mod qos;

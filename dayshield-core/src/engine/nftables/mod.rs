@@ -3092,6 +3092,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn generate_nat_table_default_is_ipv4_only() {
+        let nat = NatConfig {
+            outbound_mode: OutboundMode::Automatic,
+            wan_interfaces: vec!["eth0".into()],
+            rules: vec![],
+            nat_reflection: false,
+        };
+        let out = generate_nat_table(&nat, &LogPosition::After, false);
+        assert!(out.contains("table ip nat"));
+        assert!(!out.contains("table ip6 nat"));
+        assert!(out.contains("oifname \"eth0\" masquerade"));
+    }
+
+    #[test]
+    fn generate_nat_table_emits_ip6_table_when_ipv6_enabled() {
+        let rule = NatRule {
+            interface: Some("eth1".into()),
+            source: Some("2001:db8::/64".into()),
+            address_family: AddressFamily::Ipv6,
+            ..masquerade_rule("eth1", Some("2001:db8::/64"))
+        };
+        let nat = NatConfig {
+            outbound_mode: OutboundMode::Manual,
+            wan_interfaces: vec![],
+            rules: vec![rule],
+            nat_reflection: false,
+        };
+        let out = generate_nat_table(&nat, &LogPosition::After, true);
+        assert!(out.contains("table ip6 nat"));
+        assert!(out.contains("ip6 saddr 2001:db8::/64"));
+    }
+
+    #[test]
+    fn generate_nat_table_filters_ipv6_rules_when_disabled() {
+        let rule = NatRule {
+            address_family: AddressFamily::Ipv6,
+            ..dnat_rule("2001:db8::1", "2001:db8::10", Some(443))
+        };
+        let nat = NatConfig {
+            outbound_mode: OutboundMode::Manual,
+            wan_interfaces: vec![],
+            rules: vec![rule],
+            nat_reflection: false,
+        };
+        // With IPv6 disabled the IPv6-only rule yields no table at all.
+        assert_eq!(generate_nat_table(&nat, &LogPosition::After, false), "");
+    }
+
     // ------------------------------------------------------------------
     // Alias set generation
     // ------------------------------------------------------------------

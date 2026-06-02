@@ -84,10 +84,6 @@ fn default_auto_reboot_after_apply() -> bool {
     false
 }
 
-fn default_check_interval_minutes() -> u64 {
-    1440
-}
-
 fn default_reboot_required_after_apply() -> bool {
     false
 }
@@ -906,17 +902,6 @@ fn restore_runtime_from_snapshot(component: RepoComponent) -> Result<()> {
     }
 }
 
-fn save_runtime_marker(component: RepoComponent, commit: &str) -> Result<()> {
-    let marker = runtime_marker_path(component);
-    if let Some(parent) = marker.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    std::fs::write(&marker, format!("{}\n", commit))
-        .with_context(|| format!("failed to write runtime marker {}", marker.display()))?;
-    Ok(())
-}
-
 fn load_runtime_marker(component: RepoComponent) -> Option<String> {
     let marker = runtime_marker_path(component);
     std::fs::read_to_string(&marker)
@@ -1497,10 +1482,6 @@ fn build_http_client() -> Result<reqwest::Client> {
         .timeout(Duration::from_secs(120))
         .build()
         .context("failed to build HTTP client")
-}
-
-pub(crate) async fn download_artifact(url: &str, destination: &Path) -> Result<()> {
-    download_artifact_with_progress(url, destination, |_, _| Ok(())).await
 }
 
 async fn download_artifact_with_progress<F>(

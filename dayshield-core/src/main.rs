@@ -334,7 +334,7 @@ fn parse_update_component(value: Option<&str>) -> anyhow::Result<update::UpdateC
         "core" => Ok(update::UpdateComponent::Core),
         "ui" => Ok(update::UpdateComponent::Ui),
         "rootfs" => Ok(update::UpdateComponent::Rootfs),
-        "all" | "both" => Ok(update::UpdateComponent::All),
+        "all" => Ok(update::UpdateComponent::All),
         other => {
             anyhow::bail!("invalid update component '{other}' (expected core, ui, rootfs, or all)")
         }

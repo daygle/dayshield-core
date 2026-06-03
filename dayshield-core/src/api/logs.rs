@@ -36,8 +36,6 @@ pub struct SearchLogsQuery {
     pub to: Option<String>,
     pub source: Option<String>,
     pub q: Option<String>,
-    pub query: Option<String>,
-    pub search: Option<String>,
     pub limit: Option<usize>,
 }
 
@@ -120,8 +118,6 @@ fn search_needle(query: &SearchLogsQuery) -> Option<String> {
     query
         .q
         .as_ref()
-        .or(query.query.as_ref())
-        .or(query.search.as_ref())
         .map(|value| value.trim().to_lowercase())
         .filter(|value| !value.is_empty())
 }
@@ -591,29 +587,12 @@ mod tests {
             to: Some("2026-05-23T02:03:04Z".to_string()),
             source: None,
             q: None,
-            query: None,
-            search: None,
             limit: None,
         };
 
         let (from, to) = resolve_search_range(&query).unwrap();
         assert_eq!(to.to_rfc3339(), "2026-05-23T02:03:04+00:00");
         assert_eq!((to - from).num_hours(), 24);
-    }
-
-    #[test]
-    fn search_needle_accepts_compat_query_names() {
-        let query = SearchLogsQuery {
-            from: None,
-            to: None,
-            source: None,
-            q: None,
-            query: Some(" DROP ".to_string()),
-            search: None,
-            limit: None,
-        };
-
-        assert_eq!(search_needle(&query).as_deref(), Some("drop"));
     }
 
     #[test]

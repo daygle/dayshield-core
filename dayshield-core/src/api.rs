@@ -66,7 +66,6 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `POST /system/shutdown`                               - trigger immediate system shutdown
 /// - `GET  /system/rootfs/status`                          - image-based rootfs update status for appliance updates
 /// - `POST /system/rootfs/check`                           - force rootfs update check
-/// - `POST /system/rootfs/stage`                           - pre-download and stage rootfs image artifact
 /// - `POST /system/rootfs/apply`                           - activate staged rootfs image for next boot
 /// - `GET  /system/rootfs/reboot-required`                 - compact rootfs reboot-required state
 /// - `POST /system/rootfs/rollback`                        - roll back to previous rootfs version
@@ -98,7 +97,6 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `GET  /dns/overrides`                                 - list DNS host and domain overrides
 /// - `POST /dns/overrides`                                 - create a DNS override
 /// - `DELETE /dns/overrides/{name}`                        - delete a DNS override
-/// - `GET  /dhcp?iface=...`                                - compatibility alias for DHCP leases
 /// - `GET  /dhcp/config`                                   - get DHCP (Kea) configuration
 /// - `POST /dhcp/config`                                   - update DHCP (Kea) configuration
 /// - `GET  /suricata/config`                               - get Suricata configuration
@@ -130,7 +128,6 @@ const UI_STATIC_DIR: &str = "/usr/local/share/dayshield-ui";
 /// - `POST /acme/config`                                   - update ACME certificate configuration
 /// - `POST /acme/issue`                                    - trigger certificate issuance / renewal
 /// - `GET  /acme/status`                                   - get certificate status for primary domain
-/// - `GET  /logs`                                          - compatibility alias for historical log search
 /// - `GET  /logs/ws`                                       - live log stream (WebSocket upgrade)
 /// - `GET  /logs/search?from=...&to=...`                   - historical log search by date/time range
 /// - `GET  /metrics`                                       - latest metrics snapshot (JSON)
@@ -219,7 +216,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/system/shutdown", post(system::shutdown))
         .route("/system/rootfs/status", get(system::get_rootfs_status))
         .route("/system/rootfs/check", post(system::check_rootfs_updates))
-        .route("/system/rootfs/stage", post(system::stage_rootfs_update))
         .route("/system/rootfs/apply", post(system::apply_rootfs_update))
         .route(
             "/system/rootfs/reboot-required",
@@ -322,7 +318,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/dynamic-dns/status", get(dynamic_dns::get_status))
         .route("/dynamic-dns/update", post(dynamic_dns::trigger_update))
         // DHCP
-        .route("/dhcp", get(dhcp::list_active_leases))
         .route("/dhcp/config", get(dhcp::get_config))
         .route("/dhcp/config", post(dhcp::update_config))
         .route("/dhcp6/config", get(dhcp::get_config_v6))
@@ -463,7 +458,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/acme/status", get(acme::get_certificate_status))
         .route("/acme/cert", delete(acme::delete_certificate))
         // Live logs WebSocket
-        .route("/logs", get(logs::search_logs))
         .route("/logs/ui", post(logs::ingest_ui_log))
         .route("/logs/ws", get(logs::ws_handler))
         .route("/logs/live", get(logs::ws_handler))

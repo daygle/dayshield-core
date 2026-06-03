@@ -501,31 +501,7 @@ impl RulesetManager {
     }
 
     fn ensure_source_rules_file(&self, id: &str) -> Result<PathBuf> {
-        let source_path = self.store.source_rules_file(id);
-        if source_path.exists() {
-            return Ok(source_path);
-        }
-
-        // Migration path for installs made before original/effective files
-        // were split. This cannot restore rules already filtered out, but it
-        // preserves the current installed file as the new source for future
-        // reversible edits.
-        let legacy_path = self.store.rules_file(id);
-        if legacy_path.exists() {
-            if let Some(parent) = source_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("failed to create {}", parent.display()))?;
-            }
-            std::fs::copy(&legacy_path, &source_path).with_context(|| {
-                format!(
-                    "failed to copy legacy rules file {} to {}",
-                    legacy_path.display(),
-                    source_path.display()
-                )
-            })?;
-        }
-
-        Ok(source_path)
+        Ok(self.store.source_rules_file(id))
     }
 
     pub async fn apply_suricata_config(&self) -> Result<()> {
@@ -661,15 +637,9 @@ fn is_blocked_suricata_ruleset_url(url: &str) -> bool {
 
 /// Find a curated source by id.
 fn find_source(id: &str) -> Result<CuratedSource> {
-    let normalized_id = match id {
-        // Backward compatibility: older installs may have used this curated id.
-        "et-open-6" => "et-open",
-        other => other,
-    };
-
     curated_sources()
         .into_iter()
-        .find(|s| s.id == normalized_id)
+        .find(|s| s.id == id)
         .with_context(|| format!("unknown curated ruleset source: '{id}'"))
 }
 
@@ -941,33 +911,6 @@ alert tcp any any -> any any (msg:\"two\"; sid:2;)\n"
         assert!(listed.iter().all(|rule| rule.enabled));
     }
 
-    #[test]
-    fn regenerate_effective_rules_migrates_legacy_single_file_install() {
-        let config_dir = TempDir::new().unwrap();
-        let rulesets_dir = TempDir::new().unwrap();
-        let manager = RulesetManager::with_dirs(config_dir.path(), rulesets_dir.path());
-        let effective_path = manager.store.rules_file("legacy");
-        std::fs::create_dir_all(effective_path.parent().unwrap()).unwrap();
-        std::fs::write(&effective_path, sample_rules()).unwrap();
-
-        manager
-            .save_disabled_rules(
-                "legacy",
-                &crate::rules::models::DisabledRules {
-                    ids: vec!["1".to_string()],
-                },
-            )
-            .unwrap();
-        manager.regenerate_effective_rules("legacy").unwrap();
-
-        let source = std::fs::read_to_string(manager.store.source_rules_file("legacy")).unwrap();
-        let effective = std::fs::read_to_string(effective_path).unwrap();
-        assert!(source.contains("sid:1"));
-        assert!(source.contains("sid:2"));
-        assert!(!effective.contains("sid:1"));
-        assert!(effective.contains("sid:2"));
-    }
-
     // -------------------------------------------------------------------
     // find_source
     // -------------------------------------------------------------------
@@ -977,13 +920,6 @@ alert tcp any any -> any any (msg:\"two\"; sid:2;)\n"
         let src = find_source("et-open").unwrap();
         assert_eq!(src.id, "et-open");
         assert!(src.url.contains("emergingthreats.net"));
-    }
-
-    #[test]
-    fn find_source_maps_legacy_et_open_6_to_et_open() {
-        let src = find_source("et-open-6").unwrap();
-        assert_eq!(src.id, "et-open");
-        assert!(src.url.contains("suricata-6.0"));
     }
 
     #[test]

@@ -744,7 +744,7 @@ impl AcmeEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::models::{AcmeChallengeType, AcmeDnsProvider, AcmeProvider};
+    use crate::config::models::{AcmeChallengeType, AcmeDnsProvider};
 
     fn test_config() -> AcmeConfig {
         AcmeConfig {
@@ -757,7 +757,6 @@ mod tests {
             dns_provider: AcmeDnsProvider::Manual,
             cloudflare_zone_id: None,
             cloudflare_api_token: None,
-            provider: AcmeProvider::LetsEncrypt,
             cert_storage_path: "/tmp/acme-test".into(),
         }
     }

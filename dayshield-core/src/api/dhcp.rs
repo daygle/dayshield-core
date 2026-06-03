@@ -1161,24 +1161,6 @@ mod kea4_lease_parser_tests {
     use uuid::Uuid;
 
     #[test]
-    fn parses_legacy_kea4_lease_csv() {
-        let headers = parse_csv_line(
-            "address,hwaddr,client-id,valid-lifetime,expire,subnet-id,fqdn-fwd,fqdn-rev,hostname,state,user-context",
-        );
-        let lease = parse_kea4_lease_line(
-            &headers,
-            "192.168.1.100,aa:bb:cc:dd:ee:ff,,86400,4102444800,1,0,0,laptop,0,",
-            1_700_000_000,
-        )
-        .expect("lease should parse");
-
-        assert_eq!(lease.ip_address, "192.168.1.100");
-        assert_eq!(lease.mac, "aa:bb:cc:dd:ee:ff");
-        assert_eq!(lease.hostname, "laptop");
-        assert_eq!(lease.state, "active");
-    }
-
-    #[test]
     fn parses_header_variant_with_quoted_user_context() {
         let headers = parse_csv_line(
             "address,hwaddr,client_id,valid_lifetime,expire,subnet_id,pool_id,state,user_context,hwtype,hwaddr_source",
@@ -2624,24 +2606,11 @@ pub async fn delete_interface_dhcp6_static_lease(
 pub async fn list_active_dhcp6_leases(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
     use crate::engine::dhcp6::KEA6_LEASES_PATH;
 
-    const LEGACY_KEA6_LEASES_PATH: &str = "/run/dayshield/kea/kea-leases6.csv";
-
-    let (content, loaded_from) = match tokio::fs::read_to_string(KEA6_LEASES_PATH).await {
-        Ok(c) => (c, KEA6_LEASES_PATH),
-        Err(primary_err) => match tokio::fs::read_to_string(LEGACY_KEA6_LEASES_PATH).await {
-            Ok(c) => {
-                warn!(
-                    primary_path = KEA6_LEASES_PATH,
-                    fallback_path = LEGACY_KEA6_LEASES_PATH,
-                    error = %primary_err,
-                    "dhcp6: loaded leases from legacy path after primary read failure"
-                );
-                (c, LEGACY_KEA6_LEASES_PATH)
-            }
-            Err(_) => {
-                return Json(serde_json::json!({ "success": true, "data": serde_json::json!([]) }));
-            }
-        },
+    let content = match tokio::fs::read_to_string(KEA6_LEASES_PATH).await {
+        Ok(c) => c,
+        Err(_) => {
+            return Json(serde_json::json!({ "success": true, "data": serde_json::json!([]) }));
+        }
     };
 
     let now = std::time::SystemTime::now()
@@ -2688,7 +2657,7 @@ pub async fn list_active_dhcp6_leases(State(_state): State<Arc<AppState>>) -> im
         .collect();
 
     info!(
-        path = loaded_from,
+        path = KEA6_LEASES_PATH,
         leases = leases.len(),
         "dhcp6: parsed Kea DHCPv6 leases"
     );

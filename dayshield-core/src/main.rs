@@ -330,12 +330,13 @@ async fn run_update_cli(args: &[String]) -> anyhow::Result<()> {
 }
 
 fn parse_update_component(value: Option<&str>) -> anyhow::Result<update::UpdateComponent> {
-    match value.unwrap_or("both") {
+    match value.unwrap_or("all") {
         "core" => Ok(update::UpdateComponent::Core),
         "ui" => Ok(update::UpdateComponent::Ui),
-        "both" => Ok(update::UpdateComponent::Both),
+        "rootfs" => Ok(update::UpdateComponent::Rootfs),
+        "all" | "both" => Ok(update::UpdateComponent::All),
         other => {
-            anyhow::bail!("invalid update component '{other}' (expected core, ui, or both)")
+            anyhow::bail!("invalid update component '{other}' (expected core, ui, rootfs, or all)")
         }
     }
 }

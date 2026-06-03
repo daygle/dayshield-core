@@ -1,4 +1,3 @@
-//! System endpoints.
 //!
 //! - `GET  /system/status`   - overall health and version
 //! - `GET  /system/services` - list manageable service runtimes
@@ -1461,7 +1460,7 @@ pub struct UpdateActionRequest {
 }
 
 fn default_update_component() -> UpdateComponent {
-    UpdateComponent::Both
+    UpdateComponent::All
 }
 
 /// Handler: return software-update status for core and UI artifacts.

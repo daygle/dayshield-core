@@ -327,6 +327,27 @@ fn read_available_version_from_state() -> Option<String> {
         .and_then(|c| c.remote_version.clone())
 }
 
+fn normalize_version(value: Option<String>) -> Option<String> {
+    value.filter(|v| !v.is_empty() && v != "unknown")
+}
+
+fn version_for_slot(state: &SlotsState, slot: Slot) -> Option<String> {
+    if slot == state.current_slot {
+        Some(state.current_version.clone())
+    } else if slot == state.standby_slot {
+        Some(state.standby_version.clone())
+    } else {
+        read_build_version()
+    }
+    .and_then(|version| normalize_version(Some(version)))
+}
+
+/// Best-effort current rootfs version for shared update status.
+pub fn current_version() -> Option<String> {
+    let state = load_or_default_slots_state();
+    version_for_slot(&state, detect_running_slot()).or_else(read_build_version)
+}
+
 /// Current rootfs update status for the UI.
 pub async fn status() -> RootfsUpdateStatus {
     let now = Utc::now().to_rfc3339();
@@ -338,22 +359,10 @@ pub async fn status() -> RootfsUpdateStatus {
     // (we may have auto-reverted).  Don't write back here — signal_boot_success
     // handles state reconciliation.
     let current_slot = running_slot;
-    let current_version = if running_slot == state.current_slot {
-        Some(state.current_version.clone())
-    } else if running_slot == state.standby_slot {
-        Some(state.standby_version.clone())
-    } else {
-        read_build_version()
-    }
-    .filter(|v| !v.is_empty() && v != "unknown");
+    let current_version = version_for_slot(&state, current_slot);
 
     let standby_slot = current_slot.other();
-    let standby_version = if standby_slot == state.standby_slot {
-        Some(state.standby_version.clone())
-    } else {
-        Some(state.current_version.clone())
-    }
-    .filter(|v| !v.is_empty() && v != "unknown");
+    let standby_version = version_for_slot(&state, standby_slot);
 
     let available_version = read_available_version_from_state();
     let update_available = match (&current_version, &available_version) {
@@ -1223,7 +1232,6 @@ fn cleanup_staging_images() {
         }
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Tests

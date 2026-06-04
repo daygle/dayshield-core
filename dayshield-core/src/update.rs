@@ -2162,37 +2162,10 @@ async fn extract_and_deploy_artifact(
             let _ = fs::remove_dir_all(&tmp_dir);
         }
         RepoComponent::Rootfs => {
-            // Legacy .tar.zst rootfs path: extract the embedded squashfs and
-            // route it through the A/B slot apply helper.  Newer releases ship
-            // a bare .squashfs and are handled by the earlier branch above
-            // before we ever reach this tar/zstd decoder.
-            let tmp_dir = PathBuf::from("/tmp/dayshield-rootfs-stage");
-            fs::create_dir_all(&tmp_dir)?;
-            archive
-                .unpack(&tmp_dir)
-                .with_context(|| "failed to extract rootfs artifact")?;
-
-            let image_path = find_rootfs_image(&tmp_dir)?;
-            let staging_dir = PathBuf::from(crate::rootfs_update::ROOTFS_UPDATE_STAGING_DIR);
-            fs::create_dir_all(&staging_dir)?;
-            let image_filename = image_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("rootfs.squashfs")
-                .to_string();
-            let dest = staging_dir.join(&image_filename);
-            install_file_atomic_with_mode(&image_path, &dest, Some(0o644))?;
-            let _ = fs::remove_dir_all(&tmp_dir);
-
-            let version = artifact_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .and_then(|n| artifact_version_from_name("rootfs", n))
-                .unwrap_or_else(|| "unknown".to_string());
-
-            crate::rootfs_update::apply_staged_image(&dest, &version)
-                .await
-                .with_context(|| "rootfs A/B slot apply failed")?;
+            anyhow::bail!(
+                "rootfs artifacts must be deployed as a standalone .squashfs file \
+                 (rootfs-v*.squashfs); this code path only handles tar archives"
+            );
         }
     }
 
@@ -2359,8 +2332,6 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
     {
         Ok(manifest) => {
             let mut seen_components = std::collections::HashSet::new();
-            // Bootstrap tracked current version once for legacy systems that
-            // predate version tracking. This prevents perpetual false positives.
             for artifact in &manifest.components {
                 let comp = match artifact.component.as_str() {
                     "core" => RepoComponent::Core,
@@ -2372,18 +2343,6 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
 
                 let update_available = {
                     let comp_state = ensure_component_state(&mut state_file, comp);
-                    if comp_state.current_version.is_none() {
-                        if let Some(applied) = comp_state.last_applied_version.clone() {
-                            comp_state.current_version = Some(applied);
-                        } else {
-                            comp_state.current_version = Some(built_appliance_version());
-                            info!(
-                                component = %artifact.component,
-                                version = %comp_state.current_version.as_deref().unwrap_or("unknown"),
-                                "updates: bootstrapped current version baseline from registry"
-                            );
-                        }
-                    }
 
                     let update_available = comp_state
                         .current_version
@@ -4064,22 +4023,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn manifest_metadata_fields_are_backward_compatible() {
-        let legacy = r#"{
-            "generatedAt": "2026-05-18T00:00:00Z",
-            "components": [{
-                "component": "core",
-                "version": "1.0.0",
-                "downloadUrl": "https://example.invalid/core.tar.zst",
-                "checksumSha256": "def456"
-            }]
-        }"#;
-
-        let parsed: RegistryManifest = serde_json::from_str(legacy).expect("parse legacy manifest");
-        let comp = parsed.components.first().expect("component entry");
-        assert!(comp.source_repo.is_none());
-        assert!(comp.source_tag.is_none());
-        assert!(comp.source_release_url.is_none());
-    }
 }

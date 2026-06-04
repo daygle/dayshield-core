@@ -114,14 +114,29 @@ pub fn generate_config_with_overrides(
     out.push_str("    hide-identity: yes\n");
     out.push_str("    hide-version: yes\n");
     out.push_str("    harden-glue: yes\n");
-    out.push_str("    harden-below-nxdomain: yes\n");
-    out.push_str("    qname-minimisation: yes\n");
-    out.push_str("    minimal-responses: yes\n");
+    out.push_str(&format!(
+        "    harden-below-nxdomain: {}\n",
+        yes_no(config.harden_below_nxdomain)
+    ));
+    out.push_str(&format!(
+        "    qname-minimisation: {}\n",
+        yes_no(config.qname_minimisation)
+    ));
+    out.push_str(&format!(
+        "    minimal-responses: {}\n",
+        yes_no(config.minimal_responses)
+    ));
+    out.push_str(&format!(
+        "    aggressive-nsec: {}\n",
+        yes_no(config.aggressive_nsec)
+    ));
+    out.push_str(&format!(
+        "    harden-dnssec-stripped: {}\n",
+        yes_no(config.harden_dnssec_stripped)
+    ));
     if config.dnssec {
-        out.push_str("    harden-dnssec-stripped: yes\n");
         out.push_str("    module-config: \"validator iterator\"\n");
     } else {
-        out.push_str("    harden-dnssec-stripped: no\n");
         out.push_str("    module-config: \"iterator\"\n");
     }
     out.push_str(&format!(
@@ -844,7 +859,7 @@ mod tests {
     fn generate_config_dnssec_disabled_uses_iterator_only() {
         let cfg = base_config();
         let out = generate_config(&cfg, None);
-        assert!(out.contains("harden-dnssec-stripped: no"));
+        assert!(out.contains("harden-dnssec-stripped: yes"));
         assert!(out.contains("module-config: \"iterator\""));
         assert!(!out.contains("auto-trust-anchor-file"));
     }
@@ -856,6 +871,8 @@ mod tests {
         assert!(out.contains("harden-below-nxdomain: yes"));
         assert!(out.contains("qname-minimisation: yes"));
         assert!(out.contains("minimal-responses: yes"));
+        assert!(out.contains("aggressive-nsec: no"));
+        assert!(out.contains("harden-dnssec-stripped: yes"));
         assert!(!out.contains("use-caps-for-id"));
     }
 

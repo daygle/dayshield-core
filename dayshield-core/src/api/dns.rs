@@ -93,6 +93,16 @@ pub struct UpdateDnsConfigRequest {
     pub forwarders: Vec<String>,
     pub dnssec: bool,
     #[serde(default)]
+    pub harden_dnssec_stripped: Option<bool>,
+    #[serde(default)]
+    pub harden_below_nxdomain: Option<bool>,
+    #[serde(default)]
+    pub qname_minimisation: Option<bool>,
+    #[serde(default)]
+    pub minimal_responses: Option<bool>,
+    #[serde(default)]
+    pub aggressive_nsec: Option<bool>,
+    #[serde(default)]
     pub client_acl_preset: Option<DnsClientAclPreset>,
     #[serde(default)]
     pub client_acl_custom_cidrs: Option<Vec<String>>,
@@ -581,6 +591,19 @@ pub async fn update_config(
         .filter(|cidr| !cidr.is_empty())
         .collect::<Vec<_>>();
     let cache = req.cache.clone().unwrap_or_else(|| existing.cache.clone());
+    let harden_dnssec_stripped = req
+        .harden_dnssec_stripped
+        .unwrap_or(existing.harden_dnssec_stripped);
+    let harden_below_nxdomain = req
+        .harden_below_nxdomain
+        .unwrap_or(existing.harden_below_nxdomain);
+    let qname_minimisation = req
+        .qname_minimisation
+        .unwrap_or(existing.qname_minimisation);
+    let minimal_responses = req
+        .minimal_responses
+        .unwrap_or(existing.minimal_responses);
+    let aggressive_nsec = req.aggressive_nsec.unwrap_or(existing.aggressive_nsec);
 
     if matches!(resolver_mode, DnsResolverMode::Forwarded) && req.forwarders.is_empty() {
         return Err(DnsError::ValidationFailed(
@@ -668,6 +691,11 @@ pub async fn update_config(
         resolver_mode,
         forwarders: req.forwarders,
         dnssec: req.dnssec,
+        harden_dnssec_stripped,
+        harden_below_nxdomain,
+        qname_minimisation,
+        minimal_responses,
+        aggressive_nsec,
         client_acl_preset,
         client_acl_custom_cidrs,
         cache,

@@ -1615,6 +1615,26 @@ fn default_dns_prefetch() -> bool {
     true
 }
 
+fn default_harden_below_nxdomain() -> bool {
+    true
+}
+
+fn default_qname_minimisation() -> bool {
+    true
+}
+
+fn default_minimal_responses() -> bool {
+    true
+}
+
+fn default_harden_dnssec_stripped() -> bool {
+    true
+}
+
+fn default_aggressive_nsec() -> bool {
+    false
+}
+
 fn default_dns_serve_expired_ttl_seconds() -> u32 {
     86_400
 }
@@ -1700,6 +1720,21 @@ pub struct DnsConfig {
     pub forwarders: Vec<String>,
     /// Enable DNSSEC validation.
     pub dnssec: bool,
+    /// Harden DNSSEC-related negative responses.
+    #[serde(default = "default_harden_dnssec_stripped")]
+    pub harden_dnssec_stripped: bool,
+    /// Harden responses below NXDOMAIN.
+    #[serde(default = "default_harden_below_nxdomain")]
+    pub harden_below_nxdomain: bool,
+    /// Enable strict QNAME minimisation.
+    #[serde(default = "default_qname_minimisation")]
+    pub qname_minimisation: bool,
+    /// Return minimal DNS responses when possible.
+    #[serde(default = "default_minimal_responses")]
+    pub minimal_responses: bool,
+    /// Accept aggressive NSEC coverage.
+    #[serde(default = "default_aggressive_nsec")]
+    pub aggressive_nsec: bool,
     /// DNS client ACL preset.
     #[serde(default = "default_client_acl_preset")]
     pub client_acl_preset: DnsClientAclPreset,
@@ -1734,6 +1769,11 @@ impl Default for DnsConfig {
             resolver_mode: DnsResolverMode::Recursive,
             forwarders: vec![],
             dnssec: true,
+            harden_dnssec_stripped: true,
+            harden_below_nxdomain: true,
+            qname_minimisation: true,
+            minimal_responses: true,
+            aggressive_nsec: false,
             client_acl_preset: DnsClientAclPreset::PrivateRanges,
             client_acl_custom_cidrs: vec![],
             cache: DnsCacheConfig::default(),

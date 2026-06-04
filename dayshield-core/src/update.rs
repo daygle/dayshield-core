@@ -729,11 +729,31 @@ fn built_appliance_version() -> String {
         .to_string()
 }
 
-fn current_version_baseline(saved: Option<&ComponentState>) -> Option<String> {
+fn current_version_baseline(
+    component: RepoComponent,
+    saved: Option<&ComponentState>,
+) -> Option<String> {
     saved
         .and_then(|s| s.current_version.clone())
+        .or_else(|| {
+            if matches!(component, RepoComponent::Rootfs) {
+                crate::rootfs_update::current_version()
+            } else {
+                None
+            }
+        })
         .or_else(|| saved.and_then(|s| s.last_applied_version.clone()))
         .or_else(|| Some(built_appliance_version()))
+}
+
+fn rootfs_version_is_pending_reboot(state: &UpdateStateFile, version: &str) -> bool {
+    state.pending_reboot
+        && state
+            .components
+            .iter()
+            .find(|entry| entry.component == RepoComponent::Rootfs.as_str())
+            .and_then(|entry| entry.last_applied_version.as_deref())
+            .is_some_and(|pending_version| pending_version == version)
 }
 
 fn runtime_marker_path(component: RepoComponent) -> PathBuf {
@@ -1345,6 +1365,7 @@ fn acknowledge_rootfs_rebuild(state_file: &mut UpdateStateFile) {
 
 pub fn mark_appliance_rebuild_complete(state: &AppState) -> Result<()> {
     let mut state_file = load_state(state);
+    state_file.pending_reboot = false;
     clear_appliance_rebuild_required(&mut state_file);
     acknowledge_rootfs_rebuild(&mut state_file);
     save_state(state, &state_file)
@@ -2188,7 +2209,7 @@ async fn build_component_status(
         dirty_worktree: false,
         current_commit: None,
         remote_commit: None,
-        current_version: current_version_baseline(saved),
+        current_version: current_version_baseline(component, saved),
         remote_version: saved.and_then(|s| s.remote_version.clone()),
         update_available: saved.map(|s| s.update_available).unwrap_or(false),
         rollback_commit: saved.and_then(|s| s.rollback_commit.clone()),
@@ -2322,6 +2343,9 @@ async fn check_for_updates_with_trigger(
 async fn check_for_updates_registry(state: &AppState) -> Result<()> {
     let settings = load_settings(state);
     let mut state_file = load_state(state);
+    if !crate::rootfs_update::reboot_state().await.reboot_required {
+        state_file.pending_reboot = false;
+    }
 
     match query_registry_with_component_fallbacks(
         &settings,
@@ -2342,20 +2366,30 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
                 seen_components.insert(comp.as_str().to_string());
 
                 let update_available = {
-                    let comp_state = ensure_component_state(&mut state_file, comp);
-
-                    let update_available = comp_state
-                        .current_version
-                        .as_ref()
+                    let current_version = {
+                        let comp_state = ensure_component_state(&mut state_file, comp);
+                        current_version_baseline(comp, Some(comp_state))
+                    };
+                    let reboot_pending = matches!(comp, RepoComponent::Rootfs)
+                        && rootfs_version_is_pending_reboot(&state_file, &artifact.version);
+                    let update_available = current_version
+                        .as_deref()
                         .map(|current| is_remote_version_newer(current, &artifact.version))
-                        .unwrap_or(false);
+                        .unwrap_or(false)
+                        && !reboot_pending;
+
+                    let comp_state = ensure_component_state(&mut state_file, comp);
+                    comp_state.current_version = current_version;
                     comp_state.remote_version = Some(artifact.version.clone());
                     comp_state.update_available = update_available;
                     comp_state.last_error = None;
                     update_available
                 };
 
-                if matches!(comp, RepoComponent::Rootfs) && !update_available {
+                if matches!(comp, RepoComponent::Rootfs)
+                    && !update_available
+                    && !rootfs_version_is_pending_reboot(&state_file, &artifact.version)
+                {
                     clear_rootfs_update_required(&mut state_file);
                 }
 
@@ -2469,27 +2503,32 @@ async fn apply_updates_registry(
                 .components
                 .iter()
                 .find(|entry| entry.component == artifact.component)
-                .and_then(|entry| {
-                    entry
-                        .current_version
-                        .clone()
-                        .or_else(|| entry.last_applied_version.clone())
-                });
+                .and_then(|entry| current_version_baseline(*comp, Some(entry)));
+            let rootfs_pending_same_version = matches!(comp, RepoComponent::Rootfs)
+                && rootfs_version_is_pending_reboot(&state_file, &artifact.version);
 
             if current_version
                 .as_deref()
                 .map(|current| !is_remote_version_newer(current, &artifact.version))
                 .unwrap_or(false)
+                || rootfs_pending_same_version
             {
                 skipped_up_to_date.push(format!("{}-{}", artifact.component, artifact.version));
                 append_operation_log(
                     &mut state_file,
                     "apply",
                     "info",
-                    format!(
-                        "{} already at or newer than v{}; skipping apply",
-                        artifact.component, artifact.version
-                    ),
+                    if rootfs_pending_same_version {
+                        format!(
+                            "{} v{} is already staged and waiting for reboot; skipping apply",
+                            artifact.component, artifact.version
+                        )
+                    } else {
+                        format!(
+                            "{} already at or newer than v{}; skipping apply",
+                            artifact.component, artifact.version
+                        )
+                    },
                     Some(&artifact.component),
                 );
                 save_state(state, &state_file)?;
@@ -2844,12 +2883,25 @@ async fn apply_updates_registry(
             Ok(_) => {
                 let previous_version = {
                     let entry = ensure_component_state(&mut state_file, comp);
-                    entry.current_version.clone()
+                    current_version_baseline(comp, Some(entry))
                 };
-                let entry = ensure_component_state(&mut state_file, comp);
-                entry.current_version = Some(version.clone());
-                entry.last_applied_version = Some(version.clone());
-                entry.last_error = None;
+                let is_rootfs = matches!(comp, RepoComponent::Rootfs);
+                {
+                    let entry = ensure_component_state(&mut state_file, comp);
+                    if is_rootfs {
+                        // A rootfs artifact is written to the standby slot and only
+                        // becomes the current version after a successful reboot.
+                        entry.current_version = previous_version.clone();
+                    } else {
+                        entry.current_version = Some(version.clone());
+                    }
+                    entry.last_applied_version = Some(version.clone());
+                    entry.update_available = false;
+                    entry.last_error = None;
+                }
+                if is_rootfs {
+                    state_file.pending_reboot = true;
+                }
                 details.push(format!("deployed {}-{}", component_name, version));
                 append_operation_log_with_versions(
                     &mut state_file,
@@ -3095,8 +3147,17 @@ pub async fn rollback_updates(
     let _guard = op_lock().lock().await;
 
     let mut state_file = load_state(state);
-    let selected = RepoComponent::from_update_component(component);
-    ensure_registry_updatable_selection(&selected)?;
+    let requested = RepoComponent::from_update_component(component);
+    ensure_registry_updatable_selection(&requested)?;
+    let selected: Vec<RepoComponent> = requested
+        .into_iter()
+        .filter(|component| component_supports_runtime_deploy(*component))
+        .collect();
+    if selected.is_empty() {
+        anyhow::bail!(
+            "no runtime components selected for rollback; root filesystem rollback is managed through /system/rootfs/rollback"
+        );
+    }
 
     // Check atomicity constraint before proceeding
     check_atomicity_constraint(state, &selected, force_partial_apply).await?;
@@ -3402,8 +3463,17 @@ pub async fn validate_updates(
 ) -> Result<UpdatesActionResult> {
     let _guard = op_lock().lock().await;
 
-    let selected_repos = RepoComponent::from_update_component(component);
-    ensure_registry_updatable_selection(&selected_repos)?;
+    let requested_repos = RepoComponent::from_update_component(component);
+    ensure_registry_updatable_selection(&requested_repos)?;
+    let selected_repos: Vec<RepoComponent> = requested_repos
+        .into_iter()
+        .filter(|component| component_supports_runtime_deploy(*component))
+        .collect();
+    if selected_repos.is_empty() {
+        anyhow::bail!(
+            "no runtime components selected for validation; root filesystem validation is available via /system/rootfs/status"
+        );
+    }
 
     // Check atomicity constraint before proceeding
     check_atomicity_constraint(state, &selected_repos, force_partial_apply).await?;
@@ -4043,5 +4113,4 @@ mod tests {
             Some("https://github.com/daygle/dayshield-rootfs/releases/tag/v2026.05.10")
         );
     }
-
 }

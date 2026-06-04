@@ -380,7 +380,7 @@ pub(crate) fn classify_system_source(unit: &str, message: &str) -> &'static str 
         || hay.contains("dns:")
     {
         "dns"
-    } else if hay.contains("kea") || hay.contains("dhcp") || hay.contains("dnsmasq") {
+    } else if hay.contains("kea") || hay.contains("dhcp") {
         "dhcp"
     } else if hay.contains("wireguard") || hay.contains("wg-") || hay.contains("vpn") {
         "vpn"

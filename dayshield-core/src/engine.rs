@@ -8,7 +8,7 @@
 //! | `nftables`    | Kernel packet filter   |
 //! | `suricata`    | IPS / IDS              |
 //! | `dns`         | Unbound resolver       |
-//! | `dhcp`        | Kea / dnsmasq server   |
+//! | `dhcp`        | Kea DHCP server        |
 //! | `vpn`         | WireGuard tunnels      |
 //! | `acme`        | ACME / TLS cert mgmt   |
 //! | `crowdsec`    | Threat intelligence    |

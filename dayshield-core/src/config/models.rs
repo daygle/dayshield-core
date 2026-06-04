@@ -1984,7 +1984,7 @@ pub fn validate_dot_config(config: &DotConfig) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
-// DHCP (Kea / dnsmasq)
+// DHCP (Kea)
 // ---------------------------------------------------------------------------
 
 /// Configuration for the DHCP server.

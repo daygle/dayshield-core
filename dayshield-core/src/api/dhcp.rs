@@ -928,17 +928,9 @@ fn parse_kea4_leases_content(content: &str, loaded_from: &str, now: u64) -> Vec<
 async fn discover_kea4_lease_paths() -> Vec<String> {
     use crate::engine::dhcp::KEA_LEASES_PATH;
 
-    const LEGACY_KEA4_LEASES_PATH: &str = "/run/dayshield/kea/kea-leases4.csv";
+    let mut paths = vec![KEA_LEASES_PATH.to_string()];
 
-    let mut paths = vec![
-        KEA_LEASES_PATH.to_string(),
-        LEGACY_KEA4_LEASES_PATH.to_string(),
-    ];
-
-    for dir in ["/var/lib/kea", "/run/dayshield/kea"] {
-        let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
-            continue;
-        };
+    if let Ok(mut entries) = tokio::fs::read_dir("/var/lib/kea").await {
         while let Ok(Some(entry)) = entries.next_entry().await {
             let file_name = entry.file_name();
             let file_name = file_name.to_string_lossy();

@@ -1191,6 +1191,9 @@ impl ConfigStore {
             }
         }
 
+        // Cross-service port conflict detection.
+        validate_no_port_conflicts(config)?;
+
         Ok(())
     }
 
@@ -1874,6 +1877,150 @@ impl ConfigStore {
 impl Default for ConfigStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ── Port conflict detection ───────────────────────────────────────────────────
+
+/// Verify that no two enabled services would bind the same TCP port on
+/// overlapping addresses, and that no two enabled WireGuard interfaces share
+/// a UDP listen port.
+fn validate_no_port_conflicts(config: &SystemConfig) -> anyhow::Result<()> {
+    let settings = config.system_settings.as_ref();
+
+    // Collect (label, bind_addr, port) for every TCP service that binds locally.
+    let mut tcp: Vec<(String, String, u16)> = Vec::new();
+
+    // Management API — always active.
+    let web_port = settings.map_or(8443_u16, |s| s.web_port);
+    tcp.push(("management API".into(), "0.0.0.0".into(), web_port));
+
+    // SSH (when enabled).
+    if let Some(s) = settings {
+        if s.ssh_enabled {
+            tcp.push(("SSH".into(), "0.0.0.0".into(), s.ssh_port));
+        }
+    }
+
+    // DNS resolver (Unbound) — active whenever configured.
+    if let Some(dns) = &config.dns {
+        tcp.push(("DNS resolver".into(), "0.0.0.0".into(), dns.port));
+    }
+
+    // DNS-over-TLS (when enabled).
+    if let Some(dot) = &config.dot {
+        if dot.enabled {
+            tcp.push(("DNS-over-TLS".into(), "0.0.0.0".into(), dot.port));
+        }
+    }
+
+    // Captive portal (when enabled).
+    if let Some(cp) = &config.captive_portal {
+        if cp.enabled {
+            tcp.push(("captive portal".into(), cp.listen_address.clone(), cp.listen_port));
+        }
+    }
+
+    // Honeypot TCP listeners (when the honeypot subsystem is enabled).
+    if let Some(honeypots) = &config.honeypots {
+        if honeypots.enabled {
+            for l in &honeypots.listeners {
+                if l.enabled {
+                    tcp.push((
+                        format!("honeypot listener '{}'", l.name),
+                        l.bind_address.clone(),
+                        l.port,
+                    ));
+                }
+            }
+        }
+    }
+
+    // CrowdSec LAPI is a local service on the same appliance.  DayShield
+    // connects to it as a client, but it binds the same network stack, so a
+    // DayShield service binding 0.0.0.0 on the same port would shadow it.
+    if let Some(cs) = &config.crowdsec {
+        if cs.enabled {
+            if let Some(port) = lapi_url_port(&cs.lapi_url) {
+                let addr = lapi_url_host(&cs.lapi_url).unwrap_or_else(|| "127.0.0.1".into());
+                tcp.push(("CrowdSec LAPI".into(), addr, port));
+            }
+        }
+    }
+
+    // Check every pair for address/port overlap.
+    for i in 0..tcp.len() {
+        for j in (i + 1)..tcp.len() {
+            let (ref la, ref aa, pa) = tcp[i];
+            let (ref lb, ref ab, pb) = tcp[j];
+            if pa == pb && tcp_addrs_overlap(aa, ab) {
+                anyhow::bail!(
+                    "port conflict: {} and {} both use TCP port {}; \
+                     assign distinct ports to resolve this",
+                    la,
+                    lb,
+                    pa
+                );
+            }
+        }
+    }
+
+    // WireGuard uses UDP — check that no two enabled interfaces share a listen port.
+    let mut wg_seen: Vec<(String, u16)> = Vec::new();
+    for wg in &config.wireguard_interfaces {
+        if wg.enabled {
+            if let Some((prev, _)) = wg_seen.iter().find(|(_, p)| *p == wg.listen_port) {
+                anyhow::bail!(
+                    "port conflict: WireGuard interface '{}' and {} both use UDP port {}",
+                    wg.name,
+                    prev,
+                    wg.listen_port
+                );
+            }
+            wg_seen.push((format!("WireGuard interface '{}'", wg.name), wg.listen_port));
+        }
+    }
+
+    Ok(())
+}
+
+/// Returns `true` when two TCP bind addresses would overlap.
+/// `0.0.0.0` and `::` bind every interface and therefore conflict with anything.
+fn tcp_addrs_overlap(a: &str, b: &str) -> bool {
+    matches!(a, "0.0.0.0" | "::") || matches!(b, "0.0.0.0" | "::") || a == b
+}
+
+/// Extract the explicit port from a URL like `http://127.0.0.1:8080`.
+/// Returns `None` when no port is present in the URL.
+fn lapi_url_port(url: &str) -> Option<u16> {
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
+    let authority = rest.split('/').next()?;
+    let port_str = if authority.starts_with('[') {
+        // IPv6 literal: [::1]:8080
+        let close = authority.find(']')?;
+        authority.get(close + 1..)?.strip_prefix(':')?
+    } else {
+        // host:port — if no colon the URL has no explicit port
+        authority.rsplit_once(':')?.1
+    };
+    port_str.parse().ok()
+}
+
+/// Extract the host component from a URL like `http://127.0.0.1:8080`.
+fn lapi_url_host(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
+    let authority = rest.split('/').next()?;
+    if authority.starts_with('[') {
+        let close = authority.find(']')?;
+        Some(authority[1..close].to_string())
+    } else if let Some((host, _)) = authority.rsplit_once(':') {
+        Some(host.to_string())
+    } else {
+        Some(authority.to_string())
     }
 }
 
@@ -3317,5 +3464,144 @@ mod tests {
 
         assert_eq!(*hostname_seen.lock().unwrap(), "hook-test");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Port conflict detection tests ─────────────────────────────────────────
+
+    #[test]
+    fn no_conflict_with_default_config() {
+        assert!(validate_no_port_conflicts(&SystemConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn captive_portal_conflicts_with_crowdsec_lapi() {
+        use crate::config::models::{CaptivePortalConfig, CrowdSecConfig};
+        let mut cfg = SystemConfig::default();
+        cfg.captive_portal = Some(CaptivePortalConfig {
+            enabled: true,
+            listen_address: "0.0.0.0".into(),
+            listen_port: 8080,
+            ..CaptivePortalConfig::default()
+        });
+        cfg.crowdsec = Some(CrowdSecConfig {
+            enabled: true,
+            lapi_url: "http://127.0.0.1:8080".into(),
+            api_key: "key".into(),
+            update_interval: 60,
+            ban_alias_name: "crowdsec_bans".into(),
+        });
+        assert!(validate_no_port_conflicts(&cfg).is_err());
+    }
+
+    #[test]
+    fn captive_portal_no_conflict_on_different_port() {
+        use crate::config::models::{CaptivePortalConfig, CrowdSecConfig};
+        let mut cfg = SystemConfig::default();
+        cfg.captive_portal = Some(CaptivePortalConfig {
+            enabled: true,
+            listen_address: "0.0.0.0".into(),
+            listen_port: 8180,
+            ..CaptivePortalConfig::default()
+        });
+        cfg.crowdsec = Some(CrowdSecConfig {
+            enabled: true,
+            lapi_url: "http://127.0.0.1:8080".into(),
+            api_key: "key".into(),
+            update_interval: 60,
+            ban_alias_name: "crowdsec_bans".into(),
+        });
+        assert!(validate_no_port_conflicts(&cfg).is_ok());
+    }
+
+    #[test]
+    fn captive_portal_conflicts_with_management_api() {
+        use crate::config::models::CaptivePortalConfig;
+        let mut cfg = SystemConfig::default();
+        // default SystemSettings already sets web_port = 8443
+        cfg.captive_portal = Some(CaptivePortalConfig {
+            enabled: true,
+            listen_address: "0.0.0.0".into(),
+            listen_port: 8443,
+            ..CaptivePortalConfig::default()
+        });
+        assert!(validate_no_port_conflicts(&cfg).is_err());
+    }
+
+    #[test]
+    fn wireguard_conflict_detected() {
+        use crate::config::models::WireGuardInterface;
+        let mut cfg = SystemConfig::default();
+        cfg.wireguard_interfaces = vec![
+            WireGuardInterface {
+                name: "wg0".into(),
+                description: None,
+                private_key: String::new(),
+                public_key: String::new(),
+                listen_port: 51820,
+                addresses: vec![],
+                mtu: None,
+                peers: vec![],
+                enabled: true,
+            },
+            WireGuardInterface {
+                name: "wg1".into(),
+                description: None,
+                private_key: String::new(),
+                public_key: String::new(),
+                listen_port: 51820,
+                addresses: vec![],
+                mtu: None,
+                peers: vec![],
+                enabled: true,
+            },
+        ];
+        assert!(validate_no_port_conflicts(&cfg).is_err());
+    }
+
+    #[test]
+    fn wireguard_no_conflict_on_different_ports() {
+        use crate::config::models::WireGuardInterface;
+        let mut cfg = SystemConfig::default();
+        cfg.wireguard_interfaces = vec![
+            WireGuardInterface {
+                name: "wg0".into(),
+                description: None,
+                private_key: String::new(),
+                public_key: String::new(),
+                listen_port: 51820,
+                addresses: vec![],
+                mtu: None,
+                peers: vec![],
+                enabled: true,
+            },
+            WireGuardInterface {
+                name: "wg1".into(),
+                description: None,
+                private_key: String::new(),
+                public_key: String::new(),
+                listen_port: 51821,
+                addresses: vec![],
+                mtu: None,
+                peers: vec![],
+                enabled: true,
+            },
+        ];
+        assert!(validate_no_port_conflicts(&cfg).is_ok());
+    }
+
+    #[test]
+    fn lapi_url_port_parsing() {
+        assert_eq!(lapi_url_port("http://127.0.0.1:8080"), Some(8080));
+        assert_eq!(lapi_url_port("https://crowdsec.local:9000"), Some(9000));
+        assert_eq!(lapi_url_port("http://[::1]:8080"), Some(8080));
+        assert_eq!(lapi_url_port("http://127.0.0.1"), None);
+        assert_eq!(lapi_url_port("http://localhost"), None);
+    }
+
+    #[test]
+    fn lapi_url_host_parsing() {
+        assert_eq!(lapi_url_host("http://127.0.0.1:8080").as_deref(), Some("127.0.0.1"));
+        assert_eq!(lapi_url_host("http://[::1]:8080").as_deref(), Some("::1"));
+        assert_eq!(lapi_url_host("http://localhost").as_deref(), Some("localhost"));
     }
 }

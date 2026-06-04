@@ -3357,7 +3357,7 @@ fn default_captive_portal_listen_address() -> String {
 }
 
 fn default_captive_portal_listen_port() -> u16 {
-    8080
+    8180
 }
 
 fn default_captive_portal_session_ttl_seconds() -> u64 {

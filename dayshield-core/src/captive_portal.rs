@@ -197,8 +197,8 @@ pub fn start_portal_server(state: Arc<AppState>) {
             }
 
             let addr = parse_listen_addr(&cfg).unwrap_or_else(|err| {
-                warn!(error = %err, "captive-portal: invalid listen address; using 0.0.0.0:8180");
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8180)
+                warn!(error = %err, port = cfg.listen_port, "captive-portal: invalid listen address; falling back to 0.0.0.0");
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), cfg.listen_port)
             });
 
             if active

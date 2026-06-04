@@ -79,7 +79,9 @@ pub fn generate_config_with_overrides(
 ) -> String {
     let mut out = String::new();
 
-    out.push_str("# DayShield - Unbound configuration fragment (auto-generated; do not edit by hand)\n\n");
+    out.push_str(
+        "# DayShield - Unbound configuration fragment (auto-generated; do not edit by hand)\n\n",
+    );
 
     out.push_str("    verbosity: 1\n");
     out.push_str("    statistics-interval: 0\n");
@@ -112,7 +114,9 @@ pub fn generate_config_with_overrides(
     out.push_str("    hide-identity: yes\n");
     out.push_str("    hide-version: yes\n");
     out.push_str("    harden-glue: yes\n");
-    out.push_str("    use-caps-for-id: yes\n");
+    out.push_str("    harden-below-nxdomain: yes\n");
+    out.push_str("    qname-minimisation: yes\n");
+    out.push_str("    minimal-responses: yes\n");
     if config.dnssec {
         out.push_str("    harden-dnssec-stripped: yes\n");
         out.push_str("    module-config: \"validator iterator\"\n");
@@ -173,7 +177,7 @@ pub fn generate_config_with_overrides(
 
     // Local records (static A / AAAA overrides).
     for rec in &config.local_records {
-        let line = build_local_data_line(rec);
+        let line = build_local_data_line(rec, ipv6_enabled);
         if let Some(l) = line {
             out.push_str(&format!("    local-data: \"{l}\"\n"));
         }
@@ -181,7 +185,15 @@ pub fn generate_config_with_overrides(
     for ov in host_overrides {
         let record_type = match ov.address.parse::<IpAddr>() {
             Ok(IpAddr::V4(_)) => "A",
-            Ok(IpAddr::V6(_)) => "AAAA",
+            Ok(IpAddr::V6(_)) if ipv6_enabled => "AAAA",
+            Ok(IpAddr::V6(_)) => {
+                warn!(
+                    hostname = %ov.hostname,
+                    address = %ov.address,
+                    "dns: IPv6 host override ignored while IPv6 is disabled"
+                );
+                continue;
+            }
             Err(_) => {
                 warn!(
                     hostname = %ov.hostname,
@@ -202,6 +214,19 @@ pub fn generate_config_with_overrides(
     }
 
     for ov in domain_overrides {
+        if !ipv6_enabled
+            && ov
+                .forward_to
+                .parse::<IpAddr>()
+                .is_ok_and(|addr| addr.is_ipv6())
+        {
+            warn!(
+                domain = %ov.domain,
+                forward_to = %ov.forward_to,
+                "dns: IPv6 domain override ignored while IPv6 is disabled"
+            );
+            continue;
+        }
         out.push_str("forward-zone:\n");
         out.push_str(&format!("    name: \"{}\"\n", ov.domain));
         out.push_str(&format!("    forward-addr: {}\n\n", ov.forward_to));
@@ -209,12 +234,22 @@ pub fn generate_config_with_overrides(
 
     // Forward zone - use the forwarder list only in forwarded mode.
     if matches!(config.resolver_mode, DnsResolverMode::Forwarded) && !config.forwarders.is_empty() {
-        out.push_str("forward-zone:\n");
-        out.push_str("    name: \".\"\n");
-        for fwd in &config.forwarders {
+        let active_forwarders = config
+            .forwarders
+            .iter()
+            .filter(|fwd| ipv6_enabled || !fwd.parse::<IpAddr>().is_ok_and(|addr| addr.is_ipv6()));
+        let mut emitted_forward_zone = false;
+        for fwd in active_forwarders {
+            if !emitted_forward_zone {
+                out.push_str("forward-zone:\n");
+                out.push_str("    name: \".\"\n");
+                emitted_forward_zone = true;
+            }
             out.push_str(&format!("    forward-addr: {fwd}\n"));
         }
-        out.push('\n');
+        if emitted_forward_zone {
+            out.push('\n');
+        }
     }
 
     out
@@ -508,9 +543,16 @@ fn write_key_restricted(path: &str, data: &[u8]) -> Result<()> {
 /// Format a [`DnsLocalRecord`] as a single Unbound `local-data` value.
 ///
 /// Returns `None` for unrecognised record types.
-fn build_local_data_line(rec: &DnsLocalRecord) -> Option<String> {
+fn build_local_data_line(rec: &DnsLocalRecord, ipv6_enabled: bool) -> Option<String> {
     let rtype = rec.record_type.to_uppercase();
     match rtype.as_str() {
+        "AAAA" if !ipv6_enabled => {
+            warn!(
+                name = %rec.name,
+                "dns: IPv6 local record ignored while IPv6 is disabled"
+            );
+            None
+        }
         "A" | "AAAA" | "CNAME" | "PTR" | "MX" | "TXT" => {
             let value = if rtype == "TXT" {
                 format!("\\\"{}\\\"", escape_unbound_txt(&rec.value))
@@ -613,9 +655,7 @@ async fn run_unbound_checkconf(config_path: Option<&str>) -> Result<()> {
 
 async fn run_unbound_checkconf_fragment(fragment_path: &str) -> Result<()> {
     let wrapper_path = format!("{fragment_path}.checkconf");
-    let wrapper = format!(
-        "server:\n    include: \"{fragment_path}\"\n"
-    );
+    let wrapper = format!("server:\n    include: \"{fragment_path}\"\n");
 
     std::fs::write(&wrapper_path, wrapper)
         .with_context(|| format!("failed to write temporary file {wrapper_path}"))?;
@@ -810,6 +850,16 @@ mod tests {
     }
 
     #[test]
+    fn generate_config_uses_stable_hardening_options() {
+        let cfg = base_config();
+        let out = generate_config(&cfg, None);
+        assert!(out.contains("harden-below-nxdomain: yes"));
+        assert!(out.contains("qname-minimisation: yes"));
+        assert!(out.contains("minimal-responses: yes"));
+        assert!(!out.contains("use-caps-for-id"));
+    }
+
+    #[test]
     fn generate_config_local_records() {
         let mut cfg = base_config();
         cfg.local_records.push(DnsLocalRecord {
@@ -887,6 +937,34 @@ mod tests {
         assert!(out.contains("interface: 0.0.0.0"));
         assert!(out.contains("interface: ::0"));
         assert!(out.contains("do-ip6: yes"));
+    }
+
+    #[test]
+    fn generate_config_ignores_stale_ipv6_records_when_ipv6_disabled() {
+        let mut cfg = base_config();
+        cfg.forwarders = vec!["2001:db8::53".into(), "1.1.1.1".into()];
+        cfg.local_records.push(DnsLocalRecord {
+            name: "v6.local.".into(),
+            record_type: "AAAA".into(),
+            value: "fd00::20".into(),
+        });
+        let host_overrides = vec![DnsHostOverride {
+            hostname: "host6.local.".into(),
+            address: "fd00::30".into(),
+        }];
+        let domain_overrides = vec![DnsDomainOverride {
+            domain: "corp6.local.".into(),
+            forward_to: "2001:db8::54".into(),
+        }];
+
+        let out =
+            generate_config_with_overrides(&cfg, None, false, &host_overrides, &domain_overrides);
+
+        assert!(!out.contains("v6.local. IN AAAA fd00::20"));
+        assert!(!out.contains("host6.local. IN AAAA fd00::30"));
+        assert!(!out.contains("2001:db8::53"));
+        assert!(!out.contains("2001:db8::54"));
+        assert!(out.contains("forward-addr: 1.1.1.1"));
     }
 
     #[test]

@@ -2163,8 +2163,8 @@ async fn extract_and_deploy_artifact(
         }
         RepoComponent::Rootfs => {
             anyhow::bail!(
-                "rootfs .tar.zst artifacts are no longer supported; \
-                 use a standalone .squashfs artifact (rootfs-v*.squashfs)"
+                "rootfs artifacts must be deployed as a standalone .squashfs file \
+                 (rootfs-v*.squashfs); this code path only handles tar archives"
             );
         }
     }
@@ -2332,8 +2332,6 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
     {
         Ok(manifest) => {
             let mut seen_components = std::collections::HashSet::new();
-            // Bootstrap tracked current version once for legacy systems that
-            // predate version tracking. This prevents perpetual false positives.
             for artifact in &manifest.components {
                 let comp = match artifact.component.as_str() {
                     "core" => RepoComponent::Core,

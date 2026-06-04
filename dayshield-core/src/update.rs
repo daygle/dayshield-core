@@ -2375,10 +2375,27 @@ async fn check_for_updates_registry(state: &AppState) -> Result<()> {
             Ok(())
         }
         Err(err) => {
-            warn!(error = %err, "updates: failed to query registry");
+            if is_transient_network_error(&err) {
+                // Common on first boot before DNS/unbound is resolving; the next
+                // periodic check picks it up once the network is ready.
+                info!(error = %err, "updates: registry query skipped (network not ready)");
+            } else {
+                warn!(error = %err, "updates: failed to query registry");
+            }
             Err(err)
         }
     }
+}
+
+/// Returns true when the error chain points to a transient network/transport
+/// failure (DNS not ready, connection refused, timeout) rather than a genuine
+/// registry problem. Used to keep first-boot noise out of the warning log.
+fn is_transient_network_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|e| e.is_connect() || e.is_timeout())
+    })
 }
 
 /// Apply updates from artifact registry (atomic transaction)
@@ -3845,7 +3862,11 @@ pub async fn start_update_checker(state: std::sync::Arc<AppState>) {
                     }
                 }
                 Err(err) => {
-                    warn!(error = %err, "updates: periodic check failed");
+                    if is_transient_network_error(&err) {
+                        info!(error = %err, "updates: periodic check skipped (network not ready)");
+                    } else {
+                        warn!(error = %err, "updates: periodic check failed");
+                    }
                 }
             }
         }

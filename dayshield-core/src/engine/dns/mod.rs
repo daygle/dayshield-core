@@ -270,7 +270,14 @@ pub async fn apply_config_with_overrides(
     }
 
     if config.dnssec {
-        ensure_dnssec_root_anchor().await?;
+        // unbound.service owns anchor bootstrapping; a missing anchor here just
+        // means it hasn't run yet, so don't fail the whole DNS reconcile over it.
+        if let Err(err) = ensure_dnssec_root_anchor().await {
+            warn!(
+                error = %err,
+                "dns: DNSSEC root anchor not ready; unbound will bootstrap it on next start"
+            );
+        }
     }
 
     let conf_str =
@@ -540,10 +547,34 @@ fn write_config_atomic(path: &str, content: &str) -> Result<()> {
     Ok(())
 }
 
+/// Static root trust anchor shipped by the `dns-root-data` package. Used as a
+/// self-heal fallback when the live anchor is missing.
+const DNSSEC_ROOT_KEY_FALLBACK: &str = "/usr/share/dns/root.key";
+
+/// Best-effort check that a usable DNSSEC trust anchor exists.
+///
+/// The authoritative bootstrap is owned by `unbound.service`'s `ExecStartPre`
+/// (`unbound-anchor-prepare.sh`), which runs `unbound-anchor` when available and
+/// otherwise seeds the anchor from the `dns-root-data` package. We deliberately
+/// do *not* run `unbound-anchor` here (the binary is not part of the image, and
+/// `/var/lib/unbound` is unbound's to own). If the anchor is still missing we
+/// self-heal with the same static fallback, but a failure here is non-fatal —
+/// unbound bootstraps the anchor on its next start, so the caller only warns.
 async fn ensure_dnssec_root_anchor() -> Result<()> {
     let path = Path::new(DNSSEC_ROOT_KEY_PATH);
     if path.exists() && std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > 0 {
         return Ok(());
+    }
+
+    let fallback = Path::new(DNSSEC_ROOT_KEY_FALLBACK);
+    let fallback_usable =
+        fallback.exists() && std::fs::metadata(fallback).map(|m| m.len()).unwrap_or(0) > 0;
+    if !fallback_usable {
+        anyhow::bail!(
+            "DNSSEC root anchor {} is missing and fallback {} is unavailable",
+            DNSSEC_ROOT_KEY_PATH,
+            DNSSEC_ROOT_KEY_FALLBACK
+        );
     }
 
     if let Some(parent) = path.parent() {
@@ -551,40 +582,19 @@ async fn ensure_dnssec_root_anchor() -> Result<()> {
             .with_context(|| format!("failed to create directory {}", parent.display()))?;
     }
 
-    let out = match Command::new("unbound-anchor")
-        .args(["-a", DNSSEC_ROOT_KEY_PATH])
-        .output()
-        .await
-    {
-        Ok(out) => out,
-        Err(err) if err.kind() == ErrorKind::NotFound => {
-            anyhow::bail!(
-                "DNSSEC root anchor {} is missing and unbound-anchor is not installed",
-                DNSSEC_ROOT_KEY_PATH
-            );
-        }
-        Err(err) => return Err(err).context("failed to spawn unbound-anchor"),
-    };
+    std::fs::copy(fallback, path).with_context(|| {
+        format!(
+            "failed to seed {} from {}",
+            DNSSEC_ROOT_KEY_PATH, DNSSEC_ROOT_KEY_FALLBACK
+        )
+    })?;
 
-    let anchor_exists = path.exists() && std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > 0;
-    if out.status.success() || (out.status.code() == Some(1) && anchor_exists) {
-        info!(path = DNSSEC_ROOT_KEY_PATH, "dns: DNSSEC root anchor ready");
-        return Ok(());
-    }
-
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    anyhow::bail!(
-        "unbound-anchor failed while creating {}: {}{}{}",
-        DNSSEC_ROOT_KEY_PATH,
-        stdout.trim(),
-        if stdout.trim().is_empty() || stderr.trim().is_empty() {
-            ""
-        } else {
-            "\n"
-        },
-        stderr.trim()
+    info!(
+        path = DNSSEC_ROOT_KEY_PATH,
+        source = DNSSEC_ROOT_KEY_FALLBACK,
+        "dns: DNSSEC root anchor seeded from dns-root-data"
     );
+    Ok(())
 }
 
 async fn check_unbound_config() -> Result<()> {

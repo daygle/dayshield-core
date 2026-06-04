@@ -296,7 +296,7 @@ pub async fn apply_config_with_overrides(
     if anchor_ready {
         check_unbound_config().await?;
     } else {
-        warn!("dns: skipping config validation: DNSSEC anchor missing; will validate on next apply");
+        warn!("dns: skipping config validation: DNSSEC anchor missing; will validate once the anchor is present");
     }
     apply_unbound_runtime(needs_unbound_restart(config, dot)).await?;
 
@@ -562,8 +562,14 @@ fn write_config_atomic(path: &str, content: &str) -> Result<()> {
 /// `unbound-checkconf` — which fails hard on a missing anchor file — and
 /// let unbound bootstrap it on its next start.
 fn dnssec_root_anchor_ready() -> bool {
-    let path = Path::new(DNSSEC_ROOT_KEY_PATH);
-    path.exists() && std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > 0
+    match std::fs::metadata(DNSSEC_ROOT_KEY_PATH) {
+        Ok(m) => m.len() > 0,
+        Err(err) if err.kind() == ErrorKind::NotFound => false,
+        Err(err) => {
+            warn!(path = DNSSEC_ROOT_KEY_PATH, error = %err, "dns: could not stat DNSSEC root anchor");
+            false
+        }
+    }
 }
 
 async fn check_unbound_config() -> Result<()> {

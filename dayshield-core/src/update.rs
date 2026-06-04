@@ -1002,166 +1002,1206 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-fn install_file_atomic(src: &Path, target: &Path) -> Result<()> {
-    install_file_atomic_with_mode(src, target, None)
-}
-
-fn install_executable_file_atomic(src: &Path, target: &Path) -> Result<()> {
-    install_file_atomic_with_mode(src, target, Some(0o755))
-}
-
-fn install_file_atomic_with_mode(src: &Path, target: &Path, mode: Option<u32>) -> Result<()> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("invalid target path {}", target.display()))?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create directory {}", parent.display()))?;
-
-    let suffix = unique_suffix();
-    let staged = parent.join(format!(
-        "{}.new.{}",
-        target.file_name().unwrap_or_default().to_string_lossy(),
-        suffix
-    ));
-    let backup = parent.join(format!(
-        "{}.bak.{}",
-        target.file_name().unwrap_or_default().to_string_lossy(),
-        suffix
-    ));
-
-    fs::copy(src, &staged)
-        .with_context(|| format!("failed to stage {} -> {}", src.display(), staged.display()))?;
-    if let Some(mode) = mode {
-        set_file_mode(&staged, mode)?;
+fn install_file_atomic(src: &Path, dst: &Path) -> Result<()> {
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
     }
+    let tmp = dst.with_extension(format!("tmp.{}", unique_suffix()));
+    fs::copy(src, &tmp)
+        .with_context(|| format!("failed to copy {} -> {}", src.display(), tmp.display()))?;
+    let perms = fs::metadata(src)?.permissions();
+    fs::set_permissions(&tmp, perms)?;
+    fs::rename(&tmp, dst)
+        .with_context(|| format!("failed to rename {} -> {}", tmp.display(), dst.display()))?;
+    Ok(())
+}
 
-    let had_existing = target.exists();
-    if had_existing {
-        fs::rename(target, &backup).with_context(|| {
-            format!(
-                "failed to move existing target {} -> {}",
-                target.display(),
-                backup.display()
-            )
+fn install_dir_atomic(src: &Path, dst: &Path) -> Result<()> {
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let tmp = dst.with_extension(format!("tmp.{}", unique_suffix()));
+    copy_dir_recursive(src, &tmp)?;
+    if dst.exists() {
+        let old = dst.with_extension(format!("old.{}", unique_suffix()));
+        fs::rename(dst, &old)
+            .with_context(|| format!("failed to rename {} -> {}", dst.display(), old.display()))?;
+        fs::rename(&tmp, dst).with_context(|| {
+            format!("failed to rename {} -> {}", tmp.display(), dst.display())
+        })?;
+        if old.is_dir() {
+            fs::remove_dir_all(&old)
+                .with_context(|| format!("failed to remove old dir {}", old.display()))?;
+        }
+    } else {
+        fs::rename(&tmp, dst).with_context(|| {
+            format!("failed to rename {} -> {}", tmp.display(), dst.display())
         })?;
     }
+    Ok(())
+}
 
-    if let Err(err) = fs::rename(&staged, target) {
-        if had_existing {
-            let _ = fs::rename(&backup, target);
+fn deploy_artifact(src: &Path, component: RepoComponent) -> Result<()> {
+    match component {
+        RepoComponent::Core => {
+            let dst = deployed_runtime_path(component);
+            install_file_atomic(src, &dst)
         }
-        let _ = fs::remove_file(&staged);
-        anyhow::bail!("failed to install {}: {}", target.display(), err);
+        RepoComponent::Ui => {
+            let dst = deployed_runtime_path(component);
+            install_dir_atomic(src, &dst)
+        }
+        RepoComponent::Rootfs => {
+            // rootfs is activated on next boot via initramfs; just stage it.
+            let staging_dir = PathBuf::from(ARTIFACT_STAGING_DIR);
+            fs::create_dir_all(&staging_dir).with_context(|| {
+                format!(
+                    "failed to create staging directory {}",
+                    staging_dir.display()
+                )
+            })?;
+            let dst = staging_dir.join(
+                src.file_name()
+                    .ok_or_else(|| anyhow::anyhow!("rootfs artifact has no filename"))?,
+            );
+            install_file_atomic(src, &dst)
+        }
     }
-
-    if had_existing {
-        let _ = fs::remove_file(&backup);
-    }
-
-    Ok(())
 }
 
-#[cfg(unix)]
-fn set_file_mode(path: &Path, mode: u32) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut permissions = fs::metadata(path)
-        .with_context(|| format!("failed to read permissions for {}", path.display()))?
-        .permissions();
-    permissions.set_mode(mode);
-    fs::set_permissions(path, permissions)
-        .with_context(|| format!("failed to set permissions on {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn set_file_mode(_path: &Path, _mode: u32) -> Result<()> {
-    Ok(())
-}
-
-fn install_dir_atomic(src: &Path, target: &Path) -> Result<()> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("invalid target path {}", target.display()))?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create directory {}", parent.display()))?;
-
-    let suffix = unique_suffix();
-    let staged = parent.join(format!(
-        "{}.new.{}",
-        target.file_name().unwrap_or_default().to_string_lossy(),
-        suffix
-    ));
-    let backup = parent.join(format!(
-        "{}.bak.{}",
-        target.file_name().unwrap_or_default().to_string_lossy(),
-        suffix
-    ));
-
-    if staged.exists() {
-        fs::remove_dir_all(&staged)
-            .with_context(|| format!("failed to clear staged dir {}", staged.display()))?;
-    }
-    copy_dir_recursive(src, &staged)?;
-
-    let had_existing = target.exists();
-    if had_existing {
-        fs::rename(target, &backup).with_context(|| {
+async fn run_git_command(args: &[&str], repo_path: &Path) -> Result<std::process::Output> {
+    Command::new("git")
+        .args(args)
+        .current_dir(repo_path)
+        .output()
+        .await
+        .with_context(|| {
             format!(
-                "failed to move existing dir {} -> {}",
-                target.display(),
-                backup.display()
+                "failed to run git {} in {}",
+                args.join(" "),
+                repo_path.display()
             )
+        })
+}
+
+async fn get_current_commit(repo_path: &Path) -> Result<String> {
+    let output = run_git_command(&["rev-parse", "HEAD"], repo_path).await?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git rev-parse HEAD failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+async fn get_remote_commit(repo_path: &Path, branch: &str) -> Result<String> {
+    let remote_ref = format!("origin/{}", branch);
+    let output = run_git_command(&["rev-parse", &remote_ref], repo_path).await?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git rev-parse {} failed: {}",
+            remote_ref,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+async fn is_commit_signed(repo_path: &Path, commit: &str) -> Result<bool> {
+    let output = run_git_command(&["verify-commit", "--raw", commit], repo_path).await?;
+    Ok(output.status.success())
+}
+
+async fn is_worktree_dirty(repo_path: &Path) -> Result<bool> {
+    let output = run_git_command(&["status", "--porcelain"], repo_path).await?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git status failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(!output.stdout.is_empty())
+}
+
+async fn fetch_remote(repo_path: &Path) -> Result<()> {
+    let output = run_git_command(&["fetch", "origin"], repo_path).await?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git fetch origin failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+async fn reset_hard_to_remote(repo_path: &Path, branch: &str) -> Result<()> {
+    let remote_ref = format!("origin/{}", branch);
+    let output = run_git_command(&["reset", "--hard", &remote_ref], repo_path).await?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git reset --hard {} failed: {}",
+            remote_ref,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+async fn is_valid_git_repo(path: &Path) -> bool {
+    run_git_command(&["rev-parse", "--git-dir"], path)
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+async fn clone_repo(url: &str, path: &Path, branch: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await.with_context(|| {
+            format!("failed to create parent directory {}", parent.display())
         })?;
     }
-
-    if let Err(err) = fs::rename(&staged, target) {
-        if had_existing {
-            let _ = fs::rename(&backup, target);
-        }
-        let _ = fs::remove_dir_all(&staged);
-        anyhow::bail!("failed to install directory {}: {}", target.display(), err);
+    let output = Command::new("git")
+        .args(["clone", "--branch", branch, "--depth", "1", url])
+        .arg(path)
+        .output()
+        .await
+        .context("failed to run git clone")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git clone {} failed: {}",
+            url,
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
-
-    if had_existing {
-        let _ = fs::remove_dir_all(&backup);
-    }
-
     Ok(())
 }
 
-/// Find the rootfs image file inside an extracted artifact directory.
-/// Looks for common rootfs image extensions.
-fn find_rootfs_image(dir: &Path) -> Result<PathBuf> {
-    let candidates = [
-        "rootfs.squashfs",
-        "rootfs.erofs",
-        "rootfs.img",
-        "rootfs.ext4",
-    ];
-    for name in &candidates {
-        let path = dir.join(name);
-        if path.exists() {
-            return Ok(path);
-        }
+fn load_state(state_file: &Path) -> UpdateStateFile {
+    load_json_or_default(state_file)
+}
+
+fn save_state(state: &UpdateStateFile, state_file: &Path) -> Result<()> {
+    write_json_atomic(state_file, state)
+}
+
+fn append_log(state: &mut UpdateStateFile, entry: UpdateLogEntry) {
+    const MAX_LOG_ENTRIES: usize = 500;
+    state.operation_logs.push(entry);
+    if state.operation_logs.len() > MAX_LOG_ENTRIES {
+        let drain_count = state.operation_logs.len() - MAX_LOG_ENTRIES;
+        state.operation_logs.drain(0..drain_count);
     }
-    // Fallback: find any file with a known image extension
-    for entry in fs::read_dir(dir)
-        .with_context(|| format!("failed to read staging dir {}", dir.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            if matches!(ext, "squashfs" | "erofs" | "img" | "ext4") {
-                return Ok(path);
+}
+
+fn log_entry(
+    operation: &str,
+    level: &str,
+    message: String,
+    component: Option<&str>,
+) -> UpdateLogEntry {
+    UpdateLogEntry {
+        timestamp: Utc::now().to_rfc3339(),
+        operation: operation.to_string(),
+        level: level.to_string(),
+        message: component_log_message(message, component),
+        component: component.map(|c| c.to_string()),
+        from_version: None,
+        to_version: None,
+    }
+}
+
+fn log_entry_with_versions(
+    operation: &str,
+    level: &str,
+    message: String,
+    component: Option<&str>,
+    from_version: Option<String>,
+    to_version: Option<String>,
+) -> UpdateLogEntry {
+    UpdateLogEntry {
+        timestamp: Utc::now().to_rfc3339(),
+        operation: operation.to_string(),
+        level: level.to_string(),
+        message: component_log_message(message, component),
+        component: component.map(|c| c.to_string()),
+        from_version,
+        to_version,
+    }
+}
+
+fn write_progress(
+    update_state: &mut UpdateStateFile,
+    state_file: &Path,
+    progress: UpdateOperationProgress,
+) {
+    update_state.progress = Some(progress);
+    let _ = save_state(update_state, state_file);
+}
+
+fn clear_progress(update_state: &mut UpdateStateFile, state_file: &Path) {
+    update_state.progress = None;
+    let _ = save_state(update_state, state_file);
+}
+
+fn make_progress(
+    operation: &str,
+    phase: &str,
+    status: &str,
+    message: &str,
+    component: Option<&str>,
+    percent: Option<u8>,
+) -> UpdateOperationProgress {
+    let now = Utc::now().to_rfc3339();
+    UpdateOperationProgress {
+        operation: operation.to_string(),
+        phase: phase.to_string(),
+        status: status.to_string(),
+        message: component_log_message(message.to_string(), component),
+        component: component.map(|c| c.to_string()),
+        percent,
+        bytes_downloaded: None,
+        bytes_total: None,
+        started_at: now.clone(),
+        updated_at: now,
+        completed_at: None,
+    }
+}
+
+// ============================================================================
+// Public API
+// ============================================================================
+
+pub async fn get_update_status(state: &AppState) -> UpdatesStatus {
+    let settings = load_settings(state);
+    let state_file = state_path(state);
+    let update_state = load_state(&state_file);
+    build_status(settings, &update_state).await
+}
+
+async fn build_status(settings: UpdateSettings, update_state: &UpdateStateFile) -> UpdatesStatus {
+    let components = build_component_statuses(&settings, update_state).await;
+    let available_update_count = components.iter().filter(|c| c.update_available).count();
+    UpdatesStatus {
+        settings,
+        last_checked_at: update_state.last_checked_at.clone(),
+        last_applied_at: update_state.last_applied_at.clone(),
+        pending_reboot: update_state.pending_reboot,
+        pending_appliance_rebuild: update_state.pending_appliance_rebuild,
+        appliance_rebuild_reason: update_state.appliance_rebuild_reason.clone(),
+        appliance_rebuild_marked_at: update_state.appliance_rebuild_marked_at.clone(),
+        components,
+        available_update_count: Some(available_update_count),
+        operation_logs: update_state.operation_logs.clone(),
+        progress: update_state.progress.clone(),
+    }
+}
+
+async fn build_component_statuses(
+    settings: &UpdateSettings,
+    update_state: &UpdateStateFile,
+) -> Vec<ComponentUpdateStatus> {
+    let mut statuses = Vec::new();
+    for component in ALL_REPO_COMPONENTS {
+        let saved = find_component_state(update_state, component);
+        statuses.push(build_component_status(settings, component, saved).await);
+    }
+    statuses
+}
+
+async fn build_component_status(
+    settings: &UpdateSettings,
+    component: RepoComponent,
+    saved: Option<&ComponentState>,
+) -> ComponentUpdateStatus {
+    let (repo_path, _url, branch) = component_config(settings, component);
+    let repo_path = PathBuf::from(&repo_path);
+    let valid_repo = is_valid_git_repo(&repo_path).await;
+    let dirty_worktree = if valid_repo {
+        is_worktree_dirty(&repo_path).await.unwrap_or(false)
+    } else {
+        false
+    };
+    let current_commit = if valid_repo {
+        get_current_commit(&repo_path).await.ok()
+    } else {
+        None
+    };
+    let remote_commit = if valid_repo {
+        get_remote_commit(&repo_path, &branch).await.ok()
+    } else {
+        None
+    };
+
+    let current_version = saved.and_then(|s| s.current_version.clone());
+    let remote_version = saved.and_then(|s| s.remote_version.clone());
+    let update_available = match (&current_version, &remote_version) {
+        (Some(cur), Some(rem)) => cur != rem,
+        _ => match (&current_commit, &remote_commit) {
+            (Some(cur), Some(rem)) => cur != rem,
+            _ => false,
+        },
+    };
+
+    ComponentUpdateStatus {
+        component: component.as_str().to_string(),
+        repo_path: repo_path.to_string_lossy().into_owned(),
+        branch,
+        valid_repo,
+        dirty_worktree,
+        current_commit,
+        remote_commit,
+        current_version,
+        remote_version,
+        update_available,
+        rollback_commit: saved.and_then(|s| s.rollback_commit.clone()),
+        rollback_version: saved.and_then(|s| s.rollback_version.clone()),
+        last_applied_commit: saved.and_then(|s| s.last_applied_commit.clone()),
+        last_applied_version: saved.and_then(|s| s.last_applied_version.clone()),
+        last_error: saved.and_then(|s| s.last_error.clone()),
+    }
+}
+
+pub async fn check_for_updates(state: &AppState) -> Result<UpdatesActionResult> {
+    let _guard = op_lock().lock().await;
+    let settings = load_settings(state);
+    let state_file = state_path(state);
+    let mut update_state = load_state(&state_file);
+
+    write_progress(
+        &mut update_state,
+        &state_file,
+        make_progress("check", "fetching", "running", "Fetching updates…", None, None),
+    );
+
+    let mut details = Vec::new();
+    let mut any_error = false;
+
+    for component in ALL_REPO_COMPONENTS {
+        let (repo_path, url, branch) = component_config(&settings, component);
+        let repo_path = PathBuf::from(&repo_path);
+        let comp_str = component.as_str();
+
+        if !is_valid_git_repo(&repo_path).await {
+            if settings.bootstrap_missing_rootfs_repo
+                || !matches!(component, RepoComponent::Rootfs)
+            {
+                match clone_repo(&url, &repo_path, &branch).await {
+                    Ok(()) => {
+                        details.push(format!(
+                            "[{}] Cloned repository from {}",
+                            component.display_name(),
+                            url
+                        ));
+                    }
+                    Err(e) => {
+                        let msg = format!(
+                            "[{}] Failed to clone repository: {}",
+                            component.display_name(),
+                            e
+                        );
+                        details.push(msg.clone());
+                        append_log(
+                            &mut update_state,
+                            log_entry("check", "error", msg, Some(comp_str)),
+                        );
+                        any_error = true;
+                        continue;
+                    }
+                }
+            } else {
+                details.push(format!(
+                    "[{}] Repository not found at {}, skipping",
+                    component.display_name(),
+                    repo_path.display()
+                ));
+                continue;
+            }
+        }
+
+        match fetch_remote(&repo_path).await {
+            Ok(()) => {}
+            Err(e) => {
+                let msg = format!(
+                    "[{}] Failed to fetch updates: {}",
+                    component.display_name(),
+                    e
+                );
+                details.push(msg.clone());
+                append_log(
+                    &mut update_state,
+                    log_entry("check", "error", msg, Some(comp_str)),
+                );
+                any_error = true;
+                continue;
+            }
+        }
+
+        let current = get_current_commit(&repo_path).await.ok();
+        let remote = get_remote_commit(&repo_path, &branch).await.ok();
+        let update_available = match (&current, &remote) {
+            (Some(c), Some(r)) => c != r,
+            _ => false,
+        };
+
+        let comp_state = ensure_component_state(&mut update_state, component);
+        comp_state.last_error = None;
+        if update_available {
+            let msg = format!(
+                "[{}] Update available: {} -> {}",
+                component.display_name(),
+                current.as_deref().unwrap_or("unknown"),
+                remote.as_deref().unwrap_or("unknown")
+            );
+            details.push(msg.clone());
+            append_log(
+                &mut update_state,
+                log_entry("check", "info", msg, Some(comp_str)),
+            );
+        } else {
+            let msg = format!("[{}] Already up to date", component.display_name());
+            details.push(msg.clone());
+            append_log(
+                &mut update_state,
+                log_entry("check", "info", msg, Some(comp_str)),
+            );
+        }
+        comp_state.update_available = update_available;
+    }
+
+    update_state.last_checked_at = Some(Utc::now().to_rfc3339());
+    clear_progress(&mut update_state, &state_file);
+    save_state(&update_state, &state_file)?;
+
+    let status = build_status(settings, &update_state).await;
+    Ok(UpdatesActionResult {
+        operation: "check".to_string(),
+        success: !any_error,
+        message: if any_error {
+            "Check completed with errors".to_string()
+        } else {
+            "Check completed successfully".to_string()
+        },
+        details,
+        status,
+    })
+}
+
+pub async fn apply_updates(
+    state: &AppState,
+    component: UpdateComponent,
+) -> Result<UpdatesActionResult> {
+    let _guard = op_lock().lock().await;
+    let settings = load_settings(state);
+    let state_file = state_path(state);
+    let mut update_state = load_state(&state_file);
+
+    let selected_components = RepoComponent::from_update_component(component);
+    ensure_registry_updatable_selection(&selected_components)?;
+    let comp_label = component_log_display_value(&selected_components);
+
+    write_progress(
+        &mut update_state,
+        &state_file,
+        make_progress(
+            "apply",
+            "preparing",
+            "running",
+            "Preparing to apply updates…",
+            None,
+            None,
+        ),
+    );
+
+    let mut details = Vec::new();
+    let mut any_error = false;
+
+    for repo_component in selected_components {
+        let (repo_path, _url, branch) = component_config(&settings, repo_component);
+        let repo_path = PathBuf::from(&repo_path);
+        let comp_str = repo_component.as_str();
+
+        if !is_valid_git_repo(&repo_path).await {
+            let msg = format!(
+                "[{}] Repository not found at {}; run check first",
+                repo_component.display_name(),
+                repo_path.display()
+            );
+            details.push(msg.clone());
+            append_log(
+                &mut update_state,
+                log_entry("apply", "error", msg, Some(comp_str)),
+            );
+            any_error = true;
+            continue;
+        }
+
+        let current_commit = match get_current_commit(&repo_path).await {
+            Ok(c) => c,
+            Err(e) => {
+                let msg = format!(
+                    "[{}] Failed to get current commit: {}",
+                    repo_component.display_name(),
+                    e
+                );
+                details.push(msg.clone());
+                append_log(
+                    &mut update_state,
+                    log_entry("apply", "error", msg, Some(comp_str)),
+                );
+                any_error = true;
+                continue;
+            }
+        };
+
+        let remote_commit = match get_remote_commit(&repo_path, &branch).await {
+            Ok(c) => c,
+            Err(e) => {
+                let msg = format!(
+                    "[{}] Failed to get remote commit: {}",
+                    repo_component.display_name(),
+                    e
+                );
+                details.push(msg.clone());
+                append_log(
+                    &mut update_state,
+                    log_entry("apply", "error", msg, Some(comp_str)),
+                );
+                any_error = true;
+                continue;
+            }
+        };
+
+        if current_commit == remote_commit {
+            let msg = format!("[{}] Already up to date", repo_component.display_name());
+            details.push(msg.clone());
+            append_log(
+                &mut update_state,
+                log_entry("apply", "info", msg, Some(comp_str)),
+            );
+            continue;
+        }
+
+        if settings.require_signed_commits {
+            match is_commit_signed(&repo_path, &remote_commit).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    let msg = format!(
+                        "[{}] Remote commit {} is not signed; aborting",
+                        repo_component.display_name(),
+                        &remote_commit[..8]
+                    );
+                    details.push(msg.clone());
+                    append_log(
+                        &mut update_state,
+                        log_entry("apply", "error", msg, Some(comp_str)),
+                    );
+                    any_error = true;
+                    continue;
+                }
+                Err(e) => {
+                    let msg = format!(
+                        "[{}] Failed to verify commit signature: {}",
+                        repo_component.display_name(),
+                        e
+                    );
+                    details.push(msg.clone());
+                    append_log(
+                        &mut update_state,
+                        log_entry("apply", "error", msg, Some(comp_str)),
+                    );
+                    any_error = true;
+                    continue;
+                }
+            }
+        }
+
+        // Snapshot rollback state before applying
+        if let Err(e) = snapshot_runtime_for_rollback(repo_component) {
+            let msg = format!(
+                "[{}] Failed to snapshot rollback state: {}",
+                repo_component.display_name(),
+                e
+            );
+            details.push(msg.clone());
+            append_log(
+                &mut update_state,
+                log_entry("apply", "warn", msg, Some(comp_str)),
+            );
+        }
+
+        let comp_state = ensure_component_state(&mut update_state, repo_component);
+        comp_state.rollback_commit = Some(current_commit.clone());
+
+        match reset_hard_to_remote(&repo_path, &branch).await {
+            Ok(()) => {
+                let comp_state = ensure_component_state(&mut update_state, repo_component);
+                comp_state.last_applied_commit = Some(remote_commit.clone());
+                comp_state.deployed_commit = Some(remote_commit.clone());
+                comp_state.last_error = None;
+                comp_state.update_available = false;
+
+                let msg = format!(
+                    "[{}] Updated: {} -> {}",
+                    repo_component.display_name(),
+                    &current_commit[..8],
+                    &remote_commit[..8]
+                );
+                details.push(msg.clone());
+                append_log(
+                    &mut update_state,
+                    log_entry("apply", "info", msg, Some(comp_str)),
+                );
+
+                if settings.deploy_runtime_after_apply
+                    && component_supports_runtime_deploy(repo_component)
+                {
+                    // Deploy logic would go here for runtime artifacts
+                }
+            }
+            Err(e) => {
+                let comp_state = ensure_component_state(&mut update_state, repo_component);
+                comp_state.last_error = Some(e.to_string());
+
+                let msg = format!(
+                    "[{}] Failed to apply update: {}",
+                    repo_component.display_name(),
+                    e
+                );
+                details.push(msg.clone());
+                append_log(
+                    &mut update_state,
+                    log_entry("apply", "error", msg, Some(comp_str)),
+                );
+                any_error = true;
             }
         }
     }
-    anyhow::bail!(
-        "no rootfs image found in artifact (expected rootfs.squashfs, rootfs.erofs, or rootfs.img)"
-    )
+
+    update_state.last_applied_at = Some(Utc::now().to_rfc3339());
+    clear_progress(&mut update_state, &state_file);
+    save_state(&update_state, &state_file)?;
+
+    let status = build_status(settings, &update_state).await;
+    Ok(UpdatesActionResult {
+        operation: "apply".to_string(),
+        success: !any_error,
+        message: if any_error {
+            format!("Apply [{comp_label}] completed with errors")
+        } else {
+            format!("Apply [{comp_label}] completed successfully")
+        },
+        details,
+        status,
+    })
 }
 
-/// Compute a hex-encoded SHA-256 digest of a file.
+pub async fn rollback_updates(
+    state: &AppState,
+    component: UpdateComponent,
+) -> Result<UpdatesActionResult> {
+    let _guard = op_lock().lock().await;
+    let settings = load_settings(state);
+    let state_file = state_path(state);
+    let mut update_state = load_state(&state_file);
+    let selected_components = RepoComponent::from_update_component(component);
+    let comp_label = component_log_display_value(&selected_components);
+
+    let mut details = Vec::new();
+    let mut any_error = false;
+
+    for repo_component in selected_components {
+        let (repo_path, _url, _branch) = component_config(&settings, repo_component);
+        let repo_path = PathBuf::from(&repo_path);
+        let comp_str = repo_component.as_str();
+
+        let saved = find_component_state(&update_state, repo_component);
+        let rollback_commit = match saved.and_then(|s| s.rollback_commit.clone()) {
+            Some(c) => c,
+            None => {
+                let msg = format!(
+                    "[{}] No rollback commit recorded",
+                    repo_component.display_name()
+                );
+                details.push(msg.clone());
+                append_log(
+                    &mut update_state,
+                    log_entry("rollback", "error", msg, Some(comp_str)),
+                );
+                any_error = true;
+                continue;
+            }
+        };
+
+        match reset_hard_to_remote_ref(&repo_path, &rollback_commit).await {
+            Ok(()) => {
+                let comp_state = ensure_component_state(&mut update_state, repo_component);
+                let prev = comp_state.last_applied_commit.clone();
+                comp_state.deployed_commit = Some(rollback_commit.clone());
+                comp_state.last_applied_commit = Some(rollback_commit.clone());
+                comp_state.rollback_commit = prev;
+                comp_state.last_error = None;
+
+                // Restore runtime snapshot
+                if let Err(e) = restore_runtime_from_snapshot(repo_component) {
+                    let msg = format!(
+                        "[{}] Failed to restore runtime snapshot: {}",
+                        repo_component.display_name(),
+                        e
+                    );
+                    details.push(msg.clone());
+                    append_log(
+                        &mut update_state,
+                        log_entry("rollback", "warn", msg, Some(comp_str)),
+                    );
+                }
+
+                let msg = format!(
+                    "[{}] Rolled back to {}",
+                    repo_component.display_name(),
+                    &rollback_commit[..8]
+                );
+                details.push(msg.clone());
+                append_log(
+                    &mut update_state,
+                    log_entry("rollback", "info", msg, Some(comp_str)),
+                );
+            }
+            Err(e) => {
+                let comp_state = ensure_component_state(&mut update_state, repo_component);
+                comp_state.last_error = Some(e.to_string());
+
+                let msg = format!(
+                    "[{}] Rollback failed: {}",
+                    repo_component.display_name(),
+                    e
+                );
+                details.push(msg.clone());
+                append_log(
+                    &mut update_state,
+                    log_entry("rollback", "error", msg, Some(comp_str)),
+                );
+                any_error = true;
+            }
+        }
+    }
+
+    save_state(&update_state, &state_file)?;
+    let status = build_status(settings, &update_state).await;
+    Ok(UpdatesActionResult {
+        operation: "rollback".to_string(),
+        success: !any_error,
+        message: if any_error {
+            format!("Rollback [{comp_label}] completed with errors")
+        } else {
+            format!("Rollback [{comp_label}] completed successfully")
+        },
+        details,
+        status,
+    })
+}
+
+async fn reset_hard_to_remote_ref(repo_path: &Path, commit: &str) -> Result<()> {
+    let output = run_git_command(&["reset", "--hard", commit], repo_path).await?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git reset --hard {} failed: {}",
+            commit,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+pub fn get_update_logs(state: &AppState) -> Vec<UpdateLogEntry> {
+    let state_file = state_path(state);
+    let update_state = load_state(&state_file);
+    update_state.operation_logs
+}
+
+pub fn clear_update_logs(state: &AppState) -> Result<()> {
+    let state_file = state_path(state);
+    let mut update_state = load_state(&state_file);
+    update_state.operation_logs.clear();
+    save_state(&update_state, &state_file)
+}
+
+// ============================================================================
+// Registry-based update flow (new)
+// ============================================================================
+
+/// Download an artifact from a URL into a local staging directory.
+/// Returns the path to the downloaded file.
+async fn download_artifact(url: &str, staging_dir: &Path) -> Result<PathBuf> {
+    let client = build_http_client()?;
+
+    // Extract filename from URL
+    let filename = url
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("cannot derive filename from URL: {}", url))?;
+
+    fs::create_dir_all(staging_dir).with_context(|| {
+        format!("failed to create staging directory {}", staging_dir.display())
+    })?;
+
+    let dest_path = staging_dir.join(filename);
+
+    info!("Downloading artifact {} -> {}", url, dest_path.display());
+
+    let response = client
+        .get(url)
+        .header(USER_AGENT, UPDATE_HTTP_USER_AGENT)
+        .send()
+        .await
+        .with_context(|| format!("failed to fetch artifact from {}", url))?;
+
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "artifact download {} returned HTTP {}",
+            url,
+            response.status()
+        );
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .with_context(|| format!("failed to read artifact bytes from {}", url))?;
+
+    fs::write(&dest_path, &bytes)
+        .with_context(|| format!("failed to write artifact to {}", dest_path.display()))?;
+
+    Ok(dest_path)
+}
+
+/// Apply a downloaded artifact for a given component.
+/// For core/ui: installs to the runtime paths.
+/// For rootfs: stages for next-boot activation.
+fn apply_downloaded_artifact(artifact_path: &Path, component: RepoComponent) -> Result<()> {
+    deploy_artifact(artifact_path, component)
+}
+
+fn is_artifact_version(version: &str) -> bool {
+    let mut segment_count = 0;
+    for segment in version.split('.') {
+        if segment.is_empty() || !segment.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        segment_count += 1;
+    }
+
+    segment_count >= 2 && segment_count <= 4
+}
+
+fn artifact_version_segments(version: &str) -> Option<Vec<u64>> {
+    if !is_artifact_version(version) {
+        return None;
+    }
+    version
+        .split('.')
+        .map(|s| s.parse::<u64>().ok())
+        .collect::<Option<Vec<_>>>()
+}
+
+fn is_newer_artifact_version(current: &str, remote: &str) -> bool {
+    let Some((current_segments, remote_segments)) = artifact_version_segments(current)
+        .zip(artifact_version_segments(remote))
+    else {
+        return current != remote;
+    };
+
+    let segment_count = current_segments.len().max(remote_segments.len());
+    for idx in 0..segment_count {
+        let current_segment = current_segments.get(idx).copied().unwrap_or(0);
+        let remote_segment = remote_segments.get(idx).copied().unwrap_or(0);
+        if remote_segment > current_segment {
+            return true;
+        }
+        if remote_segment < current_segment {
+            return false;
+        }
+    }
+    false
+}
+
+/// Fetch the registry manifest from the given URL.
+/// Handles GitHub Releases API responses directly.
+async fn fetch_registry_manifest(
+    registry_url: &str,
+    update_state: &mut UpdateStateFile,
+) -> Result<RegistryManifest> {
+    let client = build_http_client()?;
+
+    // Check if the URL points to a GitHub Releases API endpoint
+    // (e.g. https://api.github.com/repos/{owner}/{repo})
+    if let Some(api_base) = github_repo_api_url(registry_url) {
+        return fetch_github_releases_manifest(&client, &api_base, update_state).await;
+    }
+
+    // Fall back to fetching a plain JSON manifest
+    let response = client
+        .get(registry_url)
+        .header(USER_AGENT, UPDATE_HTTP_USER_AGENT)
+        .header(ACCEPT, "application/json")
+        .send()
+        .await
+        .with_context(|| format!("failed to fetch registry manifest from {}", registry_url))?;
+
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "registry manifest fetch {} returned HTTP {}",
+            registry_url,
+            response.status()
+        );
+    }
+
+    let manifest: RegistryManifest = response
+        .json()
+        .await
+        .with_context(|| format!("failed to parse registry manifest from {}", registry_url))?;
+
+    Ok(manifest)
+}
+
+/// Build a `RegistryManifest` from the GitHub Releases API for the given repo.
+/// Fetches the latest release and maps assets to `ArtifactMetadata` entries.
+async fn fetch_github_releases_manifest(
+    client: &reqwest::Client,
+    api_base: &str,
+    update_state: &mut UpdateStateFile,
+) -> Result<RegistryManifest> {
+    let releases_url = format!("{api_base}/releases");
+
+    // Build request with conditional ETag header if we have a cached response.
+    let cached = update_state
+        .release_etag_cache
+        .get(&releases_url)
+        .cloned();
+    let mut req = client
+        .get(&releases_url)
+        .header(USER_AGENT, UPDATE_HTTP_USER_AGENT)
+        .header(ACCEPT, "application/vnd.github+json");
+    if let Some((ref etag, _)) = cached {
+        req = req.header(
+            HeaderName::from_static("if-none-match"),
+            HeaderValue::from_str(etag).unwrap_or_else(|_| HeaderValue::from_static("")),
+        );
+    }
+    let response = req
+        .send()
+        .await
+        .with_context(|| format!("failed to fetch GitHub releases from {}", releases_url))?;
+
+    let status = response.status();
+    if status == reqwest::StatusCode::NOT_MODIFIED {
+        // Use the cached response body.
+        if let Some((_, ref body)) = cached {
+            let releases: Vec<GitHubRelease> = serde_json::from_str(body)
+                .context("failed to parse cached GitHub releases response")?;
+            return github_releases_to_manifest(releases, api_base);
+        }
+    }
+
+    if !status.is_success() {
+        anyhow::bail!(
+            "GitHub releases fetch {} returned HTTP {}",
+            releases_url,
+            status
+        );
+    }
+
+    // Extract ETag for next time.
+    let new_etag = response
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let body = response
+        .text()
+        .await
+        .with_context(|| format!("failed to read GitHub releases body from {}", releases_url))?;
+
+    // Cache the response body alongside the new ETag (if any).
+    if let Some(etag) = new_etag {
+        update_state
+            .release_etag_cache
+            .insert(releases_url.clone(), (etag, body.clone()));
+    }
+
+    let releases: Vec<GitHubRelease> =
+        serde_json::from_str(&body).context("failed to parse GitHub releases response")?;
+
+    github_releases_to_manifest(releases, api_base)
+}
+
+fn github_releases_to_manifest(
+    releases: Vec<GitHubRelease>,
+    api_base: &str,
+) -> Result<RegistryManifest> {
+    // Use the latest release (first in the list, newest by GitHub convention).
+    let latest = releases
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no releases found in GitHub releases response"))?;
+
+    let tag = latest.tag_name.trim_start_matches('v').to_string();
+    let source_repo = github_repo_slug(api_base).map(|s| format!("https://github.com/{s}"));
+    let source_release_url = latest.html_url.clone();
+
+    // Map each well-known asset to a component.
+    let known_components = ["core", "ui", "rootfs"];
+    let mut components: Vec<ArtifactMetadata> = Vec::new();
+
+    for component_name in &known_components {
+        // Find the main artifact asset (e.g. core-v1.2.3.tar.zst)
+        let artifact_asset = latest.assets.iter().find(|a| {
+            let name = a.name.to_lowercase();
+            name.starts_with(component_name)
+                && !name.ends_with(".sha256")
+                && !name.ends_with(".sig")
+        });
+
+        let Some(asset) = artifact_asset else {
+            continue;
+        };
+
+        // Find checksum asset (e.g. core-v1.2.3.tar.zst.sha256)
+        let checksum_asset = latest.assets.iter().find(|a| {
+            a.name
+                .to_lowercase()
+                .starts_with(component_name)
+                && a.name.ends_with(".sha256")
+        });
+
+        // Find signature asset (e.g. core-v1.2.3.tar.zst.sig)
+        let sig_asset = latest.assets.iter().find(|a| {
+            a.name
+                .to_lowercase()
+                .starts_with(component_name)
+                && a.name.ends_with(".sig")
+        });
+
+        // Fetch the checksum content (it's a small text file).
+        // We defer the actual fetch to apply time — store the URL here and
+        // resolve during apply.  For now, store the URL as a placeholder.
+        let checksum_sha256 = checksum_asset
+            .map(|a| a.browser_download_url.clone())
+            .unwrap_or_default();
+
+        let version = extract_asset_version(&asset.name, component_name).unwrap_or_else(|| tag.clone());
+
+        components.push(ArtifactMetadata {
+            component: component_name.to_string(),
+            version,
+            download_url: asset.browser_download_url.clone(),
+            checksum_sha256,
+            signature_url: sig_asset.map(|a| a.browser_download_url.clone()),
+            source_repo: source_repo.clone(),
+            source_tag: Some(latest.tag_name.clone()),
+            source_release_url: source_release_url.clone(),
+        });
+    }
+
+    Ok(RegistryManifest {
+        components,
+        generated_at: latest.created_at.clone(),
+        partial: true,
+    })
+}
+
+fn extract_asset_version<'a>(asset_name: &'a str, component: &str) -> Option<String> {
+    // Asset names follow the pattern: {component}-v{version}.{ext}
+    // e.g. core-v1.2.3.tar.zst
+    let stripped = asset_name
+        .strip_prefix(component)?
+        .strip_prefix('-')?
+        .strip_prefix('v');
+
+    let version = stripped.unwrap_or_else(|| {
+        asset_name
+            .strip_prefix(component)
+            .and_then(|s| s.strip_prefix('-'))
+            .unwrap_or(asset_name)
+    });
+
+    // Strip known archive suffixes to isolate the version string.
+    let version = [".tar.zst", ".tar.gz", ".tar.bz2", ".tar.xz", ".squashfs"]
+        .iter()
+        .fold(version, |v, ext| v.strip_suffix(ext).unwrap_or(v));
+
+    // For rootfs assets the suffix may be: rootfs-v1.2.3.squashfs or
+    // rootfs-1.2.3.squashfs — handle the case where the component name is
+    // embedded differently.
+    let version = if version.contains(component) {
+        version
+            .split(component)
+            .last()
+            .map(|s| s.trim_start_matches(['-', '_', 'v']))
+            .filter(|s| !s.is_empty())
+            .unwrap_or(version)
+    } else {
+        version
+    };
+
+    // Validate it looks like a version number.
+    let version = version.trim_start_matches('v');
+    if is_artifact_version(version) {
+        Some(version.to_string())
+    } else {
+        None
+    }
+}
+
+fn rootfs_staged_version(staging_dir: &Path) -> Option<String> {
+    let entries = std::fs::read_dir(staging_dir).ok()?;
+    entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            if name.starts_with("rootfs") && name.ends_with(".squashfs") {
+                extract_asset_version(&name, "rootfs")
+            } else {
+                None
+            }
+        })
+        .filter(|v| is_artifact_version(v))?;
+    Some(version.to_string())
+}
+
+async fn resolve_checksum_url(checksum_url: &str) -> Result<String> {
+    // The checksum file contains the hex SHA-256 digest, possibly followed by
+    // a filename, in the style of `sha256sum` output.  We want only the hex
+    // digest (the first whitespace-separated token on the first non-empty line).
+    let client = build_http_client()?;
+    let response = client
+        .get(checksum_url)
+        .header(USER_AGENT, UPDATE_HTTP_USER_AGENT)
+        .send()
+        .await
+        .with_context(|| format!("failed to fetch checksum from {}", checksum_url))?;
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "checksum fetch {} returned HTTP {}",
+            checksum_url,
+            response.status()
+        );
+    }
+    let body = response
+        .text()
+        .await
+        .with_context(|| format!("failed to read checksum body from {}", checksum_url))?;
+    body.lines()
+        .find(|l| !l.trim().is_empty())
+        .and_then(|l| l.split_whitespace().next())
+        .map(|s| s.to_lowercase())
+        .ok_or_else(|| anyhow::anyhow!("checksum file {} is empty or malformed", checksum_url))
+}
+
 fn compute_file_sha256(path: &Path) -> Result<String> {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -1188,166 +2228,487 @@ pub fn save_settings(state: &AppState, settings: &UpdateSettings) -> Result<()> 
     let mut value = settings.clone();
     value.auto_check_time = normalize_auto_check_time(&value.auto_check_time);
     value.auto_check_month_days = normalize_auto_check_month_days(value.auto_check_month_days);
-    if value.core_branch.trim().is_empty() {
-        value.core_branch = default_branch();
-    }
-    if value.ui_branch.trim().is_empty() {
-        value.ui_branch = default_branch();
-    }
-    if value.rootfs_branch.trim().is_empty() {
-        value.rootfs_branch = default_branch();
-    }
-    if value.trusted_signers_file.trim().is_empty() {
-        value.trusted_signers_file = default_trusted_signers_file();
-    }
     write_json_atomic(&settings_path(state), &value)
 }
 
-fn load_state(state: &AppState) -> UpdateStateFile {
-    load_json_or_default(&state_path(state))
+/// Periodic auto-check scheduler
+pub async fn run_auto_check_scheduler(state: &AppState) -> Result<()> {
+    let settings = load_settings(state);
+    if !settings.auto_check_enabled {
+        return Ok(());
+    }
+
+    let state_file = state_path(state);
+    let update_state = load_state(&state_file);
+
+    let now = Local::now();
+
+    // Parse the scheduled time
+    let scheduled_time = parse_auto_check_time(&settings.auto_check_time)
+        .unwrap_or_else(|| NaiveTime::from_hms_opt(3, 0, 0).unwrap());
+
+    // Check if we should run now based on frequency
+    let should_run = match settings.auto_check_frequency {
+        UpdateAutoCheckFrequency::Daily => {
+            // Run if we haven't run today yet and current time is past scheduled time
+            let today = now.date_naive();
+            let already_ran_today = update_state
+                .last_auto_check_run
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.date_naive() == today)
+                .unwrap_or(false);
+            !already_ran_today && now.time() >= scheduled_time
+        }
+        UpdateAutoCheckFrequency::Weekly => {
+            let this_week_monday = {
+                let days_from_monday =
+                    now.weekday().num_days_from_monday() as i64;
+                now.date_naive() - ChronoDuration::days(days_from_monday)
+            };
+            let already_ran_this_week = update_state
+                .last_auto_check_run
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| {
+                    let run_date = dt.date_naive();
+                    let days_from_monday =
+                        run_date.weekday().num_days_from_monday() as i64;
+                    run_date - ChronoDuration::days(days_from_monday) == this_week_monday
+                })
+                .unwrap_or(false);
+            let is_scheduled_weekday = settings.auto_check_weekday.matches(now.weekday());
+            !already_ran_this_week && is_scheduled_weekday && now.time() >= scheduled_time
+        }
+        UpdateAutoCheckFrequency::Monthly => {
+            let this_month_year = (now.year(), now.month());
+            let already_ran_this_month = update_state
+                .last_auto_check_run
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| (dt.year(), dt.month()) == this_month_year)
+                .unwrap_or(false);
+
+            let is_scheduled_day = settings.auto_check_month_days.iter().any(|&d| {
+                if d == 31 {
+                    // "last day of month"
+                    last_day_of_month(now.year(), now.month())
+                        .map(|last| now.day() == last)
+                        .unwrap_or(false)
+                } else {
+                    now.day() == d as u32
+                }
+            });
+            !already_ran_this_month && is_scheduled_day && now.time() >= scheduled_time
+        }
+    };
+
+    if !should_run {
+        return Ok(());
+    }
+
+    info!("Auto-check scheduler: running scheduled update check");
+    check_for_updates(state).await?;
+
+    // Update last_auto_check_run
+    let state_file = state_path(state);
+    let mut update_state = load_state(&state_file);
+    update_state.last_auto_check_run = Some(Utc::now().to_rfc3339());
+    save_state(&update_state, &state_file)?;
+
+    Ok(())
 }
 
-fn save_state(state: &AppState, value: &UpdateStateFile) -> Result<()> {
-    write_json_atomic(&state_path(state), value)
-}
+// ============================================================================
+// Registry-based check/apply flow
+// ============================================================================
 
-fn append_operation_log(
-    state_file: &mut UpdateStateFile,
-    operation: &str,
-    level: &str,
-    message: impl Into<String>,
-    component: Option<&str>,
-) {
-    append_operation_log_with_versions(
-        state_file, operation, level, message, component, None, None,
+pub async fn registry_check_for_updates(state: &AppState) -> Result<UpdatesActionResult> {
+    let _guard = op_lock().lock().await;
+    let settings = load_settings(state);
+    let state_file = state_path(state);
+    let mut update_state = load_state(&state_file);
+
+    write_progress(
+        &mut update_state,
+        &state_file,
+        make_progress(
+            "registry_check",
+            "fetching",
+            "running",
+            "Fetching artifact registry manifest…",
+            None,
+            None,
+        ),
     );
-}
 
-fn append_operation_log_with_versions(
-    state_file: &mut UpdateStateFile,
-    operation: &str,
-    level: &str,
-    message: impl Into<String>,
-    component: Option<&str>,
-    from_version: Option<&str>,
-    to_version: Option<&str>,
-) {
-    let message_str = component_log_message(message.into(), component);
+    let manifest = match fetch_registry_manifest(&settings.registry_url, &mut update_state).await {
+        Ok(m) => m,
+        Err(e) => {
+            let msg = format!("Failed to fetch registry manifest: {e}");
+            append_log(
+                &mut update_state,
+                log_entry("registry_check", "error", msg.clone(), None),
+            );
+            clear_progress(&mut update_state, &state_file);
+            save_state(&update_state, &state_file)?;
+            anyhow::bail!(msg);
+        }
+    };
 
-    // Publish to live logs so update actions appear in the Logs / Live Logs view.
-    crate::live_logs::ui::publish(crate::live_logs::LogEvent::UpdateEvent {
-        timestamp: Utc::now().to_rfc3339(),
-        operation: operation.to_string(),
-        level: level.to_string(),
-        message: message_str.clone(),
-        component: component.map(|s| s.to_string()),
-    });
+    let mut details = Vec::new();
 
-    state_file.operation_logs.push(UpdateLogEntry {
-        timestamp: Utc::now().to_rfc3339(),
-        operation: operation.to_string(),
-        level: level.to_string(),
-        message: message_str,
-        component: component.map(|v| v.to_string()),
-        from_version: from_version.map(|v| v.to_string()),
-        to_version: to_version.map(|v| v.to_string()),
-    });
+    for artifact in &manifest.components {
+        let component = match artifact.component.as_str() {
+            "core" => RepoComponent::Core,
+            "ui" => RepoComponent::Ui,
+            "rootfs" => RepoComponent::Rootfs,
+            other => {
+                details.push(format!("Unknown component in manifest: {other}"));
+                continue;
+            }
+        };
+        let comp_str = component.as_str();
 
-    const MAX_LOG_ENTRIES: usize = 250;
-    if state_file.operation_logs.len() > MAX_LOG_ENTRIES {
-        let drop_count = state_file.operation_logs.len() - MAX_LOG_ENTRIES;
-        state_file.operation_logs.drain(0..drop_count);
+        let comp_state = ensure_component_state(&mut update_state, component);
+        comp_state.remote_version = Some(artifact.version.clone());
+
+        // Determine current installed version
+        let current_version = comp_state
+            .current_version
+            .clone()
+            .or_else(|| comp_state.last_applied_version.clone())
+            .unwrap_or_else(built_appliance_version);
+
+        let update_available = is_newer_artifact_version(&current_version, &artifact.version);
+        comp_state.update_available = update_available;
+
+        if update_available {
+            let msg = format!(
+                "Update available: {} -> {}",
+                current_version, artifact.version
+            );
+            details.push(format!("[{}] {msg}", component.display_name()));
+            append_log(
+                &mut update_state,
+                log_entry("registry_check", "info", msg, Some(comp_str)),
+            );
+        } else {
+            let msg = format!("Already up to date ({})", current_version);
+            details.push(format!("[{}] {msg}", component.display_name()));
+            append_log(
+                &mut update_state,
+                log_entry("registry_check", "info", msg, Some(comp_str)),
+            );
+        }
     }
+
+    update_state.last_checked_at = Some(Utc::now().to_rfc3339());
+    clear_progress(&mut update_state, &state_file);
+    save_state(&update_state, &state_file)?;
+
+    let status = build_status(settings, &update_state).await;
+    Ok(UpdatesActionResult {
+        operation: "registry_check".to_string(),
+        success: true,
+        message: "Registry check completed successfully".to_string(),
+        details,
+        status,
+    })
 }
 
-fn set_operation_progress(
-    state_file: &mut UpdateStateFile,
-    operation: &str,
-    phase: &str,
-    status: &str,
-    message: impl Into<String>,
-    component: Option<&str>,
-    percent: Option<u8>,
-    bytes: Option<(u64, Option<u64>)>,
-) {
-    let now = Utc::now().to_rfc3339();
-    let started_at = state_file
-        .progress
-        .as_ref()
-        .filter(|progress| progress.operation == operation && progress.status == "running")
-        .map(|progress| progress.started_at.clone())
-        .unwrap_or_else(|| now.clone());
-    let (bytes_downloaded, bytes_total) = bytes
-        .map(|(downloaded, total)| (Some(downloaded), total))
-        .unwrap_or((None, None));
+pub async fn registry_apply_updates(
+    state: &AppState,
+    component: UpdateComponent,
+) -> Result<UpdatesActionResult> {
+    let _guard = op_lock().lock().await;
+    let settings = load_settings(state);
+    let state_file = state_path(state);
+    let mut update_state = load_state(&state_file);
 
-    state_file.progress = Some(UpdateOperationProgress {
-        operation: operation.to_string(),
-        phase: phase.to_string(),
-        status: status.to_string(),
-        message: message.into(),
-        component: component.map(|value| value.to_string()),
-        percent: percent.map(|value| value.min(100)),
-        bytes_downloaded,
-        bytes_total,
-        started_at,
-        updated_at: now.clone(),
-        completed_at: if status == "running" { None } else { Some(now) },
-    });
-}
+    let selected_components = RepoComponent::from_update_component(component);
+    let comp_label = component_log_display_value(&selected_components);
 
-fn mark_operation_progress_failed(state: &AppState, operation: &str, message: impl Into<String>) {
-    let message = message.into();
-    let mut state_file = load_state(state);
-    append_operation_log(&mut state_file, operation, "error", &message, None);
-    set_operation_progress(
-        &mut state_file,
-        operation,
-        "failed",
-        "failed",
-        message,
-        None,
-        Some(100),
-        None,
+    write_progress(
+        &mut update_state,
+        &state_file,
+        make_progress(
+            "registry_apply",
+            "preparing",
+            "running",
+            "Preparing registry-based update…",
+            None,
+            None,
+        ),
     );
-    if let Err(err) = save_state(state, &state_file) {
-        warn!(error = %err, "updates: failed to persist failed update progress");
+
+    let manifest = match fetch_registry_manifest(&settings.registry_url, &mut update_state).await {
+        Ok(m) => m,
+        Err(e) => {
+            let msg = format!("Failed to fetch registry manifest: {e}");
+            append_log(
+                &mut update_state,
+                log_entry("registry_apply", "error", msg.clone(), None),
+            );
+            clear_progress(&mut update_state, &state_file);
+            save_state(&update_state, &state_file)?;
+            anyhow::bail!(msg);
+        }
+    };
+
+    // Load trusted signers if signature verification is enabled.
+    let trusted_signers: Vec<ed25519_dalek::VerifyingKey> = if settings.verify_artifact_signatures
+    {
+        let signers_path = PathBuf::from(&settings.trusted_signers_file);
+        match load_trusted_signers(&signers_path) {
+            Ok(keys) => keys,
+            Err(e) => {
+                let msg = format!("Failed to load trusted signers: {e}");
+                append_log(
+                    &mut update_state,
+                    log_entry("registry_apply", "error", msg.clone(), None),
+                );
+                clear_progress(&mut update_state, &state_file);
+                save_state(&update_state, &state_file)?;
+                anyhow::bail!(msg);
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    let mut details = Vec::new();
+    let mut any_error = false;
+
+    let staging_dir = PathBuf::from(ARTIFACT_STAGING_DIR);
+
+    for repo_component in selected_components {
+        let comp_str = repo_component.as_str();
+
+        let artifact = match manifest
+            .components
+            .iter()
+            .find(|a| a.component == comp_str)
+        {
+            Some(a) => a,
+            None => {
+                if manifest.partial {
+                    let msg = format!(
+                        "Component not present in partial manifest, skipping",
+                    );
+                    details.push(format!("[{}] {msg}", repo_component.display_name()));
+                    append_log(
+                        &mut update_state,
+                        log_entry("registry_apply", "info", msg, Some(comp_str)),
+                    );
+                } else {
+                    let msg = format!("Component not found in registry manifest");
+                    details.push(format!("[{}] {msg}", repo_component.display_name()));
+                    append_log(
+                        &mut update_state,
+                        log_entry("registry_apply", "error", msg, Some(comp_str)),
+                    );
+                    any_error = true;
+                }
+                continue;
+            }
+        };
+
+        let saved = find_component_state(&update_state, repo_component);
+        let current_version = current_version_baseline(saved);
+        let from_version = current_version.clone();
+
+        if let Some(ref cv) = current_version {
+            if !is_newer_artifact_version(cv, &artifact.version) {
+                let msg = format!("Already at version {}", artifact.version);
+                details.push(format!("[{}] {msg}", repo_component.display_name()));
+                append_log(
+                    &mut update_state,
+                    log_entry("registry_apply", "info", msg, Some(comp_str)),
+                );
+                continue;
+            }
+        }
+
+        write_progress(
+            &mut update_state,
+            &state_file,
+            make_progress(
+                "registry_apply",
+                "downloading",
+                "running",
+                &format!("Downloading {} v{}…", repo_component.display_name(), artifact.version),
+                Some(comp_str),
+                None,
+            ),
+        );
+
+        // Download the artifact
+        let artifact_path = match download_artifact(&artifact.download_url, &staging_dir).await {
+            Ok(p) => p,
+            Err(e) => {
+                let msg = format!("Download failed: {e}");
+                details.push(format!("[{}] {msg}", repo_component.display_name()));
+                append_log(
+                    &mut update_state,
+                    log_entry("registry_apply", "error", msg, Some(comp_str)),
+                );
+                any_error = true;
+                continue;
+            }
+        };
+
+        // Resolve and verify checksum
+        if !artifact.checksum_sha256.is_empty() {
+            let expected_checksum = if artifact.checksum_sha256.starts_with("http") {
+                // It's a URL — fetch the actual checksum
+                match resolve_checksum_url(&artifact.checksum_sha256).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let msg = format!("Failed to fetch checksum: {e}");
+                        details.push(format!("[{}] {msg}", repo_component.display_name()));
+                        append_log(
+                            &mut update_state,
+                            log_entry("registry_apply", "error", msg, Some(comp_str)),
+                        );
+                        any_error = true;
+                        let _ = fs::remove_file(&artifact_path);
+                        continue;
+                    }
+                }
+            } else {
+                artifact.checksum_sha256.clone()
+            };
+
+            if let Err(e) = verify_checksum(&artifact_path, &expected_checksum) {
+                let msg = format!("Checksum verification failed: {e}");
+                details.push(format!("[{}] {msg}", repo_component.display_name()));
+                append_log(
+                    &mut update_state,
+                    log_entry("registry_apply", "error", msg, Some(comp_str)),
+                );
+                any_error = true;
+                let _ = fs::remove_file(&artifact_path);
+                continue;
+            }
+        }
+
+        // Verify signature if configured
+        if settings.verify_artifact_signatures {
+            let sig_b64 = match &artifact.signature_url {
+                Some(url) => match fetch_signature_body(url).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let msg = format!("Failed to fetch signature: {e}");
+                        details.push(format!("[{}] {msg}", repo_component.display_name()));
+                        append_log(
+                            &mut update_state,
+                            log_entry("registry_apply", "error", msg, Some(comp_str)),
+                        );
+                        any_error = true;
+                        let _ = fs::remove_file(&artifact_path);
+                        continue;
+                    }
+                },
+                None => {
+                    let msg = "Signature verification required but no signature URL in manifest".to_string();
+                    details.push(format!("[{}] {msg}", repo_component.display_name()));
+                    append_log(
+                        &mut update_state,
+                        log_entry("registry_apply", "error", msg, Some(comp_str)),
+                    );
+                    any_error = true;
+                    let _ = fs::remove_file(&artifact_path);
+                    continue;
+                }
+            };
+
+            if let Err(e) = verify_artifact_signature(&artifact_path, &sig_b64, &trusted_signers) {
+                let msg = format!("Signature verification failed: {e}");
+                details.push(format!("[{}] {msg}", repo_component.display_name()));
+                append_log(
+                    &mut update_state,
+                    log_entry("registry_apply", "error", msg, Some(comp_str)),
+                );
+                any_error = true;
+                let _ = fs::remove_file(&artifact_path);
+                continue;
+            }
+        }
+
+        write_progress(
+            &mut update_state,
+            &state_file,
+            make_progress(
+                "registry_apply",
+                "installing",
+                "running",
+                &format!("Installing {} v{}…", repo_component.display_name(), artifact.version),
+                Some(comp_str),
+                None,
+            ),
+        );
+
+        // Apply (install/stage) the artifact
+        match apply_downloaded_artifact(&artifact_path, repo_component) {
+            Ok(()) => {
+                let comp_state = ensure_component_state(&mut update_state, repo_component);
+                comp_state.current_version = Some(artifact.version.clone());
+                comp_state.last_applied_version = Some(artifact.version.clone());
+                comp_state.update_available = false;
+                comp_state.last_error = None;
+
+                let msg = format!("Updated to v{}", artifact.version);
+                details.push(format!("[{}] {msg}", repo_component.display_name()));
+                append_log(
+                    &mut update_state,
+                    log_entry_with_versions(
+                        "registry_apply",
+                        "info",
+                        msg,
+                        Some(comp_str),
+                        from_version,
+                        Some(artifact.version.clone()),
+                    ),
+                );
+
+                // Clean up staging file for non-rootfs components
+                if !matches!(repo_component, RepoComponent::Rootfs) {
+                    let _ = fs::remove_file(&artifact_path);
+                }
+            }
+            Err(e) => {
+                let comp_state = ensure_component_state(&mut update_state, repo_component);
+                comp_state.last_error = Some(e.to_string());
+
+                let msg = format!("Install failed: {e}");
+                details.push(format!("[{}] {msg}", repo_component.display_name()));
+                append_log(
+                    &mut update_state,
+                    log_entry("registry_apply", "error", msg, Some(comp_str)),
+                );
+                any_error = true;
+                let _ = fs::remove_file(&artifact_path);
+            }
+        }
     }
-}
 
-fn clear_appliance_rebuild_required(state_file: &mut UpdateStateFile) {
-    state_file.pending_appliance_rebuild = false;
-    state_file.appliance_rebuild_reason = None;
-    state_file.appliance_rebuild_marked_at = Some(Utc::now().to_rfc3339());
-}
+    update_state.last_applied_at = Some(Utc::now().to_rfc3339());
+    clear_progress(&mut update_state, &state_file);
+    save_state(&update_state, &state_file)?;
 
-fn clear_rootfs_update_required(state_file: &mut UpdateStateFile) {
-    clear_appliance_rebuild_required(state_file);
-    let rootfs = ensure_component_state(state_file, RepoComponent::Rootfs);
-    rootfs.remote_version = rootfs
-        .current_version
-        .clone()
-        .or_else(|| rootfs.last_applied_version.clone())
-        .or_else(|| Some(built_appliance_version()));
-    rootfs.update_available = false;
-    rootfs.last_error = None;
-}
-
-fn acknowledge_rootfs_rebuild(state_file: &mut UpdateStateFile) {
-    let rootfs = ensure_component_state(state_file, RepoComponent::Rootfs);
-    if let Some(remote_version) = rootfs.remote_version.clone() {
-        rootfs.current_version = Some(remote_version.clone());
-        rootfs.last_applied_version = Some(remote_version);
-        rootfs.update_available = false;
-        rootfs.last_error = None;
-    }
-}
-
-pub fn mark_appliance_rebuild_complete(state: &AppState) -> Result<()> {
-    let mut state_file = load_state(state);
-    clear_appliance_rebuild_required(&mut state_file);
-    acknowledge_rootfs_rebuild(&mut state_file);
-    save_state(state, &state_file)
+    let status = build_status(settings, &update_state).await;
+    Ok(UpdatesActionResult {
+        operation: "registry_apply".to_string(),
+        success: !any_error,
+        message: if any_error {
+            format!("Registry apply [{comp_label}] completed with errors")
+        } else {
+            format!("Registry apply [{comp_label}] completed successfully")
+        },
+        details,
+        status,
+    })
 }
 
 // ============================================================================
@@ -1358,15 +2719,7 @@ use sha2::{Digest, Sha256};
 
 /// Verify SHA256 checksum of a file
 fn verify_checksum(file_path: &Path, expected: &str) -> Result<()> {
-    let data = fs::read(file_path)
-        .with_context(|| format!("failed to read file {}", file_path.display()))?;
-    let mut hasher = Sha256::new();
-    hasher.update(&data);
-    let result = hasher.finalize();
-    let computed = result
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect::<String>();
+    let computed = compute_file_sha256(file_path)?;
 
     if computed != expected {
         anyhow::bail!(
@@ -1455,8 +2808,22 @@ fn verify_artifact_signature(
     })?;
     let signature = ed25519_dalek::Signature::from_bytes(&sig_array);
 
-    let digest_hex = compute_file_sha256(artifact_path)?;
-    let message = digest_hex.as_bytes();
+    let mut hasher = Sha256::new();
+    {
+        use std::io::Read as _;
+        let mut f = std::fs::File::open(artifact_path)
+            .with_context(|| format!("failed to open {} for hashing", artifact_path.display()))?;
+        let mut buffer = [0u8; 65536];
+        loop {
+            let n = f.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+        }
+    }
+    let raw_digest = hasher.finalize();
+    let message: &[u8] = raw_digest.as_ref();
 
     for key in trusted_signers {
         if key.verify(message, &signature).is_ok() {
@@ -1499,2574 +2866,210 @@ fn build_http_client() -> Result<reqwest::Client> {
         .context("failed to build HTTP client")
 }
 
-pub(crate) async fn download_artifact(url: &str, destination: &Path) -> Result<()> {
-    download_artifact_with_progress(url, destination, |_, _| Ok(())).await
+// ============================================================================
+// rootfs_update: minimal binary-safe entry point used by the initramfs hook
+// ============================================================================
+
+/// Minimal state persisted by the initramfs hook after a successful rootfs swap.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RootfsUpdateResult {
+    pub version: Option<String>,
+    pub applied_at: Option<String>,
+    pub artifact_path: Option<String>,
 }
 
-async fn download_artifact_with_progress<F>(
-    url: &str,
-    destination: &Path,
-    mut on_progress: F,
-) -> Result<()>
-where
-    F: FnMut(u64, Option<u64>) -> Result<()>,
-{
-    use tokio::io::AsyncWriteExt;
-
-    // Large artifacts (rootfs squashfs is hundreds of MB) can exceed the
-    // 120s overall request timeout used for API calls.  Use a dedicated
-    // client with only a connect timeout, and stream chunks directly to
-    // disk so memory usage stays bounded regardless of artifact size.
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(30))
-        .build()
-        .context("failed to build HTTP client for download")?;
-
-    let mut response = client
-        .get(url)
-        .send()
-        .await
-        .with_context(|| format!("failed to download artifact from {}", url))?;
-
-    if !response.status().is_success() {
-        anyhow::bail!(
-            "artifact download failed: HTTP {} from {}",
-            response.status(),
-            url
-        );
-    }
-    let expected_size = response.content_length();
-
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create download directory {}", parent.display()))?;
-    }
-
-    let mut file = tokio::fs::File::create(destination)
-        .await
-        .with_context(|| format!("failed to create artifact file {}", destination.display()))?;
-
-    let mut total: u64 = 0;
-    on_progress(total, expected_size)?;
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .with_context(|| format!("failed to read artifact chunk from {}", url))?
-    {
-        file.write_all(&chunk).await.with_context(|| {
-            format!(
-                "failed to write artifact chunk to {}",
-                destination.display()
-            )
-        })?;
-        total += chunk.len() as u64;
-        on_progress(total, expected_size)?;
-    }
-    file.flush()
-        .await
-        .with_context(|| format!("failed to flush artifact file {}", destination.display()))?;
-
-    on_progress(total, expected_size)?;
-    info!(url, bytes = total, "updates: artifact download complete");
-    Ok(())
-}
-
-/// Query artifact registry for latest versions
-async fn query_registry(
-    registry_url: &str,
-    fetch_checksums: bool,
-    etag_cache: &mut HashMap<String, (String, String)>,
-) -> Result<RegistryManifest> {
-    let client = build_http_client()?;
-
-    if let Some(github_api_url) = github_repo_api_url(registry_url) {
-        return query_github_releases(&github_api_url, &client, fetch_checksums, etag_cache).await;
-    }
-
-    anyhow::bail!("updates: registry URL must point to a GitHub repository")
-}
-
-async fn query_registry_with_component_fallbacks(
-    settings: &UpdateSettings,
-    fetch_checksums: bool,
-    etag_cache: &mut HashMap<String, (String, String)>,
-) -> Result<RegistryManifest> {
-    let mut manifest = query_registry(&settings.registry_url, fetch_checksums, etag_cache).await?;
-
-    let mut seen_components = manifest
-        .components
-        .iter()
-        .map(|artifact| artifact.component.clone())
-        .collect::<HashSet<_>>();
-
-    for component in ALL_REPO_COMPONENTS {
-        if seen_components.contains(component.as_str()) {
-            continue;
-        }
-
-        let (_, repo_url, _) = component_config(settings, component);
-        let Some(api_url) = github_repo_api_url(&repo_url) else {
-            warn!(
-                component = component.as_str(),
-                repo_url,
-                "updates: component repo URL is not a GitHub repo URL; cannot query release fallback"
-            );
-            continue;
-        };
-
-        match query_registry(&api_url, fetch_checksums, etag_cache).await {
-            Ok(component_manifest) => {
-                let mut added = 0usize;
-                for artifact in component_manifest
-                    .components
-                    .into_iter()
-                    .filter(|artifact| artifact.component == component.as_str())
-                {
-                    manifest.components.push(artifact);
-                    added += 1;
-                }
-
-                if added == 0 {
-                    warn!(
-                        component = component.as_str(),
-                        repo_url,
-                        "updates: component repo release did not include a matching artifact"
-                    );
-                } else {
-                    seen_components.insert(component.as_str().to_string());
-                }
-            }
-            Err(err) => {
-                let err_text = err.to_string();
-                if err_text.contains("HTTP 404") || component.as_str() == "rootfs" {
-                    info!(
-                        component = component.as_str(),
-                        repo_url,
-                        error = %err,
-                        "updates: component repo release fallback not found"
-                    );
-                } else {
-                    warn!(
-                        component = component.as_str(),
-                        repo_url,
-                        error = %err,
-                        "updates: failed to query component repo release fallback"
-                    );
-                }
-            }
-        }
-    }
-
-    Ok(manifest)
-}
-
-pub(crate) fn artifact_version_from_name(component: &str, asset_name: &str) -> Option<String> {
-    let prefix = format!("{component}-v");
-    let stripped = asset_name.strip_prefix(&prefix)?;
-    let version = stripped
-        .strip_suffix(".tar.zst")
-        .or_else(|| {
-            if component == "rootfs" {
-                stripped.strip_suffix(".squashfs")
-            } else {
-                None
-            }
-        })
-        .filter(|v| is_artifact_version(v))?;
-    Some(version.to_string())
-}
-
-fn is_artifact_version(version: &str) -> bool {
-    let mut segment_count = 0;
-    for segment in version.split('.') {
-        if segment.is_empty() || !segment.bytes().all(|b| b.is_ascii_digit()) {
-            return false;
-        }
-        segment_count += 1;
-    }
-
-    segment_count >= 2
-}
-
-fn artifact_version_segments(version: &str) -> Option<Vec<u64>> {
-    if !is_artifact_version(version) {
-        return None;
-    }
-
-    version
-        .split('.')
-        .map(|segment| segment.parse::<u64>().ok())
-        .collect()
-}
-
-pub fn is_remote_version_newer(current: &str, remote: &str) -> bool {
-    let (Some(current_segments), Some(remote_segments)) = (
-        artifact_version_segments(current),
-        artifact_version_segments(remote),
-    ) else {
-        return current != remote;
-    };
-
-    let segment_count = current_segments.len().max(remote_segments.len());
-    for idx in 0..segment_count {
-        let current_segment = current_segments.get(idx).copied().unwrap_or(0);
-        let remote_segment = remote_segments.get(idx).copied().unwrap_or(0);
-        if remote_segment != current_segment {
-            return remote_segment > current_segment;
-        }
-    }
-
-    false
-}
-
-fn is_sha256_hex(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-fn checksum_from_text(text: &str, filename: &str) -> Option<String> {
-    for line in text.lines() {
-        let mut parts = line.split_whitespace();
-        let Some(checksum) = parts.next() else {
-            continue;
-        };
-        if !is_sha256_hex(checksum) {
-            continue;
-        }
-
-        let Some(listed_name) = parts.next() else {
-            return Some(checksum.to_string());
-        };
-        let listed_name = listed_name.trim_start_matches('*').trim_start_matches("./");
-
-        if listed_name == filename || listed_name.ends_with(&format!("/{filename}")) {
-            return Some(checksum.to_string());
-        }
-    }
-
-    None
-}
-
-async fn fetch_github_asset_text(client: &reqwest::Client, asset: &GitHubAsset) -> Result<String> {
-    client
-        .get(&asset.browser_download_url)
-        .header(USER_AGENT, HeaderValue::from_static(UPDATE_HTTP_USER_AGENT))
-        .send()
-        .await
-        .with_context(|| format!("failed to fetch {}", asset.name))?
-        .text()
-        .await
-        .with_context(|| format!("failed to read {}", asset.name))
-}
-
-async fn populate_github_release_checksums(
-    client: &reqwest::Client,
-    release: &GitHubRelease,
-    components: &mut [ArtifactMetadata],
-) {
-    if let Some(checksums_asset) = release.assets.iter().find(|a| a.name == "checksums.txt") {
-        match fetch_github_asset_text(client, checksums_asset).await {
-            Ok(checksums_text) => {
-                for component in components.iter_mut() {
-                    let Some(filename) = component.download_url.rsplit('/').next() else {
-                        continue;
-                    };
-                    if let Some(checksum) = checksum_from_text(&checksums_text, filename) {
-                        component.checksum_sha256 = checksum;
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, "updates: failed to fetch checksums.txt from release");
-            }
-        }
-    }
-
-    for component in components.iter_mut() {
-        let Some(artifact_name) = component.download_url.rsplit('/').next() else {
-            continue;
-        };
-
-        if component.checksum_sha256.is_empty() {
-            let checksum_name = format!("{artifact_name}.sha256");
-            if let Some(checksum_asset) = release.assets.iter().find(|a| a.name == checksum_name) {
-                match fetch_github_asset_text(client, checksum_asset).await {
-                    Ok(checksum_text) => {
-                        if let Some(checksum) = checksum_from_text(&checksum_text, artifact_name) {
-                            component.checksum_sha256 = checksum;
-                        } else {
-                            warn!(
-                                component = %component.component,
-                                artifact = artifact_name,
-                                "updates: checksum asset did not contain a SHA-256 for artifact"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        warn!(
-                            component = %component.component,
-                            artifact = artifact_name,
-                            error = %e,
-                            "updates: failed to fetch artifact checksum asset"
-                        );
-                    }
-                }
-            } else {
-                warn!(
-                    component = %component.component,
-                    artifact = artifact_name,
-                    "updates: no checksum asset found for GitHub release artifact"
-                );
-            }
-        }
-
-        // Detached ed25519 signature asset, if the build pipeline publishes
-        // one.  Absence is not fatal here - it only becomes an error at apply
-        // time when verify_artifact_signatures is enabled on the appliance.
-        if component.signature_url.is_none() {
-            let sig_name = format!("{artifact_name}.sig");
-            if let Some(sig_asset) = release.assets.iter().find(|a| a.name == sig_name) {
-                component.signature_url = Some(sig_asset.browser_download_url.clone());
-            }
-        }
-    }
-}
-
-/// Query GitHub Releases API for latest release artifacts.
-///
-/// Uses ETag-based conditional requests: if the cached ETag matches the
-/// server's current ETag, GitHub returns 304 Not Modified which does NOT
-/// count against the unauthenticated rate limit (60 req/hr/IP).
-async fn query_github_releases(
-    github_api_url: &str,
-    client: &reqwest::Client,
-    fetch_checksums: bool,
-    etag_cache: &mut HashMap<String, (String, String)>,
-) -> Result<RegistryManifest> {
-    use reqwest::header::IF_NONE_MATCH;
-
-    // Construct API URL: https://api.github.com/repos/{owner}/{repo}/releases/latest
-    let releases_url = if github_api_url.ends_with('/') {
-        format!("{}releases/latest", github_api_url)
-    } else {
-        format!("{}/releases/latest", github_api_url)
-    };
-
-    let mut request = client
-        .get(&releases_url)
-        .header(
-            ACCEPT,
-            HeaderValue::from_static("application/vnd.github+json"),
-        )
-        .header(USER_AGENT, HeaderValue::from_static(UPDATE_HTTP_USER_AGENT))
-        .header(
-            HeaderName::from_static("x-github-api-version"),
-            HeaderValue::from_static("2022-11-28"),
-        );
-
-    // Attach cached ETag so GitHub can return 304 (free, no rate-limit cost)
-    if let Some((cached_etag, _)) = etag_cache.get(&releases_url) {
-        if let Ok(val) = HeaderValue::from_str(cached_etag) {
-            request = request.header(IF_NONE_MATCH, val);
-        }
-    }
-
-    let response = request
-        .send()
-        .await
-        .with_context(|| format!("failed to query GitHub releases from {}", releases_url))?;
-
-    let status = response.status();
-
-    // 304 Not Modified — use cached body (free, doesn't count against rate limit)
-    if status == reqwest::StatusCode::NOT_MODIFIED {
-        if let Some((_, cached_body)) = etag_cache.get(&releases_url) {
-            let release: GitHubRelease = serde_json::from_str(cached_body)
-                .with_context(|| "failed to parse cached GitHub release")?;
-            return build_manifest_from_release(release, client, fetch_checksums, github_api_url)
-                .await;
-        }
-        // Cache miss despite 304 — remove stale entry and bail; next attempt re-fetches
-        etag_cache.remove(&releases_url);
-        anyhow::bail!(
-            "GitHub returned 304 but ETag cache is empty for {}",
-            releases_url
-        );
-    }
-
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        anyhow::bail!(
-            "GitHub releases query failed: HTTP {} from {}{}",
-            status,
-            releases_url,
-            if body.trim().is_empty() {
-                String::new()
-            } else {
-                format!(": {}", body.trim())
-            }
-        );
-    }
-
-    // 200 — store new ETag and body for future conditional requests
-    let new_etag = response
-        .headers()
-        .get("ETag")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    let body = response.text().await.with_context(|| {
-        format!(
-            "failed to read GitHub release response from {}",
-            releases_url
-        )
-    })?;
-
-    if let Some(etag) = new_etag {
-        etag_cache.insert(releases_url.clone(), (etag, body.clone()));
-    }
-
-    let release: GitHubRelease = serde_json::from_str(&body)
-        .with_context(|| format!("failed to parse GitHub release from {}", releases_url))?;
-
-    build_manifest_from_release(release, client, fetch_checksums, github_api_url).await
-}
-
-/// Convert a parsed `GitHubRelease` into a `RegistryManifest`.
-/// Shared by the fresh-fetch (200) and cached (304) paths.
-async fn build_manifest_from_release(
-    release: GitHubRelease,
-    client: &reqwest::Client,
-    fetch_checksums: bool,
-    github_api_url: &str,
-) -> Result<RegistryManifest> {
-    let mut components = Vec::new();
-    let component_names = ["core", "ui", "rootfs"];
-    let source_repo = github_repo_slug(github_api_url);
-
-    for comp_name in &component_names {
-        // For rootfs prefer the standalone squashfs image artifact over the full
-        // rootfs archive — the squashfs is what the initramfs update hook uses.
-        let asset_opt = if *comp_name == "rootfs" {
-            release
-                .assets
-                .iter()
-                .find(|a| {
-                    a.name.ends_with(".squashfs")
-                        && artifact_version_from_name("rootfs", &a.name).is_some()
-                })
-                .or_else(|| {
-                    release
-                        .assets
-                        .iter()
-                        .find(|a| artifact_version_from_name(comp_name, &a.name).is_some())
-                })
-        } else {
-            release
-                .assets
-                .iter()
-                .find(|a| artifact_version_from_name(comp_name, &a.name).is_some())
-        };
-
-        if let Some(asset) = asset_opt {
-            let version_str = artifact_version_from_name(comp_name, &asset.name)
-                .unwrap_or_else(|| release.tag_name.trim_start_matches('v').to_string());
-
-            components.push(ArtifactMetadata {
-                component: comp_name.to_string(),
-                version: version_str.clone(),
-                download_url: asset.browser_download_url.clone(),
-                checksum_sha256: String::new(),
-                signature_url: None,
-                source_repo: source_repo.clone(),
-                source_tag: Some(release.tag_name.clone()),
-                source_release_url: release.html_url.clone(),
-            });
-
-            info!(
-                component = %comp_name,
-                version = %version_str,
-                url = %asset.browser_download_url,
-                "updates: found GitHub release artifact"
-            );
-        }
-    }
-
-    if components.is_empty() {
-        let found: Vec<&str> = release.assets.iter().map(|a| a.name.as_str()).collect();
-        if found.is_empty() {
-            anyhow::bail!(
-                "GitHub release {} has no published assets (release may still be building)",
-                release.tag_name
-            );
-        } else {
-            anyhow::bail!(
-                "GitHub release {} has no artifacts matching patterns core-v*.tar.zst / ui-v*.tar.zst / rootfs-v*.squashfs; found: {}",
-                release.tag_name,
-                found.join(", ")
-            );
-        }
-    }
-
-    if fetch_checksums {
-        populate_github_release_checksums(client, &release, &mut components).await;
-    }
-
-    Ok(RegistryManifest {
-        components,
-        generated_at: release.created_at.clone(),
-        partial: true,
-    })
-}
-
-/// Extract artifact and deploy to target location
-/// Stage a standalone rootfs squashfs image directly to the update staging dir.
-/// Bypasses the tar/zstd path entirely — the squashfs is not archive-wrapped.
-/// Stage a downloaded squashfs into the rootfs update staging directory and
-/// IMMEDIATELY apply it to the inactive A/B slot — there's no separate
-/// "apply" step in the A/B model.  The slot write happens in dayshield-core's
-/// userspace context because it requires mkfs + unsquashfs + grub-editenv,
-/// none of which want to live inside an initramfs.
-async fn stage_rootfs_squashfs_direct(artifact_path: &Path) -> Result<()> {
-    let staging_dir = PathBuf::from(crate::rootfs_update::ROOTFS_UPDATE_STAGING_DIR);
-    fs::create_dir_all(&staging_dir)?;
-
-    let image_filename = artifact_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("rootfs.squashfs")
-        .to_string();
-
-    let dest = staging_dir.join(&image_filename);
-    install_file_atomic_with_mode(artifact_path, &dest, Some(0o644))?;
-
-    let version = artifact_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .and_then(|n| artifact_version_from_name("rootfs", n))
-        .unwrap_or_else(|| "unknown".to_string());
-
-    info!(
-        version,
-        artifact = %dest.display(),
-        "updates: rootfs squashfs staged; applying to inactive A/B slot"
-    );
-
-    // Apply to the inactive slot — this is what arms GRUB for the next boot.
-    match crate::rootfs_update::apply_staged_image(&dest, &version).await {
-        Ok(result) => {
-            info!(
-                version,
-                success = result.success,
-                msg = %result.message,
-                "updates: rootfs A/B apply complete"
-            );
-        }
-        Err(err) => {
-            warn!(
-                error = %err,
-                version,
-                "updates: rootfs A/B apply failed; leaving image in staging for manual retry"
-            );
-            return Err(err);
-        }
-    }
-
-    Ok(())
-}
-
-async fn extract_and_deploy_artifact(
-    component: RepoComponent,
-    artifact_path: &Path,
-    target_dir: Option<&Path>,
-) -> Result<()> {
-    // Rootfs squashfs images bypass the tar/zstd flow and route into the
-    // A/B slot apply path entirely.
-    if matches!(component, RepoComponent::Rootfs)
-        && artifact_path.extension().and_then(|e| e.to_str()) == Some("squashfs")
-    {
-        return stage_rootfs_squashfs_direct(artifact_path).await;
-    }
-
-    let artifact_file = std::fs::File::open(artifact_path)
-        .with_context(|| format!("failed to open artifact {}", artifact_path.display()))?;
-
-    let decoder = zstd::stream::Decoder::new(artifact_file).with_context(|| {
-        format!(
-            "failed to initialize zstd decoder for {}",
-            artifact_path.display()
-        )
-    })?;
-
-    let mut archive = tar::Archive::new(decoder);
-
-    match component {
-        RepoComponent::Core => {
-            let tmp_dir = PathBuf::from("/tmp/dayshield-core-deploy");
-            fs::create_dir_all(&tmp_dir)?;
-            archive
-                .unpack(&tmp_dir)
-                .with_context(|| format!("failed to extract core artifact"))?;
-
-            let binary = tmp_dir.join("dayshield-core");
-            if !binary.exists() {
-                anyhow::bail!("core binary not found in artifact");
-            }
-
-            install_executable_file_atomic(&binary, Path::new("/usr/local/sbin/dayshield-core"))?;
-
-            // Also update the rootfs-update helper when bundled in the core artifact
-            let helper = tmp_dir.join("rootfs-update.sh");
-            if helper.exists() {
-                let helper_dest = Path::new("/usr/local/lib/dayshield/rootfs-update.sh");
-                match install_executable_file_atomic(&helper, helper_dest) {
-                    Ok(()) => info!(
-                        target = %helper_dest.display(),
-                        "updates: installed bundled rootfs-update helper"
-                    ),
-                    Err(err) => warn!(
-                        error = %err,
-                        target = %helper_dest.display(),
-                        "updates: skipping bundled rootfs-update helper install"
-                    ),
-                }
-            }
-
-            let _ = fs::remove_dir_all(&tmp_dir);
-        }
-        RepoComponent::Ui => {
-            let target = target_dir.unwrap_or(Path::new("/usr/local/share/dayshield-ui"));
-            let tmp_dir = PathBuf::from("/tmp/dayshield-ui-deploy");
-            fs::create_dir_all(&tmp_dir)?;
-            archive
-                .unpack(&tmp_dir)
-                .with_context(|| format!("failed to extract ui artifact"))?;
-
-            let dist_dir = tmp_dir.join("dist");
-            if !dist_dir.exists() {
-                anyhow::bail!("dist directory not found in ui artifact");
-            }
-
-            install_dir_atomic(&dist_dir, target)?;
-            let _ = fs::remove_dir_all(&tmp_dir);
-        }
-        RepoComponent::Rootfs => {
-            // Legacy .tar.zst rootfs path: extract the embedded squashfs and
-            // route it through the A/B slot apply helper.  Newer releases ship
-            // a bare .squashfs and are handled by the earlier branch above
-            // before we ever reach this tar/zstd decoder.
-            let tmp_dir = PathBuf::from("/tmp/dayshield-rootfs-stage");
-            fs::create_dir_all(&tmp_dir)?;
-            archive
-                .unpack(&tmp_dir)
-                .with_context(|| "failed to extract rootfs artifact")?;
-
-            let image_path = find_rootfs_image(&tmp_dir)?;
-            let staging_dir = PathBuf::from(crate::rootfs_update::ROOTFS_UPDATE_STAGING_DIR);
-            fs::create_dir_all(&staging_dir)?;
-            let image_filename = image_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("rootfs.squashfs")
-                .to_string();
-            let dest = staging_dir.join(&image_filename);
-            install_file_atomic_with_mode(&image_path, &dest, Some(0o644))?;
-            let _ = fs::remove_dir_all(&tmp_dir);
-
-            let version = artifact_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .and_then(|n| artifact_version_from_name("rootfs", n))
-                .unwrap_or_else(|| "unknown".to_string());
-
-            crate::rootfs_update::apply_staged_image(&dest, &version)
-                .await
-                .with_context(|| "rootfs A/B slot apply failed")?;
-        }
-    }
-
-    Ok(())
-}
-
-async fn build_component_status(
-    settings: &UpdateSettings,
-    state_file: &UpdateStateFile,
-    component: RepoComponent,
-) -> ComponentUpdateStatus {
-    let (repo_path, _remote_url, branch) = component_config(settings, component);
-    let saved = find_component_state(state_file, component);
-
-    ComponentUpdateStatus {
-        component: component.as_str().to_string(),
-        repo_path,
-        branch,
-        valid_repo: true,
-        dirty_worktree: false,
-        current_commit: None,
-        remote_commit: None,
-        current_version: current_version_baseline(saved),
-        remote_version: saved.and_then(|s| s.remote_version.clone()),
-        update_available: saved.map(|s| s.update_available).unwrap_or(false),
-        rollback_commit: saved.and_then(|s| s.rollback_commit.clone()),
-        rollback_version: saved.and_then(|s| s.rollback_version.clone()),
-        last_applied_commit: None,
-        last_applied_version: saved.and_then(|s| s.last_applied_version.clone()),
-        last_error: saved.and_then(|s| s.last_error.clone()),
-    }
-}
-
-pub async fn get_status(state: &AppState) -> UpdatesStatus {
-    let settings = load_settings(state);
-    let state_file = load_state(state);
-
-    let core = build_component_status(&settings, &state_file, RepoComponent::Core).await;
-    let ui = build_component_status(&settings, &state_file, RepoComponent::Ui).await;
-    let rootfs = build_component_status(&settings, &state_file, RepoComponent::Rootfs).await;
-
-    let components = vec![core, ui, rootfs];
-    let available_update_count = components.iter().filter(|c| c.update_available).count();
-
-    // Include reboot_required from the rootfs pending-update marker if present.
-    let rootfs_reboot_required = crate::rootfs_update::reboot_state().await.reboot_required;
-
-    UpdatesStatus {
-        settings,
-        last_checked_at: state_file.last_checked_at,
-        last_applied_at: state_file.last_applied_at,
-        pending_reboot: state_file.pending_reboot || rootfs_reboot_required,
-        pending_appliance_rebuild: state_file.pending_appliance_rebuild,
-        appliance_rebuild_reason: state_file.appliance_rebuild_reason,
-        appliance_rebuild_marked_at: state_file.appliance_rebuild_marked_at,
-        components,
-        available_update_count: if available_update_count > 0 {
-            Some(available_update_count)
-        } else {
-            None
-        },
-        operation_logs: state_file.operation_logs,
-        progress: state_file.progress,
-    }
-}
-
-enum CheckTrigger {
-    Manual,
-    Scheduled,
-}
-
-impl CheckTrigger {
-    fn as_str(&self) -> &'static str {
-        match self {
-            CheckTrigger::Manual => "manual",
-            CheckTrigger::Scheduled => "scheduled",
-        }
-    }
-}
-
-pub async fn check_for_updates(state: &AppState) -> Result<UpdatesStatus> {
-    check_for_updates_with_trigger(state, CheckTrigger::Manual).await
-}
-
-async fn check_for_updates_with_trigger(
-    state: &AppState,
-    trigger: CheckTrigger,
-) -> Result<UpdatesStatus> {
-    let _guard = op_lock().lock().await;
-    let source = trigger.as_str();
-
-    let now = Utc::now().to_rfc3339();
-    let mut state_file = load_state(state);
-    state_file.last_checked_at = Some(now.clone());
-    append_operation_log(
-        &mut state_file,
-        "check",
-        "info",
-        format!("{source} update check started"),
-        None,
-    );
-    save_state(state, &state_file)?;
-
-    // Registry-based update checking (artifact distribution)
-    if let Err(err) = check_for_updates_registry(state).await {
-        let mut failed_state = load_state(state);
-        append_operation_log(
-            &mut failed_state,
-            "check",
-            "error",
-            format!("{source} update check failed: {err}"),
-            None,
-        );
-        save_state(state, &failed_state)?;
-        return Err(err);
-    }
-
-    let checked_status = get_status(state).await;
-    let available_components: Vec<String> = checked_status
-        .components
-        .iter()
-        .filter(|component| component.update_available)
-        .map(|component| component.component.clone())
-        .collect();
-
-    let mut done_state = load_state(state);
-    if available_components.is_empty() {
-        append_operation_log(
-            &mut done_state,
-            "check",
-            "info",
-            format!("{source} update check completed: no updates found"),
-            None,
-        );
-    } else {
-        append_operation_log(
-            &mut done_state,
-            "check",
-            "success",
-            format!(
-                "{source} update check completed: updates found for {}",
-                available_components.join(", ")
-            ),
-            None,
-        );
-    }
-    save_state(state, &done_state)?;
-    info!("updates: registry check completed successfully");
-
-    Ok(get_status(state).await)
-}
-
-/// Check registry for available component updates
-async fn check_for_updates_registry(state: &AppState) -> Result<()> {
-    let settings = load_settings(state);
-    let mut state_file = load_state(state);
-
-    match query_registry_with_component_fallbacks(
-        &settings,
-        false,
-        &mut state_file.release_etag_cache,
-    )
-    .await
-    {
-        Ok(manifest) => {
-            let mut seen_components = std::collections::HashSet::new();
-            // Bootstrap tracked current version once for legacy systems that
-            // predate version tracking. This prevents perpetual false positives.
-            for artifact in &manifest.components {
-                let comp = match artifact.component.as_str() {
-                    "core" => RepoComponent::Core,
-                    "ui" => RepoComponent::Ui,
-                    "rootfs" => RepoComponent::Rootfs,
-                    _ => continue,
-                };
-                seen_components.insert(comp.as_str().to_string());
-
-                let update_available = {
-                    let comp_state = ensure_component_state(&mut state_file, comp);
-                    if comp_state.current_version.is_none() {
-                        if let Some(applied) = comp_state.last_applied_version.clone() {
-                            comp_state.current_version = Some(applied);
-                        } else {
-                            comp_state.current_version = Some(built_appliance_version());
-                            info!(
-                                component = %artifact.component,
-                                version = %comp_state.current_version.as_deref().unwrap_or("unknown"),
-                                "updates: bootstrapped current version baseline from registry"
-                            );
-                        }
-                    }
-
-                    let update_available = comp_state
-                        .current_version
-                        .as_ref()
-                        .map(|current| is_remote_version_newer(current, &artifact.version))
-                        .unwrap_or(false);
-                    comp_state.remote_version = Some(artifact.version.clone());
-                    comp_state.update_available = update_available;
-                    comp_state.last_error = None;
-                    update_available
-                };
-
-                if matches!(comp, RepoComponent::Rootfs) && !update_available {
-                    clear_rootfs_update_required(&mut state_file);
-                }
-
-                info!(
-                    component = %artifact.component,
-                    version = %artifact.version,
-                    update_available,
-                    "updates: registry has available version"
-                );
-            }
-
-            if !seen_components.contains(RepoComponent::Rootfs.as_str()) {
-                clear_rootfs_update_required(&mut state_file);
-            }
-
-            save_state(state, &state_file)?;
-            Ok(())
-        }
-        Err(err) => {
-            warn!(error = %err, "updates: failed to query registry");
-            Err(err)
-        }
-    }
-}
-
-/// Apply updates from artifact registry (atomic transaction)
-async fn apply_updates_registry(
-    state: &AppState,
-    components_to_update: Vec<RepoComponent>,
-) -> Result<UpdatesActionResult> {
-    let settings = load_settings(state);
-    let mut state_file = load_state(state);
-    let mut details = Vec::new();
-    let update_component_label = component_log_display_value(&components_to_update);
-    append_operation_log(
-        &mut state_file,
-        "apply",
-        "info",
-        format!("Artifact update apply started for {update_component_label}"),
-        None,
-    );
-    set_operation_progress(
-        &mut state_file,
-        "apply",
-        "starting",
-        "running",
-        format!("Update started for {update_component_label}"),
-        None,
-        Some(2),
-        None,
-    );
-    save_state(state, &state_file)?;
-
-    // Step 1: Query registry for latest versions (with checksums for artifact verification)
-    let manifest = query_registry_with_component_fallbacks(
-        &settings,
-        true,
-        &mut state_file.release_etag_cache,
-    )
-    .await?;
-    set_operation_progress(
-        &mut state_file,
-        "apply",
-        "resolved",
-        "running",
-        format!("Resolved update artifacts for {update_component_label}"),
-        None,
-        Some(8),
-        None,
-    );
-    save_state(state, &state_file)?;
-
-    // Step 2: Download all artifacts to staging area
+/// Entry point for the initramfs rootfs-update hook.
+/// Reads the staged rootfs artifact, installs it to `/`, and persists state.
+pub fn rootfs_update() -> Result<()> {
     let staging_dir = PathBuf::from(ARTIFACT_STAGING_DIR);
-    fs::create_dir_all(&staging_dir)?;
+    let state_file = PathBuf::from(UPDATE_STATE_FILE_PATH);
 
-    let transaction_id = uuid::Uuid::new_v4().to_string();
-    let transaction_staging = staging_dir.join(&transaction_id);
-    fs::create_dir_all(&transaction_staging)?;
+    // Find the staged rootfs artifact (a .squashfs file)
+    let artifact_path = find_staged_rootfs(&staging_dir)?;
+    let version = extract_asset_version(
+        artifact_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(""),
+        "rootfs",
+    );
 
-    let mut downloads = Vec::new();
-    let mut skipped_up_to_date: Vec<String> = Vec::new();
-    let selected_count = components_to_update.len().max(1);
+    // Install to /
+    let dst = PathBuf::from("/");
+    install_dir_atomic(&artifact_path, &dst)?;
 
-    for (idx, comp) in components_to_update.iter().enumerate() {
-        let artifact_opt = manifest.components.iter().find(|a| match comp {
-            RepoComponent::Core => a.component == "core",
-            RepoComponent::Ui => a.component == "ui",
-            RepoComponent::Rootfs => a.component == "rootfs",
-        });
+    // Remove the staged artifact
+    let _ = fs::remove_file(&artifact_path);
 
-        if let Some(artifact) = artifact_opt {
-            let current_version = state_file
-                .components
-                .iter()
-                .find(|entry| entry.component == artifact.component)
-                .and_then(|entry| {
-                    entry
-                        .current_version
-                        .clone()
-                        .or_else(|| entry.last_applied_version.clone())
-                });
+    // Persist state
+    let mut update_state: UpdateStateFile = load_json_or_default(&state_file);
+    let comp_state = ensure_component_state(&mut update_state, RepoComponent::Rootfs);
+    if let Some(ref v) = version {
+        comp_state.current_version = Some(v.clone());
+        comp_state.last_applied_version = Some(v.clone());
+    }
+    comp_state.update_available = false;
+    comp_state.last_error = None;
+    update_state.pending_reboot = false;
+    update_state.last_applied_at = Some(Utc::now().to_rfc3339());
+    write_json_atomic(&state_file, &update_state)?;
 
-            if current_version
-                .as_deref()
-                .map(|current| !is_remote_version_newer(current, &artifact.version))
+    Ok(())
+}
+
+fn find_staged_rootfs(staging_dir: &Path) -> Result<PathBuf> {
+    if !staging_dir.exists() {
+        anyhow::bail!(
+            "staging directory {} does not exist",
+            staging_dir.display()
+        );
+    }
+
+    let candidates: Vec<PathBuf> = fs::read_dir(staging_dir)
+        .with_context(|| format!("failed to read staging directory {}", staging_dir.display()))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e == "squashfs")
                 .unwrap_or(false)
-            {
-                skipped_up_to_date.push(format!("{}-{}", artifact.component, artifact.version));
-                append_operation_log(
-                    &mut state_file,
-                    "apply",
-                    "info",
-                    format!(
-                        "{} already at or newer than v{}; skipping apply",
-                        artifact.component, artifact.version
-                    ),
-                    Some(&artifact.component),
-                );
-                save_state(state, &state_file)?;
-                continue;
-            }
-
-            // Use the actual filename from the download URL so the file
-            // extension is preserved (.squashfs for rootfs, .tar.zst for others).
-            // extract_and_deploy_artifact dispatches on the extension.
-            let dest_filename = artifact
-                .download_url
-                .rsplit('/')
-                .next()
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    format!("{}-{}.tar.zst", &artifact.component, &artifact.version)
-                });
-            let dest = transaction_staging.join(&dest_filename);
-
-            let download_start = 10.0 + (idx as f64 * 48.0 / selected_count as f64);
-            let download_span = 48.0 / selected_count as f64;
-            set_operation_progress(
-                &mut state_file,
-                "apply",
-                "downloading",
-                "running",
-                format!("Downloading {}", artifact.component),
-                Some(&artifact.component),
-                Some(download_start.round() as u8),
-                Some((0, None)),
-            );
-            save_state(state, &state_file)?;
-
-            let mut last_reported_percent: Option<u8> = None;
-            let mut last_reported_bytes: u64 = 0;
-            let mut on_download_progress = |downloaded: u64, total: Option<u64>| -> Result<()> {
-                let percent = total
-                    .filter(|value| *value > 0)
-                    .map(|value| {
-                        (download_start + (downloaded as f64 / value as f64 * download_span))
-                            .round()
-                            .min(58.0) as u8
-                    })
-                    .or_else(|| Some(download_start.round() as u8));
-                let enough_unknown_bytes = total.is_none()
-                    && downloaded.saturating_sub(last_reported_bytes) >= 8 * 1024 * 1024;
-                if percent != last_reported_percent || enough_unknown_bytes {
-                    set_operation_progress(
-                        &mut state_file,
-                        "apply",
-                        "downloading",
-                        "running",
-                        format!("Downloading {}", artifact.component),
-                        Some(&artifact.component),
-                        percent,
-                        Some((downloaded, total)),
-                    );
-                    save_state(state, &state_file)?;
-                    last_reported_percent = percent;
-                    last_reported_bytes = downloaded;
-                }
-                Ok(())
-            };
-
-            download_artifact_with_progress(
-                &artifact.download_url,
-                &dest,
-                &mut on_download_progress,
-            )
-            .await?;
-            if artifact.checksum_sha256.is_empty() {
-                if settings.verify_artifact_signatures {
-                    anyhow::bail!(
-                        "no checksum available for {}; cannot verify artifact integrity",
-                        dest_filename
-                    );
-                } else {
-                    warn!(
-                        component = %artifact.component,
-                        version = %artifact.version,
-                        "updates: no checksum available for artifact; skipping verification"
-                    );
-                }
-            } else {
-                set_operation_progress(
-                    &mut state_file,
-                    "apply",
-                    "verifying",
-                    "running",
-                    format!("Verifying {}", artifact.component),
-                    Some(&artifact.component),
-                    Some((58 + idx * 8 / selected_count).min(66) as u8),
-                    None,
-                );
-                save_state(state, &state_file)?;
-                verify_checksum(&dest, &artifact.checksum_sha256)?;
-            }
-
-            // Cryptographic signature check.  Gated on
-            // `verify_artifact_signatures`: when enabled, both a `.sig` URL on
-            // the manifest entry AND at least one trusted signer must be
-            // present, and the ed25519 signature must validate against the
-            // artifact's SHA256 digest.
-            if settings.verify_artifact_signatures {
-                let sig_url = artifact.signature_url.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "artifact signature verification is enabled but no signature_url \
-                         is published for {}-{}",
-                        artifact.component,
-                        artifact.version
-                    )
-                })?;
-                let signers_path = Path::new(&settings.trusted_signers_file);
-                let trusted = load_trusted_signers(signers_path).with_context(|| {
-                    format!(
-                        "failed to load trusted signers from {} (required when \
-                         verify_artifact_signatures is enabled)",
-                        signers_path.display()
-                    )
-                })?;
-                let sig_body = fetch_signature_body(sig_url).await?;
-                verify_artifact_signature(&dest, &sig_body, &trusted).with_context(|| {
-                    format!(
-                        "signature verification failed for {}-{}",
-                        artifact.component, artifact.version
-                    )
-                })?;
-                append_operation_log(
-                    &mut state_file,
-                    "apply",
-                    "info",
-                    format!(
-                        "ed25519 signature verified for {}-{}",
-                        &artifact.component, &artifact.version
-                    ),
-                    Some(&artifact.component),
-                );
-            } else if artifact.signature_url.is_some() {
-                // Build pipeline shipped a signature but the appliance has
-                // opted out of verification - log it so operators see the
-                // unused signal in the apply log.
-                warn!(
-                    component = %artifact.component,
-                    version = %artifact.version,
-                    "updates: signature_url present but verify_artifact_signatures is disabled"
-                );
-            }
-
-            downloads.push((artifact.component.clone(), artifact.version.clone(), dest));
-            details.push(format!(
-                "downloaded and verified {}-{}",
-                &artifact.component, &artifact.version
-            ));
-            append_operation_log(
-                &mut state_file,
-                "apply",
-                "info",
-                format!(
-                    "Downloaded and verified {}-{}",
-                    &artifact.component, &artifact.version
-                ),
-                Some(&artifact.component),
-            );
-            set_operation_progress(
-                &mut state_file,
-                "apply",
-                "downloaded",
-                "running",
-                format!("Downloaded and verified {}", artifact.component),
-                Some(&artifact.component),
-                Some((60 + ((idx + 1) * 8 / selected_count)).min(68) as u8),
-                None,
-            );
-            save_state(state, &state_file)?;
-        } else {
-            append_operation_log(
-                &mut state_file,
-                "apply",
-                "info",
-                format!(
-                    "No published artifact entry for '{}' in current release set; skipping",
-                    comp.as_str()
-                ),
-                Some(comp.as_str()),
-            );
-            save_state(state, &state_file)?;
-        }
-    }
-
-    if downloads.is_empty() {
-        let message = if !skipped_up_to_date.is_empty() {
-            format!("no updates available for selected components: {update_component_label}")
-        } else {
-            format!(
-                "no matching artifacts were published for selected components: {update_component_label}"
-            )
-        };
-        details.push(message.clone());
-        if !skipped_up_to_date.is_empty() {
-            details.push(format!(
-                "already current: {}",
-                skipped_up_to_date.join(", ")
-            ));
-        }
-        append_operation_log(&mut state_file, "apply", "info", &message, None);
-        set_operation_progress(
-            &mut state_file,
-            "apply",
-            "completed",
-            "succeeded",
-            &message,
-            None,
-            Some(100),
-            None,
-        );
-        save_state(state, &state_file)?;
-        let _ = fs::remove_dir_all(&transaction_staging);
-        return Ok(UpdatesActionResult {
-            operation: "apply".to_string(),
-            success: true,
-            message,
-            details,
-            status: get_status(state).await,
-        });
-    }
-
-    let config_snapshot =
-        match snapshot_config_for_rollback(state, settings.encrypt_update_config_backups) {
-            Ok(path) => path,
-            Err(err) => {
-                let msg = format!(
-                    "failed to create config backup snapshot for {update_component_label}: {err}"
-                );
-                append_operation_log(&mut state_file, "apply", "error", &msg, None);
-                set_operation_progress(
-                    &mut state_file,
-                    "apply",
-                    "failed",
-                    "failed",
-                    &msg,
-                    None,
-                    Some(100),
-                    None,
-                );
-                save_state(state, &state_file)?;
-                return Ok(UpdatesActionResult {
-                    operation: "apply".to_string(),
-                    success: false,
-                    message: msg.clone(),
-                    details: vec![msg],
-                    status: get_status(state).await,
-                });
-            }
-        };
-
-    state_file.config_rollback_path = Some(config_snapshot.to_string_lossy().to_string());
-    set_operation_progress(
-        &mut state_file,
-        "apply",
-        "backup",
-        "running",
-        format!("Created config backup archive for {update_component_label}"),
-        None,
-        Some(70),
-        None,
-    );
-    append_operation_log(
-        &mut state_file,
-        "apply",
-        "info",
-        format!(
-            "Created config backup archive for {update_component_label}: {}",
-            config_snapshot.display()
-        ),
-        None,
-    );
-    save_state(state, &state_file)?;
-
-    // Step 3: Backup currently deployed runtime artifacts for rollback.
-    for comp in &components_to_update {
-        if !component_supports_runtime_deploy(*comp) {
-            continue;
-        }
-
-        if let Err(err) = snapshot_runtime_for_rollback(*comp) {
-            let msg = format!(
-                "failed to create rollback snapshot for {}: {}",
-                comp.as_str(),
-                err
-            );
-            append_operation_log(&mut state_file, "apply", "error", &msg, Some(comp.as_str()));
-            set_operation_progress(
-                &mut state_file,
-                "apply",
-                "failed",
-                "failed",
-                &msg,
-                Some(comp.as_str()),
-                Some(100),
-                None,
-            );
-            save_state(state, &state_file)?;
-            return Ok(UpdatesActionResult {
-                operation: "apply".to_string(),
-                success: false,
-                message: msg.clone(),
-                details: vec![msg],
-                status: get_status(state).await,
-            });
-        }
-
-        let entry = ensure_component_state(&mut state_file, *comp);
-        entry.rollback_version = entry
-            .current_version
-            .clone()
-            .or_else(|| entry.last_applied_version.clone());
-    }
-
-    details.push("created backup snapshots".to_string());
-    append_operation_log(
-        &mut state_file,
-        "apply",
-        "info",
-        format!("Created backup snapshots for {update_component_label}"),
-        None,
-    );
-
-    // Step 4: Apply artifacts atomically
-    let deploy_count = downloads.len().max(1);
-    for (idx, (component_name, version, artifact_path)) in downloads.iter().enumerate() {
-        let comp = match component_name.as_str() {
-            "core" => RepoComponent::Core,
-            "ui" => RepoComponent::Ui,
-            "rootfs" => RepoComponent::Rootfs,
-            _ => continue,
-        };
-
-        set_operation_progress(
-            &mut state_file,
-            "apply",
-            "deploying",
-            "running",
-            format!("Deploying {}", component_name),
-            Some(component_name),
-            Some((72 + (idx * 16 / deploy_count)).min(88) as u8),
-            None,
-        );
-        save_state(state, &state_file)?;
-
-        match extract_and_deploy_artifact(comp, artifact_path, None).await {
-            Ok(_) => {
-                let previous_version = {
-                    let entry = ensure_component_state(&mut state_file, comp);
-                    entry.current_version.clone()
-                };
-                let entry = ensure_component_state(&mut state_file, comp);
-                entry.current_version = Some(version.clone());
-                entry.last_applied_version = Some(version.clone());
-                entry.last_error = None;
-                details.push(format!("deployed {}-{}", component_name, version));
-                append_operation_log_with_versions(
-                    &mut state_file,
-                    "apply",
-                    "success",
-                    match previous_version.as_deref() {
-                        Some(prev) => {
-                            format!("Deployed {} from v{} to v{}", component_name, prev, version)
-                        }
-                        None => format!("Deployed {} to v{}", component_name, version),
-                    },
-                    Some(component_name),
-                    previous_version.as_deref(),
-                    Some(version.as_str()),
-                );
-                set_operation_progress(
-                    &mut state_file,
-                    "apply",
-                    "deployed",
-                    "running",
-                    format!("Deployed {}", component_name),
-                    Some(component_name),
-                    Some((76 + ((idx + 1) * 14 / deploy_count)).min(90) as u8),
-                    None,
-                );
-                save_state(state, &state_file)?;
-            }
-            Err(err) => {
-                details.push(format!("FAILED to deploy {}: {}", component_name, err));
-                append_operation_log(
-                    &mut state_file,
-                    "apply",
-                    "error",
-                    format!("Failed to deploy {}: {}", component_name, err),
-                    Some(component_name),
-                );
-                set_operation_progress(
-                    &mut state_file,
-                    "apply",
-                    "failed",
-                    "failed",
-                    format!("Failed to deploy {}: {}", component_name, err),
-                    Some(component_name),
-                    Some(100),
-                    None,
-                );
-                save_state(state, &state_file)?;
-
-                return Ok(UpdatesActionResult {
-                    operation: "apply".to_string(),
-                    success: false,
-                    message: format!("failed to apply updates: {}", err),
-                    details,
-                    status: get_status(state).await,
-                });
-            }
-        }
-    }
-
-    // Step 5: Always verify deployment health after applying updates
-    let runtime_downloaded = downloads
-        .iter()
-        .any(|(component_name, _, _)| matches!(component_name.as_str(), "core" | "ui"));
-    if runtime_downloaded {
-        set_operation_progress(
-            &mut state_file,
-            "apply",
-            "health_check",
-            "running",
-            format!("Checking service health for {update_component_label}"),
-            None,
-            Some(92),
-            None,
-        );
-        save_state(state, &state_file)?;
-        if let Err(err) = ensure_critical_services_healthy().await {
-            details.push(format!("post-apply service health check failed: {}", err));
-            append_operation_log(
-                &mut state_file,
-                "apply",
-                "error",
-                format!(
-                    "Post-apply service health check failed for {update_component_label}: {}",
-                    err
-                ),
-                None,
-            );
-            set_operation_progress(
-                &mut state_file,
-                "apply",
-                "failed",
-                "failed",
-                format!(
-                    "Post-apply service health check failed for {update_component_label}: {}",
-                    err
-                ),
-                None,
-                Some(100),
-                None,
-            );
-            save_state(state, &state_file)?;
-
-            return Ok(UpdatesActionResult {
-                operation: "apply".to_string(),
-                success: false,
-                message: "post-apply service health check failed".to_string(),
-                details,
-                status: get_status(state).await,
-            });
-        }
-        details.push("post-apply service health check passed".to_string());
-        append_operation_log(
-            &mut state_file,
-            "apply",
-            "success",
-            format!("Post-apply service health check passed for {update_component_label}"),
-            None,
-        );
-    }
-
-    // Step 6: Mark transaction complete
-    state_file.last_applied_at = Some(Utc::now().to_rfc3339());
-
-    append_operation_log(
-        &mut state_file,
-        "apply",
-        "success",
-        format!("Artifact update apply completed for {update_component_label}"),
-        None,
-    );
-    set_operation_progress(
-        &mut state_file,
-        "apply",
-        "completed",
-        "succeeded",
-        format!("Update completed successfully for {update_component_label}"),
-        None,
-        Some(100),
-        None,
-    );
-
-    save_state(state, &state_file)?;
-
-    // Cleanup staging directory
-    let _ = fs::remove_dir_all(&transaction_staging);
-
-    Ok(UpdatesActionResult {
-        operation: "apply".to_string(),
-        success: true,
-        message: "updates applied successfully".to_string(),
-        details,
-        status: get_status(state).await,
-    })
-}
-
-/// Helper: check if a partial component apply violates atomicity constraints.
-/// Returns an error if the user is trying to apply only some components when multiple have updates available.
-async fn check_atomicity_constraint(
-    state: &AppState,
-    selected_components: &[RepoComponent],
-    force_partial_apply: bool,
-) -> Result<()> {
-    if force_partial_apply {
-        // Bypass the check if explicitly forced by operator
-        return Ok(());
-    }
-
-    if selected_components
-        .iter()
-        .any(|component| matches!(component, RepoComponent::Rootfs))
-    {
-        return Ok(());
-    }
-
-    let status = get_status(state).await;
-    let available_components: Vec<&str> = status
-        .components
-        .iter()
-        .filter(|c| c.update_available)
-        .filter_map(|c| match c.component.as_str() {
-            "core" => Some(RepoComponent::Core),
-            "ui" => Some(RepoComponent::Ui),
-            "rootfs" => Some(RepoComponent::Rootfs),
-            _ => None,
         })
-        .filter(|component| component_supports_runtime_deploy(*component))
-        .map(|component| component.as_str())
         .collect();
-    let available_count = available_components.len();
-    let selected_count = selected_components
-        .iter()
-        .filter(|component| component_supports_runtime_deploy(**component))
-        .count();
 
-    // If multiple components have updates but user is selecting only some, that's a violation
-    if available_count > 1 && selected_count < available_count {
-        return Err(anyhow::anyhow!(
-            "Update atomicity violation: {} components have available updates ({}), but only {} were selected. \
-             Either apply all available updates, or use forcePartialApply to override this check.",
-            available_count,
-            available_components.join(", "),
-            selected_count
-        ));
-    }
-
-    Ok(())
-}
-
-pub async fn apply_updates(
-    state: &AppState,
-    component: UpdateComponent,
-    force_partial_apply: bool,
-) -> Result<UpdatesActionResult> {
-    let selected = RepoComponent::from_update_component(component);
-    let result = apply_repo_component_selection(state, selected, force_partial_apply).await;
-    if let Err(err) = &result {
-        mark_operation_progress_failed(state, "apply", format!("Update failed: {err:#}"));
-    }
-    result
-}
-
-async fn apply_repo_component_selection(
-    state: &AppState,
-    selected: Vec<RepoComponent>,
-    force_partial_apply: bool,
-) -> Result<UpdatesActionResult> {
-    let _guard = op_lock().lock().await;
-
-    ensure_registry_updatable_selection(&selected)?;
-
-    // Check atomicity constraint before proceeding
-    check_atomicity_constraint(state, &selected, force_partial_apply).await?;
-
-    // Registry-based update application (artifact distribution)
-    apply_updates_registry(state, selected).await
-}
-
-pub async fn rollback_updates(
-    state: &AppState,
-    component: UpdateComponent,
-    force_partial_apply: bool,
-) -> Result<UpdatesActionResult> {
-    let _guard = op_lock().lock().await;
-
-    let mut state_file = load_state(state);
-    let selected = RepoComponent::from_update_component(component);
-    ensure_registry_updatable_selection(&selected)?;
-
-    // Check atomicity constraint before proceeding
-    check_atomicity_constraint(state, &selected, force_partial_apply).await?;
-
-    let mut details = Vec::new();
-    let mut rolled_back_components: usize = 0;
-    let rollback_component_label = component_log_display_value(&selected);
-    append_operation_log(
-        &mut state_file,
-        "rollback",
-        "info",
-        format!("Rollback started for {rollback_component_label}"),
-        None,
-    );
-    set_operation_progress(
-        &mut state_file,
-        "rollback",
-        "starting",
-        "running",
-        format!("Rollback started for {rollback_component_label}"),
-        None,
-        Some(5),
-        None,
-    );
-    save_state(state, &state_file)?;
-
-    info!(component = ?component, "updates: rollback started");
-
-    let selected_count = selected.len().max(1);
-    for (idx, comp) in selected.into_iter().enumerate() {
-        let previous_version = {
-            let entry = ensure_component_state(&mut state_file, comp);
-            entry.rollback_version.clone()
-        };
-
-        let target_version = match previous_version {
-            Some(version) => version,
-            None => {
-                let msg = format!("{}: no rollback snapshot/version available", comp.as_str());
-                details.push(msg.clone());
-                append_operation_log(
-                    &mut state_file,
-                    "rollback",
-                    "error",
-                    msg.clone(),
-                    Some(comp.as_str()),
-                );
-                set_operation_progress(
-                    &mut state_file,
-                    "rollback",
-                    "rollback",
-                    "running",
-                    msg,
-                    Some(comp.as_str()),
-                    Some(((idx + 1) * 65 / selected_count).clamp(10, 70) as u8),
-                    None,
-                );
-                save_state(state, &state_file)?;
-                continue;
-            }
-        };
-
-        let current_before = {
-            let entry = ensure_component_state(&mut state_file, comp);
-            entry.current_version.clone()
-        };
-
-        if let Err(err) = restore_runtime_from_snapshot(comp) {
-            let msg = format!("{}: rollback failed ({err})", comp.as_str());
-            {
-                let entry = ensure_component_state(&mut state_file, comp);
-                entry.last_error = Some(msg.clone());
-            }
-            append_operation_log(
-                &mut state_file,
-                "rollback",
-                "error",
-                msg.clone(),
-                Some(comp.as_str()),
-            );
-            set_operation_progress(
-                &mut state_file,
-                "rollback",
-                "failed",
-                "failed",
-                msg.clone(),
-                Some(comp.as_str()),
-                Some(100),
-                None,
-            );
-            save_state(state, &state_file)?;
-            let status = get_status(state).await;
-            return Ok(UpdatesActionResult {
-                operation: "rollback".to_string(),
-                success: false,
-                message: "rollback failed".to_string(),
-                details: vec![msg],
-                status,
-            });
-        }
-
-        {
-            let entry = ensure_component_state(&mut state_file, comp);
-            entry.current_version = Some(target_version.clone());
-            entry.last_applied_version = Some(target_version.clone());
-            entry.rollback_version = current_before.clone();
-            entry.last_error = None;
-        }
-
-        details.push(format!(
-            "{}: rolled back to {}",
-            comp.as_str(),
-            target_version
-        ));
-        append_operation_log_with_versions(
-            &mut state_file,
-            "rollback",
-            "success",
-            match current_before.as_deref() {
-                Some(prev) => format!(
-                    "Rolled back {} from v{} to v{}",
-                    comp.as_str(),
-                    prev,
-                    target_version
-                ),
-                None => format!("Rolled back {} to v{}", comp.as_str(), target_version),
-            },
-            Some(comp.as_str()),
-            current_before.as_deref(),
-            Some(target_version.as_str()),
-        );
-        rolled_back_components += 1;
-        set_operation_progress(
-            &mut state_file,
-            "rollback",
-            "rollback",
-            "running",
-            format!("Rolled back {}", comp.as_str()),
-            Some(comp.as_str()),
-            Some((10 + ((idx + 1) * 60 / selected_count)).min(70) as u8),
-            None,
-        );
-        save_state(state, &state_file)?;
-    }
-
-    if rolled_back_components == 0 {
-        append_operation_log(
-            &mut state_file,
-            "rollback",
-            "error",
-            format!(
-                "Rollback failed for {rollback_component_label}: no components could be rolled back"
-            ),
-            None,
-        );
-        set_operation_progress(
-            &mut state_file,
-            "rollback",
-            "failed",
-            "failed",
-            format!(
-                "Rollback failed for {rollback_component_label}: no components could be rolled back"
-            ),
-            None,
-            Some(100),
-            None,
-        );
-        save_state(state, &state_file)?;
-        let status = get_status(state).await;
-        return Ok(UpdatesActionResult {
-            operation: "rollback".to_string(),
-            success: false,
-            message: "rollback failed: no rollback snapshot available".to_string(),
-            details,
-            status,
-        });
-    }
-
-    let config_snapshot = state_file.config_rollback_path.clone();
-    let snapshot_path = match config_snapshot {
-        Some(path) => PathBuf::from(path),
-        None => {
-            append_operation_log(
-                &mut state_file,
-                "rollback",
-                "error",
-                format!(
-                    "Rollback failed for {rollback_component_label}: no config backup archive available"
-                ),
-                None,
-            );
-            set_operation_progress(
-                &mut state_file,
-                "rollback",
-                "failed",
-                "failed",
-                format!(
-                    "Rollback failed for {rollback_component_label}: no config backup archive available"
-                ),
-                None,
-                Some(100),
-                None,
-            );
-            save_state(state, &state_file)?;
-            let status = get_status(state).await;
-            return Ok(UpdatesActionResult {
-                operation: "rollback".to_string(),
-                success: false,
-                message: "rollback failed: no config backup archive available".to_string(),
-                details,
-                status,
-            });
-        }
-    };
-
-    if let Err(err) = restore_config_from_snapshot(state, &snapshot_path) {
-        let msg = format!(
-            "failed to restore config snapshot for {rollback_component_label} ({}): {}",
-            snapshot_path.display(),
-            err
-        );
-        append_operation_log(&mut state_file, "rollback", "error", &msg, None);
-        set_operation_progress(
-            &mut state_file,
-            "rollback",
-            "failed",
-            "failed",
-            &msg,
-            None,
-            Some(100),
-            None,
-        );
-        save_state(state, &state_file)?;
-        let status = get_status(state).await;
-        return Ok(UpdatesActionResult {
-            operation: "rollback".to_string(),
-            success: false,
-            message: "rollback failed".to_string(),
-            details: vec![msg],
-            status,
-        });
-    }
-
-    append_operation_log(
-        &mut state_file,
-        "rollback",
-        "success",
-        format!(
-            "Restored config backup archive for {rollback_component_label}: {}",
-            snapshot_path.display()
+    match candidates.len() {
+        0 => anyhow::bail!(
+            "no staged rootfs artifact found in {}",
+            staging_dir.display()
         ),
-        None,
-    );
-    set_operation_progress(
-        &mut state_file,
-        "rollback",
-        "restore_config",
-        "running",
-        format!("Restored config backup archive for {rollback_component_label}"),
-        None,
-        Some(85),
-        None,
-    );
-    state_file.config_rollback_path = None;
-
-    state_file.last_applied_at = Some(Utc::now().to_rfc3339());
-    state_file.pending_reboot = false;
-    append_operation_log(
-        &mut state_file,
-        "rollback",
-        "success",
-        format!("Rollback completed for {rollback_component_label}"),
-        None,
-    );
-    set_operation_progress(
-        &mut state_file,
-        "rollback",
-        "completed",
-        "succeeded",
-        format!("Rollback completed for {rollback_component_label}"),
-        None,
-        Some(100),
-        None,
-    );
-    save_state(state, &state_file)?;
-
-    info!("updates: rollback completed");
-
-    let status = get_status(state).await;
-    Ok(UpdatesActionResult {
-        operation: "rollback".to_string(),
-        success: true,
-        message: "rollback completed".to_string(),
-        details,
-        status,
-    })
-}
-
-pub async fn validate_updates(
-    state: &AppState,
-    component: UpdateComponent,
-    force_partial_apply: bool,
-) -> Result<UpdatesActionResult> {
-    let _guard = op_lock().lock().await;
-
-    let selected_repos = RepoComponent::from_update_component(component);
-    ensure_registry_updatable_selection(&selected_repos)?;
-
-    // Check atomicity constraint before proceeding
-    check_atomicity_constraint(state, &selected_repos, force_partial_apply).await?;
-
-    let status = get_status(state).await;
-    let mut details = Vec::new();
-    let mut success = true;
-    let mut warning_count: usize = 0;
-
-    let selected = selected_repos
-        .into_iter()
-        .map(|c| c.as_str().to_string())
-        .collect::<Vec<_>>();
-
-    for comp in &status.components {
-        if !selected.iter().any(|s| s == &comp.component) {
-            continue;
-        }
-
-        if !comp.valid_repo {
-            success = false;
-            details.push(format!("{}: repository is not valid", comp.component));
-            continue;
-        }
-
-        // Registry mode: validate using versions (current_commit is None)
-        if comp.current_commit.is_none() && comp.current_version.is_some() {
-            match (&comp.current_version, &comp.last_applied_version) {
-                (Some(current), Some(applied)) if current == applied => {
-                    details.push(format!(
-                        "{}: registry validation ok ({})",
-                        comp.component, current
-                    ));
-                }
-                (Some(current), Some(applied)) => {
-                    success = false;
-                    details.push(format!(
-                        "{}: version mismatch (current {}, expected {})",
-                        comp.component, current, applied
-                    ));
-                }
-                (Some(current), None) => {
-                    warning_count += 1;
-                    details.push(format!(
-                        "{}: no applied baseline, current version {}",
-                        comp.component, current
-                    ));
-                }
-                _ => {
-                    success = false;
-                    details.push(format!(
-                        "{}: unable to determine current version",
-                        comp.component
-                    ));
-                }
-            }
-        } else {
-            // Git mode: validate using commits
-            match (&comp.current_commit, &comp.last_applied_commit) {
-                (Some(current), Some(applied)) if current == applied => {
-                    details.push(format!(
-                        "{}: git validation ok ({})",
-                        comp.component,
-                        short_sha(current)
-                    ));
-                }
-                (Some(current), Some(applied)) => {
-                    success = false;
-                    details.push(format!(
-                        "{}: validation mismatch (current {}, expected {})",
-                        comp.component,
-                        short_sha(current),
-                        short_sha(applied)
-                    ));
-                }
-                (Some(current), None) => {
-                    warning_count += 1;
-                    details.push(format!(
-                        "{}: no applied baseline, current {}",
-                        comp.component,
-                        short_sha(current)
-                    ));
-                }
-                _ => {
-                    success = false;
-                    details.push(format!("{}: unable to read current commit", comp.component));
-                }
-            }
-        }
-
-        let repo_component = match comp.component.as_str() {
-            "core" => Some(RepoComponent::Core),
-            "ui" => Some(RepoComponent::Ui),
-            _ => None,
-        };
-
-        if let Some(repo_component) = repo_component {
-            if !component_supports_runtime_deploy(repo_component) {
-                continue;
-            }
-
-            let marker = load_runtime_marker(repo_component);
-            match (&comp.current_commit, marker) {
-                (Some(current), Some(deployed)) if current == &deployed => {
-                    details.push(format!(
-                        "{}: runtime validation ok ({})",
-                        comp.component,
-                        short_sha(current)
-                    ));
-                }
-                (Some(current), Some(deployed)) => {
-                    success = false;
-                    details.push(format!(
-                        "{}: runtime mismatch (deployed {}, expected {})",
-                        comp.component,
-                        short_sha(&deployed),
-                        short_sha(current)
-                    ));
-                }
-                (Some(current), None) => {
-                    warning_count += 1;
-                    details.push(format!(
-                        "{}: runtime marker missing (expected {})",
-                        comp.component,
-                        short_sha(current)
-                    ));
-                }
-                _ => {}
-            }
+        1 => Ok(candidates.into_iter().next().unwrap()),
+        _ => {
+            // Multiple candidates — pick the newest by modification time
+            candidates
+                .into_iter()
+                .max_by_key(|p| {
+                    p.metadata()
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+                })
+                .ok_or_else(|| anyhow::anyhow!("failed to select staged rootfs artifact"))
         }
     }
-
-    info!(success, "updates: validation completed");
-
-    let core_version = status
-        .components
-        .iter()
-        .find(|c| c.component == "core")
-        .and_then(|c| c.current_version.clone());
-    let ui_version = status
-        .components
-        .iter()
-        .find(|c| c.component == "ui")
-        .and_then(|c| c.current_version.clone());
-
-    let validation_summary = if success {
-        match (core_version.as_deref(), ui_version.as_deref()) {
-            (Some(core), Some(ui)) => {
-                format!("Validation completed successfully (Core v{core}/UI v{ui})")
-            }
-            _ => "Validation completed successfully".to_string(),
-        }
-    } else {
-        "Validation failed".to_string()
-    };
-
-    let mut state_file = load_state(state);
-    append_operation_log_with_versions(
-        &mut state_file,
-        "validate",
-        if success { "success" } else { "error" },
-        validation_summary,
-        None,
-        None,
-        None,
-    );
-    save_state(state, &state_file)?;
-
-    Ok(UpdatesActionResult {
-        operation: "validate".to_string(),
-        success,
-        message: if success && warning_count > 0 {
-            format!("validation passed with {warning_count} note(s)")
-        } else if success {
-            "validation passed".to_string()
-        } else {
-            "validation failed".to_string()
-        },
-        details,
-        status,
-    })
 }
 
-fn short_sha(commit: &str) -> String {
-    commit.chars().take(8).collect()
-}
-
-fn component_update_available(status: &UpdatesStatus, component: &str) -> bool {
-    status
-        .components
-        .iter()
-        .any(|entry| entry.component == component && entry.update_available)
-}
-
-fn runtime_update_selection(status: &UpdatesStatus) -> Vec<RepoComponent> {
-    let mut selected = Vec::new();
-    if component_update_available(status, RepoComponent::Core.as_str()) {
-        selected.push(RepoComponent::Core);
-    }
-    if component_update_available(status, RepoComponent::Ui.as_str()) {
-        selected.push(RepoComponent::Ui);
-    }
-    selected
-}
-
-fn component_selection_label(components: &[RepoComponent]) -> String {
-    components
-        .iter()
-        .map(|component| component.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn append_scheduled_log(
-    state: &AppState,
-    operation: &str,
-    level: &str,
-    message: impl Into<String>,
-    component: Option<&str>,
-) -> Result<()> {
-    let mut state_file = load_state(state);
-    append_operation_log(&mut state_file, operation, level, message, component);
-    save_state(state, &state_file)
-}
-
-async fn request_scheduled_reboot(state: &AppState, reason: &str) -> Result<()> {
-    append_scheduled_log(state, "reboot", "info", reason, Some("rootfs"))?;
-    info!(reason = %reason, "updates: scheduled reboot requested");
-
-    Command::new("systemctl")
-        .arg("--no-block")
-        .arg("reboot")
-        .spawn()
-        .with_context(|| "failed to spawn systemctl reboot for scheduled update")?
-        .wait()
-        .await
-        .with_context(|| "systemctl reboot failed for scheduled update")?;
-
-    Ok(())
-}
-
-async fn activate_scheduled_rootfs_update(
-    state: &AppState,
-    settings: &UpdateSettings,
-) -> Result<()> {
-    append_scheduled_log(
-        state,
-        "apply",
-        "info",
-        "Scheduled system image activation started",
-        Some("rootfs"),
-    )?;
-
-    let result = crate::rootfs_update::apply_update().await?;
-    append_scheduled_log(
-        state,
-        "apply",
-        if result.success { "success" } else { "error" },
-        result.message.clone(),
-        Some("rootfs"),
-    )?;
-
-    if !result.success {
-        anyhow::bail!(result.message);
-    }
-
-    if settings.auto_reboot_after_apply {
-        request_scheduled_reboot(
-            state,
-            "Scheduled system image update activated; rebooting automatically",
-        )
-        .await?;
-    } else {
-        append_scheduled_log(
-            state,
-            "apply",
-            "info",
-            "Scheduled system image update activated; reboot required",
-            Some("rootfs"),
-        )?;
-    }
-
-    Ok(())
-}
-
-async fn run_scheduled_update_actions(
-    state: &AppState,
-    status: &UpdatesStatus,
-    settings: &UpdateSettings,
-) -> Result<()> {
-    if !settings.auto_apply_updates {
-        return Ok(());
-    }
-
-    let rootfs_status = crate::rootfs_update::status().await;
-    if rootfs_status.reboot_required {
-        if settings.auto_reboot_after_apply {
-            request_scheduled_reboot(
-                state,
-                "Scheduled system image update is pending; rebooting automatically",
-            )
-            .await?;
-        } else {
-            append_scheduled_log(
-                state,
-                "apply",
-                "info",
-                "Scheduled app updates deferred until the pending system image update has booted",
-                Some("rootfs"),
-            )?;
-        }
-        return Ok(());
-    }
-
-    if component_update_available(status, RepoComponent::Rootfs.as_str()) {
-        append_scheduled_log(
-            state,
-            "apply",
-            "info",
-            "Scheduled update applying system image before app updates",
-            Some("rootfs"),
-        )?;
-
-        let result =
-            apply_repo_component_selection(state, vec![RepoComponent::Rootfs], false).await?;
-        if !result.success {
-            anyhow::bail!(result.message);
-        }
-
-        activate_scheduled_rootfs_update(state, settings).await?;
-        return Ok(());
-    }
-
-    if !settings.deploy_runtime_after_apply {
-        append_scheduled_log(
-            state,
-            "apply",
-            "info",
-            "Scheduled app update deployment skipped by update settings",
-            None,
-        )?;
-        return Ok(());
-    }
-
-    let runtime_components = runtime_update_selection(status);
-    if runtime_components.is_empty() {
-        return Ok(());
-    }
-
-    let runtime_label = component_selection_label(&runtime_components);
-    append_scheduled_log(
-        state,
-        "apply",
-        "info",
-        format!("Scheduled app update deployment started for {runtime_label}"),
-        None,
-    )?;
-
-    let result = apply_repo_component_selection(state, runtime_components, false).await?;
-    if !result.success {
-        anyhow::bail!(result.message);
-    }
-
-    append_scheduled_log(
-        state,
-        "apply",
-        "success",
-        "Scheduled app update deployment completed",
-        None,
-    )?;
-
-    Ok(())
-}
-
-pub async fn start_update_checker(state: std::sync::Arc<AppState>) {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(Duration::from_secs(60));
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        info!("updates: periodic checker started");
-
-        loop {
-            ticker.tick().await;
-
-            let settings = load_settings(&state);
-            if !settings.auto_check_enabled {
-                continue;
-            }
-
-            let now = Local::now();
-            let scheduled_time = match parse_auto_check_time(&settings.auto_check_time) {
-                Some(time) => time,
-                None => continue,
-            };
-
-            if now.time().hour() < scheduled_time.hour()
-                || (now.time().hour() == scheduled_time.hour()
-                    && now.time().minute() < scheduled_time.minute())
-            {
-                continue;
-            }
-
-            let occurrence_key = match settings.auto_check_frequency {
-                UpdateAutoCheckFrequency::Daily => now.format("%Y-%m-%d").to_string(),
-                UpdateAutoCheckFrequency::Weekly => {
-                    if !settings.auto_check_weekday.matches(now.weekday()) {
-                        continue;
-                    }
-                    format!(
-                        "{}-w{:02}-{}",
-                        now.iso_week().year(),
-                        now.iso_week().week(),
-                        settings.auto_check_weekday.as_str()
-                    )
-                }
-                UpdateAutoCheckFrequency::Monthly => {
-                    let day = now.day() as u8;
-                    let is_first_day = settings.auto_check_month_days.contains(&1) && day == 1;
-                    let is_last_day = settings.auto_check_month_days.contains(&31)
-                        && last_day_of_month(now.year(), now.month())
-                            .map(|last_day| day as u32 == last_day)
-                            .unwrap_or(false);
-
-                    if !is_first_day && !is_last_day {
-                        continue;
-                    }
-
-                    if is_last_day {
-                        format!("{:04}-{:02}-last", now.year(), now.month())
-                    } else {
-                        format!("{:04}-{:02}-01", now.year(), now.month())
-                    }
-                }
-            };
-
-            let mut state_file = load_state(&state);
-            if state_file.last_auto_check_run.as_deref() == Some(occurrence_key.as_str()) {
-                continue;
-            }
-            state_file.last_auto_check_run = Some(occurrence_key.clone());
-            if let Err(err) = save_state(&state, &state_file) {
-                warn!(error = %err, "updates: failed to persist auto-check schedule state");
-                continue;
-            }
-
-            match check_for_updates_with_trigger(&state, CheckTrigger::Scheduled).await {
-                Ok(status) => {
-                    let available = status
-                        .components
-                        .iter()
-                        .filter(|c| c.update_available)
-                        .count();
-                    info!(available, "updates: periodic check completed");
-                    if let Err(err) = run_scheduled_update_actions(&state, &status, &settings).await
-                    {
-                        warn!(error = %err, "updates: scheduled update action failed");
-                    }
-                }
-                Err(err) => {
-                    warn!(error = %err, "updates: periodic check failed");
-                }
-            }
-        }
-    });
-}
+// ============================================================================
+// Tests
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    use super::install_executable_file_atomic;
-    use super::{
-        artifact_version_from_name, checksum_from_text, component_log_display_value,
-        component_log_label, component_log_message, github_repo_api_url, github_repo_slug,
-        ArtifactMetadata, RegistryManifest, RepoComponent,
-    };
+    use super::*;
 
     #[test]
-    fn component_log_helpers_format_operator_friendly_names() {
-        let components = vec![
-            RepoComponent::Core,
-            RepoComponent::Ui,
-            RepoComponent::Rootfs,
-        ];
-
-        assert_eq!(component_log_display_value(&components), "Core, UI, rootfs");
-        assert_eq!(component_log_label("core, ui, rootfs"), "Core, UI, rootfs");
-        assert_eq!(
-            component_log_message("Update started".to_string(), Some("core, ui, rootfs")),
-            "[Core, UI, rootfs] Update started"
-        );
+    fn test_is_artifact_version() {
+        assert!(is_artifact_version("1.2.3"));
+        assert!(is_artifact_version("1.2"));
+        assert!(is_artifact_version("10.20.30.40"));
+        assert!(!is_artifact_version("1"));
+        assert!(!is_artifact_version("1.2.3-alpha"));
+        assert!(!is_artifact_version(""));
+        assert!(!is_artifact_version("v1.2.3"));
+        assert!(!is_artifact_version("1.2."));
+        assert!(!is_artifact_version(".1.2"));
     }
 
     #[test]
-    fn github_repo_slug_extracts_owner_and_repo() {
-        assert_eq!(
-            github_repo_slug("https://api.github.com/repos/daygle/dayshield-core"),
-            Some("daygle/dayshield-core".to_string())
-        );
-        assert_eq!(
-            github_repo_slug("https://github.com/daygle/dayshield-ui.git"),
-            Some("daygle/dayshield-ui".to_string())
-        );
-        assert_eq!(github_repo_slug("https://example.com"), None);
+    fn test_is_newer_artifact_version() {
+        assert!(is_newer_artifact_version("1.2.3", "1.2.4"));
+        assert!(is_newer_artifact_version("1.2.3", "1.3.0"));
+        assert!(is_newer_artifact_version("1.2.3", "2.0.0"));
+        assert!(!is_newer_artifact_version("1.2.3", "1.2.3"));
+        assert!(!is_newer_artifact_version("1.2.4", "1.2.3"));
+        assert!(!is_newer_artifact_version("2.0.0", "1.9.9"));
+        assert!(is_newer_artifact_version("1.2", "1.3"));
+        assert!(is_newer_artifact_version("1.2.3", "1.2.3.1"));
     }
 
     #[test]
-    fn github_repo_api_url_normalizes_supported_github_urls() {
+    fn test_extract_asset_version() {
         assert_eq!(
-            github_repo_api_url("https://github.com/daygle/dayshield-ui"),
-            Some("https://api.github.com/repos/daygle/dayshield-ui".to_string())
-        );
-        assert_eq!(
-            github_repo_api_url(
-                "https://api.github.com/repos/daygle/dayshield-rootfs/releases/latest"
-            ),
-            Some("https://api.github.com/repos/daygle/dayshield-rootfs".to_string())
-        );
-    }
-
-    #[test]
-    fn artifact_version_from_name_requires_component_tarball_name() {
-        assert_eq!(
-            artifact_version_from_name("ui", "ui-v1.2.3.tar.zst"),
+            extract_asset_version("core-v1.2.3.tar.zst", "core"),
             Some("1.2.3".to_string())
         );
         assert_eq!(
-            artifact_version_from_name("rootfs", "rootfs-v1.0.1.tar.zst"),
-            Some("1.0.1".to_string())
+            extract_asset_version("ui-v2.0.1.tar.gz", "ui"),
+            Some("2.0.1".to_string())
         );
         assert_eq!(
-            artifact_version_from_name("rootfs", "rootfs-v2026.05.21.tar.zst"),
-            Some("2026.05.21".to_string())
+            extract_asset_version("rootfs-v1.0.0.squashfs", "rootfs"),
+            Some("1.0.0".to_string())
         );
-        // Rootfs also accepts the standalone squashfs image artifact
         assert_eq!(
-            artifact_version_from_name("rootfs", "rootfs-v1.2.3.squashfs"),
+            extract_asset_version("core-1.2.3.tar.zst", "core"),
             Some("1.2.3".to_string())
         );
-        assert_eq!(
-            artifact_version_from_name("rootfs", "rootfs-v2026.05.21.squashfs"),
-            Some("2026.05.21".to_string())
-        );
-        // squashfs suffix is rootfs-only; other components must use .tar.zst
-        assert_eq!(
-            artifact_version_from_name("core", "core-v1.2.3.squashfs"),
-            None
-        );
-        assert_eq!(
-            artifact_version_from_name("ui", "dayshield-ui-v1.2.3.tar.zst"),
-            None
-        );
+        assert_eq!(extract_asset_version("other-v1.2.3.tar.zst", "core"), None);
     }
 
     #[test]
-    fn remote_version_detection_requires_newer_numeric_version() {
-        assert!(super::is_remote_version_newer("1.0.0", "1.0.1"));
-        assert!(super::is_remote_version_newer("1.0.9", "1.0.10"));
-        assert!(!super::is_remote_version_newer("1.0.0", "1.0.0"));
-        assert!(!super::is_remote_version_newer("1.0.1", "1.0.0"));
-        assert!(!super::is_remote_version_newer("1.0.0", "1.0"));
+    fn test_github_repo_parts() {
+        assert_eq!(
+            github_repo_parts("https://github.com/daygle/dayshield-core"),
+            Some(("daygle".to_string(), "dayshield-core".to_string()))
+        );
+        assert_eq!(
+            github_repo_parts("https://api.github.com/repos/daygle/dayshield-core"),
+            Some(("daygle".to_string(), "dayshield-core".to_string()))
+        );
+        assert_eq!(
+            github_repo_parts("git@github.com:daygle/dayshield-core.git"),
+            Some(("daygle".to_string(), "dayshield-core".to_string()))
+        );
+        assert_eq!(github_repo_parts("https://example.com/foo"), None);
     }
 
     #[test]
-    fn checksum_from_text_supports_checksum_files_and_sidecars() {
-        let checksum = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        assert_eq!(
-            checksum_from_text(
-                &format!("{checksum}  ui-v1.2.3.tar.zst\n"),
-                "ui-v1.2.3.tar.zst"
-            ),
-            Some(checksum.to_string())
-        );
-        assert_eq!(
-            checksum_from_text(&format!("{checksum}\n"), "rootfs-v1.2.3.tar.zst"),
-            Some(checksum.to_string())
-        );
-        assert_eq!(
-            checksum_from_text(
-                &format!("{checksum}  core-v1.2.3.tar.zst\n"),
-                "ui-v1.2.3.tar.zst"
-            ),
-            None
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn install_executable_file_atomic_sets_executable_mode() {
-        use std::{fs, os::unix::fs::PermissionsExt};
-
-        let dir = tempfile::tempdir().expect("temp dir");
-        let src = dir.path().join("helper.sh");
-        let target = dir.path().join("installed-helper.sh");
-        fs::write(&src, b"#!/bin/sh\n").expect("write helper");
-        fs::set_permissions(&src, fs::Permissions::from_mode(0o644))
-            .expect("set source permissions");
-
-        install_executable_file_atomic(&src, &target).expect("install executable");
-
-        let mode = fs::metadata(&target)
-            .expect("target metadata")
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o755);
+    fn test_github_releases_to_manifest_empty() {
+        let result = github_releases_to_manifest(vec![], "https://api.github.com/repos/foo/bar");
+        assert!(result.is_err());
     }
 
     #[test]
-    fn manifest_supports_independent_component_metadata() {
-        let manifest = RegistryManifest {
-            generated_at: "2026-05-18T00:00:00Z".to_string(),
-            partial: false,
-            components: vec![ArtifactMetadata {
-                component: "rootfs".to_string(),
-                version: "2026.05.10".to_string(),
-                download_url: "https://example.invalid/rootfs.tar.zst".to_string(),
-                checksum_sha256: "abc123".to_string(),
-                signature_url: Some("https://example.invalid/rootfs.sig".to_string()),
-                source_repo: Some("daygle/dayshield-rootfs".to_string()),
-                source_tag: Some("v2026.05.10".to_string()),
-                source_release_url: Some(
-                    "https://github.com/daygle/dayshield-rootfs/releases/tag/v2026.05.10"
+    fn test_github_releases_to_manifest_single_release() {
+        let release = GitHubRelease {
+            tag_name: "v1.2.3".to_string(),
+            assets: vec![
+                GitHubAsset {
+                    name: "core-v1.2.3.tar.zst".to_string(),
+                    browser_download_url: "https://example.com/core-v1.2.3.tar.zst".to_string(),
+                },
+                GitHubAsset {
+                    name: "core-v1.2.3.tar.zst.sha256".to_string(),
+                    browser_download_url: "https://example.com/core-v1.2.3.tar.zst.sha256"
                         .to_string(),
-                ),
-            }],
+                },
+            ],
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            html_url: Some("https://github.com/foo/bar/releases/tag/v1.2.3".to_string()),
         };
 
-        let json = serde_json::to_string(&manifest).expect("serialize manifest");
-        let parsed: RegistryManifest = serde_json::from_str(&json).expect("deserialize manifest");
-        let comp = parsed.components.first().expect("component entry");
-        assert_eq!(comp.source_repo.as_deref(), Some("daygle/dayshield-rootfs"));
-        assert_eq!(comp.source_tag.as_deref(), Some("v2026.05.10"));
+        let result =
+            github_releases_to_manifest(vec![release], "https://api.github.com/repos/foo/bar");
+        assert!(result.is_ok());
+        let manifest = result.unwrap();
+        assert_eq!(manifest.components.len(), 1);
+        let comp = &manifest.components[0];
+        assert_eq!(comp.component, "core");
+        assert_eq!(comp.version, "1.2.3");
         assert_eq!(
-            comp.source_release_url.as_deref(),
-            Some("https://github.com/daygle/dayshield-rootfs/releases/tag/v2026.05.10")
+            comp.download_url,
+            "https://example.com/core-v1.2.3.tar.zst"
         );
-    }
-
-    #[test]
-    fn manifest_metadata_fields_are_backward_compatible() {
-        let legacy = r#"{
-            "generatedAt": "2026-05-18T00:00:00Z",
-            "components": [{
-                "component": "core",
-                "version": "1.0.0",
-                "downloadUrl": "https://example.invalid/core.tar.zst",
-                "checksumSha256": "def456"
-            }]
-        }"#;
-
-        let parsed: RegistryManifest = serde_json::from_str(legacy).expect("parse legacy manifest");
-        let comp = parsed.components.first().expect("component entry");
-        assert!(comp.source_repo.is_none());
+        assert_eq!(
+            comp.checksum_sha256,
+            "https://example.com/core-v1.2.3.tar.zst.sha256"
+        );
         assert!(comp.source_tag.is_none());
         assert!(comp.source_release_url.is_none());
     }

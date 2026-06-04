@@ -19,7 +19,7 @@ use tokio::process::Command;
 use tracing::{info, warn};
 
 use crate::config::models::{
-    AcmeChallengeType, AcmeConfig, AcmeDnsProvider, AcmeProvider, DnsClientAclPreset, DnsConfig,
+    AcmeChallengeType, AcmeConfig, AcmeDnsProvider, DnsClientAclPreset, DnsConfig,
     DnsDomainOverride, DnsHostOverride, DnsLocalRecord, DnsResolverMode, DotConfig,
 };
 
@@ -394,7 +394,6 @@ fn write_dot_tls_files(dot: &DotConfig) -> Result<()> {
             dns_provider: AcmeDnsProvider::Manual,
             cloudflare_zone_id: None,
             cloudflare_api_token: None,
-            provider: AcmeProvider::Custom,
             cert_storage_path: storage_path.clone(),
         };
         let acme_engine = crate::engine::acme::AcmeEngine::new(acme_cfg);

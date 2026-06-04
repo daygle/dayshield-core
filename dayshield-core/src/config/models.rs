@@ -147,18 +147,9 @@ pub struct Interface {
     pub enabled: bool,
     /// Obtain an IPv4 address via DHCP.
     pub dhcp4: bool,
-    /// Obtain an IPv6 address via DHCP (reserved for future use).
-    pub dhcp6: bool,
-    /// Accept IPv6 Router Advertisements (SLAAC).
-    ///
-    /// When enabled, DayShield sets `net.ipv6.conf.<iface>.accept_ra=2` so RA
-    /// can be used even while forwarding is enabled.
+    /// IPv6 address acquisition mode.
     #[serde(default)]
-    pub accept_ra: bool,
-    /// Preferred IPv6 mode. If omitted, legacy `dhcp6` / `accept_ra` booleans
-    /// are used for backward compatibility.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ipv6_mode: Option<Ipv6Mode>,
+    pub ipv6_mode: Ipv6Mode,
     /// Source interface to track when `ipv6_mode = track_interface`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub track_source_interface: Option<String>,
@@ -214,18 +205,8 @@ pub struct Interface {
 }
 
 impl Interface {
-    /// Resolve the effective IPv6 mode with backward compatibility for legacy
-    /// `dhcp6` / `accept_ra` booleans.
     pub fn effective_ipv6_mode(&self) -> Ipv6Mode {
-        self.ipv6_mode.clone().unwrap_or_else(|| {
-            if self.dhcp6 {
-                Ipv6Mode::Dhcp6
-            } else if self.accept_ra {
-                Ipv6Mode::Slaac
-            } else {
-                Ipv6Mode::Static
-            }
-        })
+        self.ipv6_mode.clone()
     }
 
     pub fn effective_ra_mode(&self) -> RouterAdvertisementMode {
@@ -1186,10 +1167,7 @@ pub enum NatRuleType {
     /// Destination NAT / port forward - rewrites the destination IP and/or port.
     Dnat,
     /// One-to-one NAT - maps an entire IP address to another IP address.
-    ///
-    /// Serialized as `one_to_one` to match the management UI. The legacy
-    /// `onetoone` spelling is still accepted on read for backward compatibility.
-    #[serde(rename = "one_to_one", alias = "onetoone")]
+    #[serde(rename = "one_to_one")]
     OneToOne,
 }
 
@@ -2175,17 +2153,6 @@ fn default_acme_cert_storage_path() -> String {
     "/var/lib/dayshield/certs".to_string()
 }
 
-/// ACME provider to use for certificate issuance.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum AcmeProvider {
-    #[default]
-    LetsEncrypt,
-    ZeroSSL,
-    Buypass,
-    Custom,
-}
-
 /// Challenge type used for ACME domain validation.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -2235,9 +2202,6 @@ pub struct AcmeConfig {
     /// Cloudflare API token for DNS-01 TXT record automation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloudflare_api_token: Option<String>,
-    /// ACME provider hint (retained for backward compatibility).
-    #[serde(default)]
-    pub provider: AcmeProvider,
     /// Path where issued certificates and account credentials will be stored.
     #[serde(default = "default_acme_cert_storage_path")]
     pub cert_storage_path: String,
@@ -4311,15 +4275,9 @@ mod nat_tests {
     }
 
     #[test]
-    fn one_to_one_accepts_legacy_and_current_tags() {
-        // Current UI spelling.
+    fn one_to_one_accepts_current_tag() {
         assert_eq!(
             serde_json::from_str::<NatRuleType>("\"one_to_one\"").unwrap(),
-            NatRuleType::OneToOne
-        );
-        // Legacy persisted spelling stays loadable.
-        assert_eq!(
-            serde_json::from_str::<NatRuleType>("\"onetoone\"").unwrap(),
             NatRuleType::OneToOne
         );
     }

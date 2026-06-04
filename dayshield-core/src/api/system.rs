@@ -1171,69 +1171,6 @@ pub async fn check_rootfs_updates(State(state): State<Arc<AppState>>) -> impl In
     Json(rootfs_update::status().await)
 }
 
-/// Handler: pre-download and stage the latest rootfs image artifact.
-///
-/// Spawns the operation in a background task and returns 202 Accepted
-/// immediately so the download does not block the HTTP connection.
-/// Poll `/system/rootfs/status` to observe progress via `transaction_state`.
-pub async fn stage_rootfs_update(
-    Extension(user): Extension<AuthenticatedUser>,
-) -> impl IntoResponse {
-    if let Err(reason) = authorize_sensitive_rootfs_operation("stage", &user) {
-        return rootfs_authorization_error_response("stage", &user, &reason);
-    }
-
-    let user_clone = user.clone();
-    crate::live_logs::ui::publish(crate::live_logs::LogEvent::UpdateEvent {
-        timestamp: chrono::Utc::now().to_rfc3339(),
-        operation: "stage".to_string(),
-        level: "info".to_string(),
-        message: "Rootfs stage operation started".to_string(),
-        component: Some("rootfs".to_string()),
-    });
-    tokio::spawn(async move {
-        match rootfs_update::stage_update().await {
-            Ok(result) => {
-                audit_sensitive_rootfs_result(
-                    "stage",
-                    &user_clone,
-                    result.success,
-                    &result.message,
-                );
-                crate::live_logs::ui::publish(crate::live_logs::LogEvent::UpdateEvent {
-                    timestamp: chrono::Utc::now().to_rfc3339(),
-                    operation: "stage".to_string(),
-                    level: if result.success { "info" } else { "warning" }.to_string(),
-                    message: result.message,
-                    component: Some("rootfs".to_string()),
-                });
-            }
-            Err(err) => {
-                audit_sensitive_rootfs_error("stage", &user_clone, &err);
-                crate::live_logs::ui::publish(crate::live_logs::LogEvent::UpdateEvent {
-                    timestamp: chrono::Utc::now().to_rfc3339(),
-                    operation: "stage".to_string(),
-                    level: "error".to_string(),
-                    message: format!("Rootfs stage failed: {err}"),
-                    component: Some("rootfs".to_string()),
-                });
-            }
-        }
-    });
-
-    let current_status = rootfs_update::status().await;
-    (
-        StatusCode::ACCEPTED,
-        Json(serde_json::json!({
-            "operation": "stage",
-            "success": true,
-            "message": "Rootfs stage operation started. Poll /system/rootfs/status for progress.",
-            "details": [],
-            "status": current_status
-        })),
-    )
-        .into_response()
-}
 
 /// Handler: activate the staged rootfs image for boot.
 ///

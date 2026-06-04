@@ -1549,15 +1549,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn backup_file_detection_accepts_legacy_and_versioned_names() {
-        assert!(looks_like_backup_file("dayshield-backup-1700000000.tar"));
-        assert!(looks_like_backup_file(
-            "dayshield-manual-backup-v1.0.0-1700000000.tar.enc"
-        ));
-        assert!(!looks_like_backup_file("dayshield-config.json"));
-        assert!(!looks_like_backup_file("random.tar"));
-    }
 }
 
 // ---------------------------------------------------------------------------

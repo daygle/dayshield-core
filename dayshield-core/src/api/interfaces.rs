@@ -181,9 +181,7 @@ pub struct InterfaceResponse {
     pub r#type: String, // Inferred from config (e.g. "vlan" if vlan tag present, else "ethernet")
     pub enabled: bool,
     pub dhcp4: bool,
-    pub dhcp6: bool,
-    pub accept_ra: bool,
-    pub ipv6_mode: Option<String>,
+    pub ipv6_mode: String,
     pub track_source_interface: Option<String>,
     pub track_prefix_id: Option<u8>,
     pub delegated_prefix_len: Option<u8>,
@@ -248,15 +246,14 @@ impl InterfaceResponse {
             crate::config::models::WanMode::Pppoe => "pppoe".to_string(),
         });
 
-        let effective_ipv6_mode = iface.effective_ipv6_mode();
-        let ipv6_mode = iface.ipv6_mode.as_ref().map(|m| match m {
+        let ipv6_mode = match &iface.ipv6_mode {
             Ipv6Mode::Static => "static".to_string(),
             Ipv6Mode::Dhcp6 => "dhcp6".to_string(),
             Ipv6Mode::Slaac => "slaac".to_string(),
             Ipv6Mode::TrackInterface => "track_interface".to_string(),
-        });
+        };
         let ra_mode =
-            if matches!(effective_ipv6_mode, Ipv6Mode::TrackInterface) || iface.ra_mode.is_some() {
+            if matches!(iface.ipv6_mode, Ipv6Mode::TrackInterface) || iface.ra_mode.is_some() {
                 Some(iface.effective_ra_mode().as_str().to_string())
             } else {
                 None
@@ -275,8 +272,6 @@ impl InterfaceResponse {
             r#type,
             enabled: iface.enabled,
             dhcp4: iface.dhcp4,
-            dhcp6: iface.dhcp6,
-            accept_ra: iface.accept_ra,
             ipv6_mode,
             track_source_interface: iface.track_source_interface.clone(),
             track_prefix_id: iface.track_prefix_id,
@@ -309,11 +304,11 @@ impl InterfaceResponse {
     pub fn enrich_with_runtime(&mut self) {
         use crate::engine::prefix_delegation;
 
-        match self.ipv6_mode.as_deref() {
-            Some("dhcp6") if self.ia_pd_hint_len.is_some() => {
+        match self.ipv6_mode.as_str() {
+            "dhcp6" if self.ia_pd_hint_len.is_some() => {
                 self.resolved_ipv6_prefix = prefix_delegation::read_delegated_prefix(&self.name);
             }
-            Some("track_interface") => {
+            "track_interface" => {
                 if let (Some(src), Some(target_len)) = (
                     self.track_source_interface.as_deref(),
                     Some(self.delegated_prefix_len.unwrap_or(64)),
@@ -350,8 +345,6 @@ pub struct InterfaceRequest {
     pub r#type: Option<String>,
     pub enabled: bool,
     pub dhcp4: bool,
-    pub dhcp6: Option<bool>,
-    pub accept_ra: Option<bool>,
     pub ipv6_mode: Option<String>,
     pub track_source_interface: Option<String>,
     pub track_prefix_id: Option<u8>,
@@ -424,26 +417,12 @@ impl InterfaceRequest {
             self.gateway
         };
         let ipv6_mode = match self.ipv6_mode.as_deref() {
-            Some("dhcp6") => Some(Ipv6Mode::Dhcp6),
-            Some("slaac") => Some(Ipv6Mode::Slaac),
-            Some("track_interface") => Some(Ipv6Mode::TrackInterface),
-            Some("static") => Some(Ipv6Mode::Static),
-            _ => None,
+            Some("dhcp6") => Ipv6Mode::Dhcp6,
+            Some("slaac") => Ipv6Mode::Slaac,
+            Some("track_interface") => Ipv6Mode::TrackInterface,
+            _ => Ipv6Mode::Static,
         };
         let ra_mode = self.ra_mode.as_deref().and_then(Self::parse_ra_mode);
-
-        let effective_mode = ipv6_mode.clone().unwrap_or_else(|| {
-            if self.dhcp6.unwrap_or(false) {
-                Ipv6Mode::Dhcp6
-            } else if self.accept_ra.unwrap_or(false) {
-                Ipv6Mode::Slaac
-            } else {
-                Ipv6Mode::Static
-            }
-        });
-
-        let dhcp6 = matches!(effective_mode, Ipv6Mode::Dhcp6);
-        let accept_ra = matches!(effective_mode, Ipv6Mode::Slaac);
 
         // Build addresses from UI fields, dropping stale static values when a
         // dynamic mode owns that family.
@@ -454,7 +433,7 @@ impl InterfaceRequest {
                     addresses.push(format!("{}/{}", addr, prefix));
                 }
             }
-            if matches!(effective_mode, Ipv6Mode::Static) {
+            if matches!(ipv6_mode, Ipv6Mode::Static) {
                 if let (Some(addr), Some(prefix)) = (self.ipv6_address, self.ipv6_prefix) {
                     if !is_ipv6_link_local_cidr_or_addr(&addr) {
                         addresses.push(format!("{}/{}", addr, prefix));
@@ -471,8 +450,6 @@ impl InterfaceRequest {
             mss: self.mss,
             enabled: self.enabled,
             dhcp4,
-            dhcp6,
-            accept_ra,
             ipv6_mode,
             track_source_interface: self.track_source_interface,
             track_prefix_id: self.track_prefix_id,
@@ -1012,8 +989,6 @@ mod tests {
             r#type: Some("ethernet".into()),
             enabled: true,
             dhcp4: false,
-            dhcp6: Some(false),
-            accept_ra: Some(false),
             ipv6_mode: Some("static".into()),
             track_source_interface: None,
             track_prefix_id: None,
@@ -1045,8 +1020,6 @@ mod tests {
             r#type: Some("vlan".into()),
             enabled: true,
             dhcp4: false,
-            dhcp6: Some(false),
-            accept_ra: Some(false),
             ipv6_mode: Some("static".into()),
             track_source_interface: None,
             track_prefix_id: None,
@@ -1095,8 +1068,6 @@ mod tests {
             r#type: Some("ethernet".into()),
             enabled: true,
             dhcp4: true,
-            dhcp6: Some(false),
-            accept_ra: Some(false),
             ipv6_mode: Some("static".into()),
             track_source_interface: None,
             track_prefix_id: None,
@@ -1135,8 +1106,6 @@ mod tests {
             r#type: Some("ethernet".into()),
             enabled: true,
             dhcp4: false,
-            dhcp6: Some(false),
-            accept_ra: Some(false),
             ipv6_mode: Some("static".into()),
             track_source_interface: None,
             track_prefix_id: None,
@@ -1174,8 +1143,6 @@ mod tests {
             r#type: Some("ethernet".into()),
             enabled: true,
             dhcp4: false,
-            dhcp6: Some(false),
-            accept_ra: Some(false),
             ipv6_mode: Some("static".into()),
             track_source_interface: None,
             track_prefix_id: None,
@@ -1211,9 +1178,7 @@ mod tests {
             mss: None,
             enabled: true,
             dhcp4: false,
-            dhcp6: false,
-            accept_ra: false,
-            ipv6_mode: Some(Ipv6Mode::Static),
+            ipv6_mode: Ipv6Mode::Static,
             track_source_interface: None,
             track_prefix_id: None,
             delegated_prefix_len: None,
@@ -1249,9 +1214,7 @@ mod tests {
             mss: None,
             enabled: true,
             dhcp4: false,
-            dhcp6: false,
-            accept_ra: false,
-            ipv6_mode: Some(Ipv6Mode::Static),
+            ipv6_mode: Ipv6Mode::Static,
             track_source_interface: None,
             track_prefix_id: None,
             delegated_prefix_len: None,

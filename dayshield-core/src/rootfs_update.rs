@@ -1224,18 +1224,6 @@ fn cleanup_staging_images() {
     }
 }
 
-pub async fn stage_update() -> Result<RootfsActionResult> {
-    // Stage is implicit — `update.rs` writes the squashfs into the staging dir
-    // during the download step.  Expose a no-op endpoint for UI compatibility.
-    let status = status().await;
-    Ok(RootfsActionResult {
-        operation: "stage".to_string(),
-        success: true,
-        message: "Stage is performed implicitly during download; nothing to do.".to_string(),
-        details: vec![],
-        status,
-    })
-}
 
 // ---------------------------------------------------------------------------
 // Tests

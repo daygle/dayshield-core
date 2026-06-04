@@ -15,9 +15,6 @@
 //! - **Rollback on failure**: [`ConfigStore::save_with_rollback`] first backs
 //!   up the current on-disk file and restores it if the post-write validation
 //!   step fails.
-//! - **Schema versioning**: on-disk files carry a `schema_version` integer.
-//!   [`ConfigStore::load`] automatically migrates older versions to the current
-//!   schema so new code can always assume the latest format.
 //! - **Config history**: every successful [`ConfigStore::save_with_rollback`]
 //!   archives the committed configuration as a timestamped revision under
 //!   `history/`. Past revisions can be listed, inspected and restored via
@@ -55,7 +52,7 @@ const TMP_SUFFIX: &str = ".tmp";
 /// Backup file suffix used for rollback.
 const BAK_SUFFIX: &str = ".bak";
 
-// Ã¢â€â‚¬Ã¢â€â‚¬ Permission-aware write helper Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// ---------------------------------------------------------------------------
 
 /// Write `data` to `path` with mode `0o600` (owner read/write only).
 ///
@@ -98,94 +95,8 @@ pub(crate) fn write_restricted(path: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-// Ã¢â€â‚¬Ã¢â€â‚¬ Schema versioning Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
-
-/// The current on-disk schema version.
-///
-/// Increment this constant whenever the [`SystemConfig`] format changes in a
-/// backwards-incompatible way, and add a corresponding arm to
-/// [`migrate_config`].
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
-
-/// On-disk envelope that carries a schema version alongside the config.
-///
-/// The `schema_version` field is optional (defaults to `0`) so that config
-/// files written before versioning was introduced can still be loaded and
-/// automatically migrated.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct VersionedConfig {
-    /// Schema version.  `0` means "pre-versioning" (treated as version 0).
-    #[serde(default)]
-    schema_version: u32,
-    /// The actual configuration payload.
-    #[serde(flatten)]
-    config: SystemConfig,
-}
-
-/// Migrate a [`SystemConfig`] from `from_version` to [`CURRENT_SCHEMA_VERSION`].
-///
-/// Each arm of the `match` applies one incremental migration step.  Future
-/// schema changes should add a new arm here and bump [`CURRENT_SCHEMA_VERSION`].
-fn migrate_config(mut config: SystemConfig, from_version: u32) -> Result<SystemConfig> {
-    if from_version > CURRENT_SCHEMA_VERSION {
-        anyhow::bail!(
-            "Unknown schema version {from_version}; cannot migrate to {CURRENT_SCHEMA_VERSION}"
-        );
-    }
-
-    let mut version = from_version;
-
-    while version < CURRENT_SCHEMA_VERSION {
-        match version {
-            0 => {
-                // Migration v0 -> v1: no structural changes; the schema_version
-                // field was simply added to the on-disk envelope.
-                debug!("Migrating config from schema v0 to v1 (no-op)");
-                version = 1;
-            }
-            1 => {
-                // Migration v1 -> v2: the configuration revision history became a
-                // first-class, configurable feature. Older configs predate the
-                // `config_history` settings, so initialise them with the built-in
-                // defaults (enabled, retain 50) rather than leaving them absent.
-                if config.config_history.is_none() {
-                    debug!("Migrating config from schema v1 to v2 (init config_history)");
-                    config.config_history = Some(ConfigHistorySettings::default());
-                }
-                version = 2;
-            }
-            2 => {
-                // Migration v2 -> v3: DNS resolver mode became explicit. Older
-                // configs used "forwarders present" to mean forwarded mode.
-                if let Some(dns) = config.dns.as_mut() {
-                    if !dns.forwarders.is_empty() {
-                        debug!("Migrating DNS config to forwarded resolver mode");
-                        dns.resolver_mode = DnsResolverMode::Forwarded;
-                    }
-                    if config
-                        .dot
-                        .as_ref()
-                        .map(|dot| dot.enabled && !dot.lan_only)
-                        .unwrap_or(false)
-                    {
-                        debug!("Migrating public DoT config to allow-all client ACL");
-                        dns.client_acl_preset = DnsClientAclPreset::AllowAll;
-                    }
-                }
-                version = 3;
-            }
-            other => {
-                anyhow::bail!(
-                    "Unknown schema version {other}; cannot migrate to {CURRENT_SCHEMA_VERSION}"
-                );
-            }
-        }
-    }
-
-    Ok(config)
-}
-
-// Ã¢â€â‚¬Ã¢â€â‚¬ Type alias for the post-save engine hook Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 
 /// Callback type invoked after a successful [`ConfigStore::save_with_rollback`].
 ///
@@ -235,7 +146,7 @@ impl ConfigStore {
         &self.config_path
     }
 
-    /// Load the [`SystemConfig`] from disk, migrating old schema versions.
+    /// Load the [`SystemConfig`] from disk.
     ///
     /// Returns a default (empty) config if the file does not exist yet.
     pub fn load(&self) -> Result<SystemConfig> {
@@ -251,30 +162,8 @@ impl ConfigStore {
         let raw = std::fs::read_to_string(&self.config_path)
             .with_context(|| format!("Failed to read {}", self.config_path.display()))?;
 
-        // Deserialise as a versioned envelope.  Files without a
-        // `schema_version` field will deserialise with version == 0.
-        let versioned: VersionedConfig = serde_json::from_str(&raw)
+        let config: SystemConfig = serde_json::from_str(&raw)
             .with_context(|| format!("Failed to parse {}", self.config_path.display()))?;
-
-        if versioned.schema_version < CURRENT_SCHEMA_VERSION {
-            info!(
-                from_version = versioned.schema_version,
-                to_version = CURRENT_SCHEMA_VERSION,
-                "Migrating config schema"
-            );
-        }
-
-        let config = migrate_config(versioned.config, versioned.schema_version)?;
-
-        if versioned.schema_version < CURRENT_SCHEMA_VERSION {
-            if let Err(err) = self.save(&config) {
-                warn!(
-                    path = %self.config_path.display(),
-                    error = %err,
-                    "Failed to persist migrated config schema"
-                );
-            }
-        }
 
         Ok(config)
     }
@@ -572,7 +461,7 @@ impl ConfigStore {
             for port in &settings.management_ports {
                 if !is_valid_port(*port) {
                     anyhow::bail!(
-                        "Firewall management_ports contains invalid port {} (must be 1Ã¢â‚¬â€œ65535)",
+                        "Firewall management_ports contains invalid port {} (must be 1-65535)",
                         port
                     );
                 }
@@ -688,7 +577,7 @@ impl ConfigStore {
                 }
                 if !is_valid_ipv4_range(&scope.pool_start, &scope.pool_end) {
                     anyhow::bail!(
-                        "DHCP scope {} pool_start {} must be Ã¢â€°Â¤ pool_end {}",
+                        "DHCP scope {} pool_start {} must be <= pool_end {}",
                         scope.id,
                         scope.pool_start,
                         scope.pool_end
@@ -934,7 +823,7 @@ impl ConfigStore {
                 if !validate_alias_name(&alias.name) {
                     anyhow::bail!(
                         "Firewall alias has invalid name {:?} \
-                         (must be 1Ã¢â‚¬â€œ63 chars, start with letter or _, contain only [A-Za-z0-9_])",
+                         (must be 1-63 chars, start with letter or _, contain only [A-Za-z0-9_])",
                         alias.name
                     );
                 }
@@ -1017,7 +906,7 @@ impl ConfigStore {
                 if !validate_wg_interface_name(&wg.name) {
                     anyhow::bail!(
                         "WireGuard interface has invalid name {:?} \
-                         (must be 1Ã¢â‚¬â€œ15 alphanumeric/[-_.] chars)",
+                         (must be 1-15 alphanumeric/[-_.] chars)",
                         wg.name
                     );
                 }
@@ -1149,7 +1038,7 @@ impl ConfigStore {
                 if !validate_alias_name(&cs.ban_alias_name) {
                     anyhow::bail!(
                         "CrowdSec ban_alias_name {:?} is invalid \
-                         (must be 1Ã¢â‚¬â€œ63 chars, start with letter or _, contain only [A-Za-z0-9_])",
+                         (must be 1-63 chars, start with letter or _, contain only [A-Za-z0-9_])",
                         cs.ban_alias_name
                     );
                 }
@@ -1770,13 +1659,8 @@ impl ConfigStore {
                 .with_context(|| format!("Failed to create directory {}", parent.display()))?;
         }
 
-        // Wrap config in the versioned envelope before serialising.
-        let versioned = VersionedConfig {
-            schema_version: CURRENT_SCHEMA_VERSION,
-            config,
-        };
         let json =
-            serde_json::to_string_pretty(&versioned).context("Failed to serialise config")?;
+            serde_json::to_string_pretty(&config).context("Failed to serialise config")?;
 
         write_restricted(&self.config_path, json.as_bytes())?;
 
@@ -1876,13 +1760,11 @@ impl ConfigStore {
         history::list_revisions(&self.config_path)
     }
 
-    /// Load the [`SystemConfig`] stored in the revision identified by `id`,
-    /// migrating it to the current schema version if necessary.
+    /// Load the [`SystemConfig`] stored in the revision identified by `id`.
     pub fn load_revision(&self, id: &str) -> Result<SystemConfig> {
         let value = history::read_revision_config(&self.config_path, id)?;
-        let versioned: VersionedConfig = serde_json::from_value(value)
-            .with_context(|| format!("Failed to parse revision {id}"))?;
-        migrate_config(versioned.config, versioned.schema_version)
+        serde_json::from_value(value)
+            .with_context(|| format!("Failed to parse revision {id}"))
     }
 
     /// Restore the configuration captured in revision `id`, making it the live
@@ -2018,9 +1900,7 @@ mod tests {
             mss: None,
             enabled: true,
             dhcp4: false,
-            dhcp6: false,
-            accept_ra: false,
-            ipv6_mode: Some(crate::config::models::Ipv6Mode::Static),
+            ipv6_mode: crate::config::models::Ipv6Mode::Static,
             track_source_interface: None,
             track_prefix_id: None,
             delegated_prefix_len: None,
@@ -2251,9 +2131,7 @@ mod tests {
             mss: None,
             enabled: true,
             dhcp4: false,
-            dhcp6: false,
-            accept_ra: false,
-            ipv6_mode: Some(crate::config::models::Ipv6Mode::Static),
+            ipv6_mode: crate::config::models::Ipv6Mode::Static,
             track_source_interface: None,
             track_prefix_id: None,
             delegated_prefix_len: None,
@@ -2394,9 +2272,7 @@ mod tests {
             mss: None,
             enabled: true,
             dhcp4: false,
-            dhcp6: false,
-            accept_ra: false,
-            ipv6_mode: Some(crate::config::models::Ipv6Mode::Static),
+            ipv6_mode: crate::config::models::Ipv6Mode::Static,
             track_source_interface: None,
             track_prefix_id: None,
             delegated_prefix_len: None,
@@ -2430,9 +2306,7 @@ mod tests {
             mss: None,
             enabled: true,
             dhcp4: false,
-            dhcp6: false,
-            accept_ra: false,
-            ipv6_mode: Some(crate::config::models::Ipv6Mode::Static),
+            ipv6_mode: crate::config::models::Ipv6Mode::Static,
             track_source_interface: None,
             track_prefix_id: None,
             delegated_prefix_len: None,
@@ -2466,9 +2340,7 @@ mod tests {
             mss: None,
             enabled: true,
             dhcp4: false,
-            dhcp6: false,
-            accept_ra: false,
-            ipv6_mode: Some(crate::config::models::Ipv6Mode::Static),
+            ipv6_mode: crate::config::models::Ipv6Mode::Static,
             track_source_interface: None,
             track_prefix_id: None,
             delegated_prefix_len: None,
@@ -2502,9 +2374,7 @@ mod tests {
             mss: None,
             enabled: true,
             dhcp4: false,
-            dhcp6: false,
-            accept_ra: false,
-            ipv6_mode: Some(crate::config::models::Ipv6Mode::Static),
+            ipv6_mode: crate::config::models::Ipv6Mode::Static,
             track_source_interface: None,
             track_prefix_id: None,
             delegated_prefix_len: None,
@@ -2539,9 +2409,7 @@ mod tests {
             mss: None,
             enabled: true,
             dhcp4: false,
-            dhcp6: false,
-            accept_ra: false,
-            ipv6_mode: Some(crate::config::models::Ipv6Mode::Static),
+            ipv6_mode: crate::config::models::Ipv6Mode::Static,
             track_source_interface: None,
             track_prefix_id: None,
             delegated_prefix_len: None,
@@ -3120,7 +2988,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn make_acme_config() -> crate::config::models::AcmeConfig {
-        use crate::config::models::{AcmeChallengeType, AcmeConfig, AcmeProvider};
+        use crate::config::models::{AcmeChallengeType, AcmeConfig};
         AcmeConfig {
             enabled: true,
             directory_url: "https://acme-staging-v02.api.letsencrypt.org/directory".into(),
@@ -3131,7 +2999,6 @@ mod tests {
             dns_provider: crate::config::models::AcmeDnsProvider::Manual,
             cloudflare_zone_id: None,
             cloudflare_api_token: None,
-            provider: AcmeProvider::LetsEncrypt,
             cert_storage_path: "/tmp/certs".into(),
         }
     }
@@ -3267,7 +3134,6 @@ mod tests {
             dns_provider: crate::config::models::AcmeDnsProvider::Manual,
             cloudflare_zone_id: None,
             cloudflare_api_token: None,
-            provider: crate::config::models::AcmeProvider::Custom,
             cert_storage_path: "/tmp".into(),
         });
 
@@ -3316,120 +3182,6 @@ mod tests {
         assert!(!validate_directory_url("not-a-url"));
         assert!(!validate_directory_url("ftp://acme.example.com"));
         assert!(!validate_directory_url(""));
-    }
-
-    // -----------------------------------------------------------------------
-    // Schema versioning
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn save_writes_schema_version() {
-        let dir = temp_dir();
-        let store = ConfigStore::with_dir(&dir);
-
-        let cfg = SystemConfig::default();
-        store.save(&cfg).unwrap();
-
-        let raw = std::fs::read_to_string(store.config_path()).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(
-            value["schema_version"].as_u64(),
-            Some(CURRENT_SCHEMA_VERSION as u64),
-            "saved file must contain schema_version"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn load_migrates_legacy_file_without_schema_version() {
-        let dir = temp_dir();
-        let store = ConfigStore::with_dir(&dir);
-
-        // Write a "legacy" file that has no schema_version field.
-        let legacy_json = r#"{"hostname":"legacy-fw","interfaces":[],"firewall_rules":[],"vpn_tunnels":[],"wireguard_interfaces":[],"crowdsec_policies":[],"firewall_aliases":[],"dns_host_overrides":[],"dns_domain_overrides":[]}"#;
-        std::fs::write(store.config_path(), legacy_json).unwrap();
-
-        let cfg = store.load().unwrap();
-        assert_eq!(cfg.hostname, "legacy-fw");
-
-        let saved: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(store.config_path()).unwrap()).unwrap();
-        assert_eq!(
-            saved["schema_version"].as_u64(),
-            Some(CURRENT_SCHEMA_VERSION as u64)
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn migrate_config_noop_for_v0_to_v1() {
-        let cfg = SystemConfig::default();
-        let migrated = migrate_config(cfg.clone(), 0).unwrap();
-        assert_eq!(migrated.hostname, cfg.hostname);
-    }
-
-    #[test]
-    fn migrate_config_errors_on_unknown_version() {
-        let cfg = SystemConfig::default();
-        assert!(migrate_config(cfg, 9999).is_err());
-    }
-
-    #[test]
-    fn migrate_v1_to_v2_initialises_config_history() {
-        // A v1 config predates the history settings, so it carries none.
-        let mut cfg = SystemConfig::default();
-        cfg.config_history = None;
-
-        let migrated = migrate_config(cfg, 1).unwrap();
-        // The v1 -> v2 migration must populate it with the built-in defaults.
-        let history = migrated
-            .config_history
-            .expect("config_history must be initialised by the v1->v2 migration");
-        assert!(history.enabled);
-        assert_eq!(history.max_revisions, 50);
-    }
-
-    #[test]
-    fn migrate_v2_to_v3_preserves_forwarded_dns_behavior() {
-        let mut cfg = SystemConfig::default();
-        let mut dns = crate::config::models::DnsConfig::default();
-        dns.forwarders = vec!["1.1.1.1".into()];
-        cfg.dns = Some(dns);
-
-        let migrated = migrate_config(cfg, 2).unwrap();
-        let dns = migrated.dns.expect("DNS config should survive migration");
-        assert_eq!(
-            dns.resolver_mode,
-            crate::config::models::DnsResolverMode::Forwarded
-        );
-    }
-
-    #[test]
-    fn load_migrates_v1_file_to_current_and_populates_history() {
-        let dir = temp_dir();
-        let store = ConfigStore::with_dir(&dir);
-
-        // A v1 on-disk file with no config_history field.
-        let v1_json = r#"{"schema_version":1,"hostname":"v1-fw"}"#;
-        std::fs::write(store.config_path(), v1_json).unwrap();
-
-        let cfg = store.load().unwrap();
-        assert_eq!(cfg.hostname, "v1-fw");
-        assert!(
-            cfg.config_history.is_some(),
-            "loading a v1 file must migrate it and initialise config_history"
-        );
-
-        let saved: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(store.config_path()).unwrap()).unwrap();
-        assert_eq!(
-            saved["schema_version"].as_u64(),
-            Some(CURRENT_SCHEMA_VERSION as u64)
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

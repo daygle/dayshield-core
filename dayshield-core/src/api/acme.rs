@@ -30,7 +30,7 @@ use tracing::{info, warn};
 
 use crate::{
     config::models::{
-        validate_acme_config, AcmeChallengeType, AcmeConfig, AcmeDnsProvider, AcmeProvider,
+        validate_acme_config, AcmeChallengeType, AcmeConfig, AcmeDnsProvider,
     },
     engine::acme::AcmeEngine,
     state::AppState,
@@ -127,7 +127,6 @@ pub async fn get_config(
             dns_provider: AcmeDnsProvider::Manual,
             cloudflare_zone_id: None,
             cloudflare_api_token: None,
-            provider: AcmeProvider::LetsEncrypt,
             cert_storage_path: "/var/lib/dayshield/certs".into(),
         });
 
@@ -154,7 +153,6 @@ pub async fn update_config(
         cloudflare_zone_id: req.cloudflare_zone_id,
         cloudflare_api_token: req.cloudflare_api_token,
         renew_interval_hours: req.renew_interval_hours,
-        provider: AcmeProvider::Custom,
         cert_storage_path: req.cert_storage_path,
     };
 

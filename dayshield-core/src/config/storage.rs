@@ -545,6 +545,14 @@ impl ConfigStore {
 
         // DHCP config validation.
         if let Some(dhcp) = &config.dhcp {
+            if dhcp.enabled {
+                if dhcp.interface.trim().is_empty() {
+                    anyhow::bail!("DHCP interface is required when DHCP is enabled");
+                }
+                if dhcp.scopes.is_empty() {
+                    anyhow::bail!("DHCP requires at least one scope when enabled");
+                }
+            }
             for scope in &dhcp.scopes {
                 let Some(normalized_subnet) = normalize_ipv4_cidr(&scope.subnet) else {
                     anyhow::bail!(
@@ -597,6 +605,12 @@ impl ConfigStore {
                         scope.id,
                         scope.pool_end,
                         scope.subnet
+                    );
+                }
+                if scope.lease_seconds == 0 {
+                    anyhow::bail!(
+                        "DHCP scope {} lease_seconds must be greater than 0",
+                        scope.id
                     );
                 }
                 if let Some(gw) = &scope.gateway {
@@ -734,6 +748,12 @@ impl ConfigStore {
                         scope.id,
                         scope.pool_end,
                         scope.subnet
+                    );
+                }
+                if scope.lease_seconds == 0 {
+                    anyhow::bail!(
+                        "DHCPv6 scope {} lease_seconds must be greater than 0",
+                        scope.id
                     );
                 }
                 for dns in &scope.dns_servers {

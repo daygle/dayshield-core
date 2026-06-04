@@ -69,14 +69,16 @@ pub fn generate_config(config: &Dhcp6Config) -> String {
             })
             .collect();
 
+        let (renew_timer, rebind_timer) = lease_timers(scope.lease_seconds);
+
         subnets.push(json!({
             "id": (i as u32) + 1,
             "subnet": subnet,
             "pools": [{ "pool": pool_str }],
             "preferred-lifetime": scope.lease_seconds,
             "valid-lifetime": scope.lease_seconds,
-            "renew-timer": scope.lease_seconds / 2,
-            "rebind-timer": (scope.lease_seconds * 3) / 4,
+            "renew-timer": renew_timer,
+            "rebind-timer": rebind_timer,
             "option-data": option_data,
             "reservations": reservations,
         }));
@@ -116,6 +118,13 @@ pub fn generate_config(config: &Dhcp6Config) -> String {
     });
 
     serde_json::to_string_pretty(&kea_conf).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn lease_timers(valid_lifetime: u32) -> (u32, u32) {
+    (
+        valid_lifetime / 2,
+        ((u64::from(valid_lifetime) * 3) / 4) as u32,
+    )
 }
 
 /// Apply the provided DHCPv6 configuration to the running Kea DHCPv6 instance.
@@ -171,6 +180,18 @@ mod tests {
         let out = generate_config(&cfg);
         assert!(out.contains("\"subnet\": \"fd00:1::/64\""));
         assert!(!out.contains("\"subnet\": \"fd00:1::1/64\""));
+    }
+
+    #[test]
+    fn generate_config_uses_overflow_safe_scope_lease_timers() {
+        let mut cfg = base_config();
+        cfg.scopes[0].lease_seconds = u32::MAX;
+        let out = generate_config(&cfg);
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let subnet = &value["Dhcp6"]["subnet6"][0];
+        assert_eq!(subnet["valid-lifetime"], u32::MAX);
+        assert_eq!(subnet["renew-timer"], u32::MAX / 2);
+        assert_eq!(subnet["rebind-timer"], (u64::from(u32::MAX) * 3 / 4) as u32);
     }
 
     #[test]

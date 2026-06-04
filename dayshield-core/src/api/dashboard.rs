@@ -463,7 +463,7 @@ fn build_dashboard_cards(inputs: DashboardCardInputs<'_>) -> Vec<DashboardCard> 
             "services",
             dhcp_status,
             dhcp_label,
-            "Kea/dnsmasq address assignment, lease pools, static reservations, and DHCPv6 scopes"
+            "Kea address assignment, lease pools, static reservations, and DHCPv6 scopes"
                 .to_string(),
             vec![
                 metric("IPv4 scopes", dhcp.scopes.len()),

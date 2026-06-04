@@ -159,11 +159,15 @@ pub fn generate_config(config: &DhcpConfig) -> String {
             })
             .collect();
 
+        let (renew_timer, rebind_timer) = lease_timers(scope.lease_seconds);
+
         subnets.push(json!({
             "id": (i as u32) + 1,
             "subnet": subnet,
             "pools": [{ "pool": pool_str }],
             "valid-lifetime": scope.lease_seconds,
+            "renew-timer": renew_timer,
+            "rebind-timer": rebind_timer,
             "option-data": option_data,
             "reservations": reservations,
         }));
@@ -193,9 +197,6 @@ pub fn generate_config(config: &DhcpConfig) -> String {
                 "hold-reclaimed-time": 3600,
                 "flush-reclaimed-timer-wait-time": 25
             },
-            "renew-timer": 900,
-            "rebind-timer": 1800,
-            "valid-lifetime": 86400,
             "subnet4": subnets,
             "loggers": [{
                 "name": "kea-dhcp4",
@@ -207,6 +208,13 @@ pub fn generate_config(config: &DhcpConfig) -> String {
     });
 
     serde_json::to_string_pretty(&kea_conf).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn lease_timers(valid_lifetime: u32) -> (u32, u32) {
+    (
+        valid_lifetime / 2,
+        ((u64::from(valid_lifetime) * 3) / 4) as u32,
+    )
 }
 
 fn default_gateway_for_subnet(subnet: &str) -> Option<String> {
@@ -326,6 +334,19 @@ mod tests {
         let out = generate_config(&cfg);
         assert!(out.contains("\"subnet\": \"192.168.1.0/24\""));
         assert!(!out.contains("\"subnet\": \"192.168.1.1/24\""));
+    }
+
+    #[test]
+    fn generate_config_uses_scope_lease_timers() {
+        let mut cfg = base_config();
+        cfg.scopes[0].lease_seconds = 7200;
+        let out = generate_config(&cfg);
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let subnet = &value["Dhcp4"]["subnet4"][0];
+        assert_eq!(subnet["valid-lifetime"], 7200);
+        assert_eq!(subnet["renew-timer"], 3600);
+        assert_eq!(subnet["rebind-timer"], 5400);
+        assert!(value["Dhcp4"].get("valid-lifetime").is_none());
     }
 
     #[test]

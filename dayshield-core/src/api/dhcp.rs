@@ -294,6 +294,31 @@ fn apply_dhcp4_interface_defaults_from_store(
     Ok(())
 }
 
+fn validate_dhcp4_config_for_apply(cfg: &DhcpConfig) -> Result<(), DhcpError> {
+    if cfg.enabled {
+        if cfg.interface.trim().is_empty() {
+            return Err(DhcpError::ValidationFailed(
+                "interface is required when DHCP is enabled".to_string(),
+            ));
+        }
+        if cfg.scopes.is_empty() {
+            return Err(DhcpError::ValidationFailed(
+                "at least one DHCP scope is required when DHCP is enabled".to_string(),
+            ));
+        }
+    }
+
+    for scope in &cfg.scopes {
+        if scope.lease_seconds == 0 {
+            return Err(DhcpError::ValidationFailed(
+                "leaseTime must be greater than 0".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn cidr_to_mask(cidr: &str) -> String {
     let prefix: u8 = cidr
         .split('/')
@@ -569,6 +594,7 @@ pub async fn update_config(
             )));
         }
     }
+    validate_dhcp4_config_for_apply(&cfg)?;
 
     info!(
         enabled = cfg.enabled,
@@ -1487,6 +1513,7 @@ pub async fn update_interface_dhcp_config(
             )));
         }
     }
+    validate_dhcp4_config_for_apply(&cfg)?;
 
     info!(
         enabled = cfg.enabled,

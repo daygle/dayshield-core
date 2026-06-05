@@ -582,6 +582,14 @@ impl AiPolicyEngine {
         };
         let mut suggestion = match maybe {
             Some(s) => s,
+            None if !request.approve => {
+                self.reject_suggestion(&request.suggestion_id).await?;
+                return Ok(ApplySuggestionResponse {
+                    applied: false,
+                    message: "suggestion rejected".to_string(),
+                    decision: None,
+                });
+            }
             None => {
                 return Ok(ApplySuggestionResponse {
                     applied: false,
@@ -592,14 +600,7 @@ impl AiPolicyEngine {
         };
 
         if !request.approve {
-            let mut suggestions = self.suggestions.write().await;
-            if let Some(existing) = suggestions
-                .iter_mut()
-                .find(|s| s.id == request.suggestion_id)
-            {
-                existing.rejected = true;
-                persist_json(&self.suggestions_path, &*suggestions)?;
-            }
+            self.reject_suggestion(&request.suggestion_id).await?;
             return Ok(ApplySuggestionResponse {
                 applied: false,
                 message: "suggestion rejected".to_string(),
@@ -648,6 +649,16 @@ impl AiPolicyEngine {
             message: "suggestion applied".to_string(),
             decision: Some(decision),
         })
+    }
+
+    async fn reject_suggestion(&self, suggestion_id: &str) -> Result<()> {
+        let mut suggestions = self.suggestions.write().await;
+        if let Some(existing) = suggestions.iter_mut().find(|s| s.id == suggestion_id) {
+            existing.rejected = true;
+        } else {
+            suggestions.push(rejected_placeholder_suggestion(suggestion_id.to_string()));
+        }
+        persist_json(&self.suggestions_path, &*suggestions)
     }
 
     pub async fn list_action_history(&self, iface: Option<String>) -> Vec<ActionHistoryEntry> {
@@ -1312,6 +1323,34 @@ fn append_audit_suggestions(
     }
 }
 
+fn rejected_placeholder_suggestion(id: String) -> Suggestion {
+    let timestamp = now_rfc3339();
+    Suggestion {
+        id,
+        event: Event {
+            timestamp: timestamp.clone(),
+            direction: "unknown".to_string(),
+            action: "REJECTED".to_string(),
+            src_ip: "0.0.0.0".to_string(),
+            dest_ip: "0.0.0.0".to_string(),
+            protocol: "any".to_string(),
+            src_port: None,
+            dest_port: None,
+            iface: "n/a".to_string(),
+        },
+        decision: Decision {
+            action: DecisionAction::EditRule,
+            reason: "Suggestion rejected before it was persisted".to_string(),
+            confidence: 0.0,
+            auto_applied: false,
+            timestamp,
+        },
+        target_rule_id: None,
+        applied: false,
+        rejected: true,
+    }
+}
+
 fn materialize_action(action: DecisionAction) -> DecisionAction {
     match action {
         DecisionAction::SuggestAllow => DecisionAction::Allow,
@@ -1777,6 +1816,26 @@ mod tests {
                 .auto_apply_confidence_threshold,
             AutomationSettings::default().auto_apply_confidence_threshold
         );
+    }
+
+    #[tokio::test]
+    async fn rejecting_unpersisted_suggestion_records_placeholder() {
+        let dir = tempdir().unwrap();
+        let engine = AiPolicyEngine::with_paths(
+            dir.path().join("suggestions.json"),
+            dir.path().join("actions.log"),
+            dir.path().join("intents.json"),
+            dir.path().join("mode.json"),
+            dir.path().join("automation_settings.json"),
+        );
+        let suggestion_id = "audit:Tighten the rule by specifying destination port/protocol";
+
+        engine.reject_suggestion(suggestion_id).await.unwrap();
+
+        let suggestions = engine.suggestions.read().await;
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].id, suggestion_id);
+        assert!(suggestions[0].rejected);
     }
 
     #[tokio::test]

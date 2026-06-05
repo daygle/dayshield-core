@@ -704,12 +704,73 @@ async fn apply_unbound_runtime(restart: bool) -> Result<()> {
         .await
         .context("failed to spawn systemctl")?;
 
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        anyhow::bail!("systemctl {action} unbound failed: {stderr}");
+    if out.status.success() {
+        info!(action, "dns: unbound reconciled via systemctl");
+        return Ok(());
     }
 
-    info!(action, "dns: unbound reconciled via systemctl");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    warn!(
+        action,
+        stdout = %stdout.trim(),
+        stderr = %stderr.trim(),
+        "dns: initial unbound reconcile failed; attempting reset-failed + restart recovery"
+    );
+
+    let reset_out = Command::new("systemctl")
+        .args(["reset-failed", "unbound"])
+        .output()
+        .await
+        .context("failed to spawn systemctl reset-failed")?;
+
+    if !reset_out.status.success() {
+        let reset_stderr = String::from_utf8_lossy(&reset_out.stderr);
+        anyhow::bail!(
+            "systemctl {action} unbound failed: {}{}{}; recovery failed at reset-failed: {}",
+            stdout.trim(),
+            if stdout.trim().is_empty() || stderr.trim().is_empty() {
+                ""
+            } else {
+                "\n"
+            },
+            stderr.trim(),
+            reset_stderr.trim()
+        );
+    }
+
+    let retry_out = Command::new("systemctl")
+        .args(["restart", "unbound"])
+        .output()
+        .await
+        .context("failed to spawn systemctl restart")?;
+
+    if !retry_out.status.success() {
+        let retry_stdout = String::from_utf8_lossy(&retry_out.stdout);
+        let retry_stderr = String::from_utf8_lossy(&retry_out.stderr);
+        anyhow::bail!(
+            "systemctl {action} unbound failed: {}{}{}; retry restart failed: {}{}{}",
+            stdout.trim(),
+            if stdout.trim().is_empty() || stderr.trim().is_empty() {
+                ""
+            } else {
+                "\n"
+            },
+            stderr.trim(),
+            retry_stdout.trim(),
+            if retry_stdout.trim().is_empty() || retry_stderr.trim().is_empty() {
+                ""
+            } else {
+                "\n"
+            },
+            retry_stderr.trim()
+        );
+    }
+
+    info!(
+        initial_action = action,
+        "dns: unbound reconciled after reset-failed + restart recovery"
+    );
     Ok(())
 }
 
@@ -730,6 +791,11 @@ mod tests {
             resolver_mode: DnsResolverMode::Forwarded,
             forwarders: vec!["1.1.1.1".into(), "8.8.8.8".into()],
             dnssec: false,
+            harden_dnssec_stripped: true,
+            harden_below_nxdomain: true,
+            qname_minimisation: true,
+            minimal_responses: true,
+            aggressive_nsec: false,
             client_acl_preset: DnsClientAclPreset::PrivateRanges,
             client_acl_custom_cidrs: vec![],
             cache: DnsCacheConfig::default(),

@@ -247,9 +247,10 @@ pub async fn download_handler(
     let response = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header(
             header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{filename}\""),
+            format!("attachment; filename=\"{}\"", content_disposition_filename(&filename)),
         )
         .body(axum::body::Body::from(bytes))
         .map_err(|e| BackupApiError::StorageError(anyhow::anyhow!("build response: {e}")))?;
@@ -394,6 +395,14 @@ pub async fn update_scheduler_handler(
 // ---------------------------------------------------------------------------
 
 /// Return the full path to a backup file, rejecting path traversal attempts.
+fn content_disposition_filename(filename: &str) -> String {
+    filename.replace('"', "_").replace(['\\r', '\\n'], "_")
+}
+
+fn content_disposition_filename(filename: &str) -> String {
+    filename.replace('"', "_").replace(['\r', '\n'], "_")
+}
+
 fn safe_backup_path(filename: &str) -> Result<PathBuf, BackupApiError> {
     if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
         return Err(BackupApiError::ValidationFailed(
@@ -488,6 +497,8 @@ mod tests {
         assert!(safe_backup_path("dayshield-backup-1700000000.tar.enc").is_ok());
         assert!(safe_backup_path("dayshield-manual-backup-v1.0.0-1700000000.tar").is_ok());
         assert!(safe_backup_path("dayshield-update-backup-v1.0.1-1700000000.tar.enc").is_ok());
+        assert_eq!(content_disposition_filename("safe.tar"), "safe.tar");
+        assert_eq!(content_disposition_filename("bad\"\r\n.tar"), "bad__.tar");
     }
 
     #[test]

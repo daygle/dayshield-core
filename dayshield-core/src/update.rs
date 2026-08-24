@@ -1575,9 +1575,14 @@ where
             .with_context(|| format!("failed to create download directory {}", parent.display()))?;
     }
 
-    let mut file = tokio::fs::File::create(destination)
+    let temp_destination = destination.with_extension(format!(
+        "{}.download.{}",
+        destination.extension().and_then(|e| e.to_str()).unwrap_or("artifact"),
+        unique_suffix()
+    ));
+    let mut file = tokio::fs::File::create(&temp_destination)
         .await
-        .with_context(|| format!("failed to create artifact file {}", destination.display()))?;
+        .with_context(|| format!("failed to create artifact file {}", temp_destination.display()))?;
 
     let mut total: u64 = 0;
     on_progress(total, expected_size)?;
@@ -1589,15 +1594,22 @@ where
         file.write_all(&chunk).await.with_context(|| {
             format!(
                 "failed to write artifact chunk to {}",
-                destination.display()
+                temp_destination.display()
             )
         })?;
-        total += chunk.len() as u64;
+        total = total.checked_add(chunk.len() as u64).ok_or_else(|| anyhow::anyhow!("artifact size overflow"))?;
         on_progress(total, expected_size)?;
     }
     file.flush()
         .await
-        .with_context(|| format!("failed to flush artifact file {}", destination.display()))?;
+        .with_context(|| format!("failed to flush artifact file {}", temp_destination.display()))?;
+    file.sync_all()
+        .await
+        .with_context(|| format!("failed to sync artifact file {}", temp_destination.display()))?;
+    drop(file);
+    tokio::fs::rename(&temp_destination, destination)
+        .await
+        .with_context(|| format!("failed to install downloaded artifact {}", destination.display()))?;
 
     on_progress(total, expected_size)?;
     info!(url, bytes = total, "updates: artifact download complete");

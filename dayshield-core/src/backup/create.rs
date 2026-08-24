@@ -172,7 +172,9 @@ pub fn create_backup(
 
     // -- Optional encryption -----------------------------------------------
     let payload = if encrypt_backup {
-        let phrase = passphrase.expect("checked above");
+        let phrase = passphrase.ok_or_else(|| {
+            anyhow::anyhow!("a non-empty passphrase is required when encryption is enabled")
+        })?;
         encrypt::encrypt(&archive_buf, phrase).context("backup encryption failed")?
     } else {
         archive_buf
@@ -195,10 +197,17 @@ pub fn create_backup(
 
     // Atomic write: write to .tmp then rename.
     let tmp = filepath.with_extension("tmp");
-    std::fs::write(&tmp, &payload)
-        .with_context(|| format!("failed to write backup to {}", tmp.display()))?;
-    std::fs::rename(&tmp, &filepath)
-        .with_context(|| format!("failed to rename backup file to {}", filepath.display()))?;
+    let write_result = (|| -> Result<()> {
+        std::fs::write(&tmp, &payload)
+            .with_context(|| format!("failed to write backup to {}", tmp.display()))?;
+        std::fs::rename(&tmp, &filepath)
+            .with_context(|| format!("failed to rename backup file to {}", filepath.display()))?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    write_result?;
 
     info!(
         path = %filepath.display(),

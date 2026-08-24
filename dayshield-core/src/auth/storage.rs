@@ -20,6 +20,7 @@
 //! ```
 
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::auth::model::{AuthError, User};
 
@@ -129,16 +130,27 @@ pub fn save_user(path: &Path, user: &User) -> Result<(), AuthError> {
     // Write to a temporary sibling file with restricted permissions, then
     // rename atomically so the admin credentials file is owner-read/write only.
     let tmp_path = {
-        let mut name = path.file_name().unwrap_or_default().to_os_string();
-        name.push(".tmp");
-        path.with_file_name(name)
+        let name = path.file_name().ok_or_else(|| {
+            AuthError::StorageError(format!("invalid auth file path: {}", path.display()))
+        })?;
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        path.with_file_name(format!("{}.{}.{}.tmp", name.to_string_lossy(), std::process::id(), nonce))
     };
 
-    write_restricted_auth(&tmp_path, json.as_bytes())
-        .map_err(|e| AuthError::StorageError(format!("write tmp file: {e}")))?;
+    let write_result = write_restricted_auth(&tmp_path, json.as_bytes())
+        .map_err(|e| AuthError::StorageError(format!("write tmp file: {e}")))
+        .and_then(|_| {
+            std::fs::rename(&tmp_path, path)
+                .map_err(|e| AuthError::StorageError(format!("atomic rename: {e}")))
+        });
 
-    std::fs::rename(&tmp_path, path)
-        .map_err(|e| AuthError::StorageError(format!("atomic rename: {e}")))?;
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    write_result?;
 
     Ok(())
 }

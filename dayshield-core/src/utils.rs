@@ -164,12 +164,22 @@ pub mod fs {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create directory {}", parent.display()))?;
         }
-        let tmp = PathBuf::from(format!("{}.tmp", path.display()));
-        std::fs::write(&tmp, contents)
-            .with_context(|| format!("Failed to write temp file {}", tmp.display()))?;
-        std::fs::rename(&tmp, path)
-            .with_context(|| format!("Failed to rename {} to {}", tmp.display(), path.display()))?;
-        Ok(())
+        let tmp = path.with_extension(format!(
+            "{}.{}.tmp",
+            path.extension().and_then(|ext| ext.to_str()).unwrap_or("file"),
+            std::process::id()
+        ));
+        let result = (|| -> Result<()> {
+            std::fs::write(&tmp, contents)
+                .with_context(|| format!("Failed to write temp file {}", tmp.display()))?;
+            std::fs::rename(&tmp, path)
+                .with_context(|| format!("Failed to rename {} to {}", tmp.display(), path.display()))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result
     }
 
     /// Create a backup copy of `path` at `<path>.bak`.

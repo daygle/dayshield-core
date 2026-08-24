@@ -59,19 +59,17 @@ const QUERY_TOKEN_ALLOWED_PATHS: &[&str] = &["/logs/ws", "/logs/live", "/live-lo
 
 /// Returns `true` if `path` is on the public allow-list.
 fn is_public_path(path: &str) -> bool {
-    let lower = path.to_lowercase();
-    PUBLIC_PATHS.iter().any(|exact| lower == *exact)
+    PUBLIC_PATHS.iter().any(|exact| path.eq_ignore_ascii_case(exact))
         || PUBLIC_PREFIXES
             .iter()
-            .any(|prefix| lower.starts_with(prefix))
+            .any(|prefix| path.len() >= prefix.len() && path[..prefix.len()].eq_ignore_ascii_case(prefix))
 }
 
 /// Returns `true` when a route is allowed to accept query-string token auth.
 fn allows_query_token(path: &str) -> bool {
-    let lower = path.to_lowercase();
     QUERY_TOKEN_ALLOWED_PATHS
         .iter()
-        .any(|exact| lower == *exact)
+        .any(|exact| path.eq_ignore_ascii_case(exact))
 }
 
 // ---------------------------------------------------------------------------
@@ -81,7 +79,14 @@ fn allows_query_token(path: &str) -> bool {
 /// Try to extract a bearer token from the `Authorization` header.
 fn token_from_header(req: &Request) -> Option<String> {
     let value = req.headers().get(header::AUTHORIZATION)?.to_str().ok()?;
-    let token = value.strip_prefix("Bearer ")?;
+    let mut parts = value.split_ascii_whitespace();
+    if !parts.next()?.eq_ignore_ascii_case("Bearer") || parts.next().is_none() {
+        return None;
+    }
+    let token = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
     Some(token.to_string())
 }
 

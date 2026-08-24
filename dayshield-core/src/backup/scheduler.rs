@@ -127,12 +127,12 @@ async fn scheduler_loop(state: Arc<AppState>) {
             continue;
         }
 
-        let now = std::time::SystemTime::now()
+            let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
-        let interval_secs = cfg.interval_hours * 3600;
+        let interval_secs = u64::from(cfg.interval_hours).saturating_mul(3600);
         if now.saturating_sub(last_backup_at) < interval_secs {
             continue;
         }

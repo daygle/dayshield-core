@@ -4,6 +4,7 @@
 //! plain), verifies the SHA-256 integrity digest, and atomically replaces the
 //! appropriate config sections via [`ConfigStore`].
 
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::Path;
 
@@ -54,14 +55,18 @@ pub fn restore_backup(
 
     let mut metadata: Option<BackupMetadata> = None;
     let mut config_entries: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut seen_paths = HashSet::new();
 
     for entry in archive.entries().context("failed to read TAR entries")? {
         let mut entry = entry.context("failed to read TAR entry")?;
-        let path_str = entry
-            .path()
-            .context("failed to read entry path")?
-            .to_string_lossy()
-            .into_owned();
+        let path = entry.path().context("failed to read entry path")?;
+        if path.is_absolute() || path.components().any(|component| matches!(component, std::path::Component::ParentDir)) {
+            anyhow::bail!("backup contains unsafe TAR path: {}", path.display());
+        }
+        let path_str = path.to_str().ok_or_else(|| anyhow::anyhow!("backup contains a non-UTF-8 TAR path"))?.to_owned();
+        if !seen_paths.insert(path_str.clone()) {
+            anyhow::bail!("backup contains duplicate TAR entry: {path_str}");
+        }
 
         let mut data = Vec::new();
         entry
@@ -74,10 +79,19 @@ pub fn restore_backup(
             metadata = Some(m);
         } else if path_str.starts_with("config/") {
             config_entries.push((path_str, data));
+        } else {
+            anyhow::bail!("backup contains unexpected TAR entry: {path_str}");
         }
     }
 
     let metadata = metadata.ok_or_else(|| anyhow::anyhow!("backup is missing metadata.json"))?;
+    let declared_paths: HashSet<&str> = metadata.subsystems.iter().map(Subsystem::archive_path).collect();
+    if config_entries.iter().any(|(path, _)| !declared_paths.contains(path.as_str())) {
+        anyhow::bail!("backup contains a config entry not declared by metadata");
+    }
+    if config_entries.len() != declared_paths.len() {
+        anyhow::bail!("backup metadata and config entries do not match");
+    }
 
     // -- Verify integrity --------------------------------------------------
     // Sort by path (same order used during creation) and concatenate bytes.

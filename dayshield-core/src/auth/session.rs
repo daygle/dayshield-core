@@ -20,6 +20,7 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use rand::{Rng, RngExt};
@@ -142,7 +143,7 @@ pub fn create_token_with_lifetime(
     let claims = SessionClaims {
         sub: username.to_string(),
         iat: now_secs,
-        exp: now_secs + lifetime_secs,
+        exp: now_secs.saturating_add(lifetime_secs),
     };
 
     encode(
@@ -163,8 +164,14 @@ pub fn create_token_with_lifetime(
 /// - [`AuthError::TokenExpired`] when the token has passed its `exp` claim.
 /// - [`AuthError::TokenInvalid`] for any other decode/verification failure.
 pub fn validate_token(token: &str, key: &[u8]) -> Result<SessionClaims, AuthError> {
-    let mut validation = Validation::default(); // HS256
+    if key.is_empty() {
+        return Err(AuthError::TokenInvalid);
+    }
+
+    let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
     validation.validate_exp = true;
+    validation.required_spec_claims.insert("exp".to_string());
+    validation.required_spec_claims.insert("sub".to_string());
 
     decode::<SessionClaims>(token, &DecodingKey::from_secret(key), &validation)
         .map(|data| data.claims)
@@ -190,8 +197,8 @@ mod tests {
     }
 
     fn now() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs()
     }

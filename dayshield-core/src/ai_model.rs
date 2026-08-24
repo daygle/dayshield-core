@@ -451,7 +451,14 @@ impl LocalLogisticModel {
             .zip(features.iter())
             .map(|(w, f)| w * f)
             .sum();
-        1.0 / (1.0 + (-raw).exp())
+        // Avoid overflow in exp for malformed or unusually large persisted
+        // feature values while preserving the sigmoid's limiting behaviour.
+        if raw >= 0.0 {
+            1.0 / (1.0 + (-raw).exp())
+        } else {
+            let exp = raw.exp();
+            exp / (1.0 + exp)
+        }
     }
 
     fn set_learning_rate(&mut self, learning_rate: f64) -> Result<()> {
@@ -483,10 +490,21 @@ impl LocalLogisticModel {
             learning_rate: self.learning_rate,
         };
         let raw = serde_json::to_string_pretty(&state)?;
-        let mut file = fs::File::create(&self.path)
-            .with_context(|| format!("failed to open {} for writing", self.path.display()))?;
-        file.write_all(raw.as_bytes())?;
-        Ok(())
+        let tmp_path = self.path.with_extension("json.tmp");
+        let write_result = (|| -> Result<()> {
+            let mut file = fs::File::create(&tmp_path)
+                .with_context(|| format!("failed to open {} for writing", tmp_path.display()))?;
+            file.write_all(raw.as_bytes())?;
+            file.sync_all()?;
+            fs::rename(&tmp_path, &self.path).with_context(|| {
+                format!("failed to replace model file {}", self.path.display())
+            })?;
+            Ok(())
+        })();
+        if write_result.is_err() {
+            let _ = fs::remove_file(&tmp_path);
+        }
+        write_result
     }
 
     fn reset_to_default_weights(&mut self) {
